@@ -287,7 +287,10 @@ pub fn runner_job_spec(spec: &CheckJobSpec) -> RunnerJobSpec {
 pub fn build(spec: &CheckJobSpec) -> Job {
     let mut job = job::build(&runner_job_spec(spec));
     let labels = spec.labels();
-    job.metadata.labels = Some(labels.clone());
+    job.metadata
+        .labels
+        .get_or_insert_with(Default::default)
+        .extend(labels.clone());
     if let Some(job_spec) = job.spec.as_mut() {
         let mut meta = job_spec.template.metadata.take().unwrap_or_default();
         // The pod template's labels and the Job's are the same map: the

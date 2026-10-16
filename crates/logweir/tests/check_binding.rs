@@ -19,6 +19,7 @@ fn plan() -> ConnectionPlan {
         client_cert_file: None,
         client_key_file: None,
         principal: "User:logweir".into(),
+        schema_registry: None,
     }
 }
 

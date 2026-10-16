@@ -40,12 +40,12 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/schedules";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/schedules";
 /// The create route identifier.
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/schedules";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/schedules";
 /// The command route identifier.
 pub const ROUTE_SET_SUSPENSION: &str =
-    "POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension";
+    "POST /api/v1/workspaces/{ws}/schedules/{name}:set-suspension";
 /// The command suffix.
 pub const SET_SUSPENSION: &str = ":set-suspension";
 /// The field-error code for an expression the cadence engine cannot read.
@@ -68,13 +68,13 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadSchedules)?;
+    authorize(&state, &actor, &ws, Action::ReadSchedules)?;
     let query = list_query(uri.query())?;
     let (items, page) =
-        list_page::<BackupSchedule>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+        list_page::<BackupSchedule>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &ScheduleList {
@@ -90,12 +90,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadSchedules)?;
+    authorize(&state, &actor, &ws, Action::ReadSchedules)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<BackupSchedule>(&state, &actor, &ns, &name).await?;
+    let object = get_object::<BackupSchedule>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &ScheduleResponse {
@@ -211,7 +211,6 @@ fn create_selection(request: &CreateScheduleRequest) -> TopicSelectionRequest {
 /// than writing an empty `archive.url`.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     annotations: BTreeMap<String, String>,
     request: &CreateScheduleRequest,
@@ -230,7 +229,6 @@ pub fn build(
     BackupSchedule {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             ..ObjectMeta::default()
         },
@@ -278,21 +276,59 @@ pub fn build(
     }
 }
 
+/// A body's connection and destination must be in the path's workspace
+/// (PROD-19.1 §4.1): the schedule create and edit, and the manual backup.
+pub(super) async fn refuse_references_elsewhere(
+    state: &AppState,
+    ws: &str,
+    source: Option<&NameRef>,
+    destination: Option<&NameRef>,
+) -> Result<(), ApiError> {
+    if let Some(source) = source {
+        super::refuse_reference_elsewhere::<weirkeeper::crds::kafka_cluster::KafkaCluster>(
+            state,
+            ws,
+            "sourceRef.name",
+            "connection",
+            &source.name,
+        )
+        .await?;
+    }
+    if let Some(destination) = destination {
+        super::refuse_reference_elsewhere::<weirkeeper::crds::backup_destination::BackupDestination>(
+            state,
+            ws,
+            "destinationRef.name",
+            "destination",
+            &destination.name,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// `POST .../schedules`.
 pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CreateSchedule)?;
+    authorize(&state, &actor, &ws, Action::CreateSchedule)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreateScheduleRequest = read_json(body, MAX_JSON_BODY).await?;
     validate_create(&request)?;
+    refuse_references_elsewhere(
+        &state,
+        &ws,
+        Some(&request.source_ref),
+        request.destination_ref.as_ref(),
+    )
+    .await?;
     // Canonical form: an omitted policy IS `Forbid`, so both spellings hash
     // identically and replay as one request.
     request.concurrency_policy = Some(
@@ -303,13 +339,13 @@ pub async fn create(
     let created = create_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         NAME_PREFIX,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request),
+        |name, annotations| build(name, annotations, &request),
     )
     .await?;
     Ok(json(
@@ -328,12 +364,12 @@ pub async fn command(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, target)): ApiPath<(String, String)>,
+    ApiPath((ws, target)): ApiPath<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::SetScheduleSuspension)?;
+    authorize(&state, &actor, &ws, Action::SetScheduleSuspension)?;
     let Some(name) = target.strip_suffix(SET_SUSPENSION) else {
         return Err(ApiError::new(ProblemCode::NotFound, "No such command."));
     };
@@ -355,7 +391,7 @@ pub async fn command(
     let updated = state
         .kube()
         .set_schedule_suspension(
-            &ns,
+            &ws,
             name,
             request.suspended,
             &request.expected_resource_version,
@@ -370,7 +406,7 @@ pub async fn command(
             other => other.into_api_error(),
         })?;
     tracing::info!(
-        namespace = %ns,
+        workspace = %ws,
         name,
         suspended = request.suspended,
         actor = %actor.id(),
@@ -389,7 +425,7 @@ pub async fn command(
 // THE EDITABLE FUTURE POLICY.
 
 /// The edit route identifier.
-pub const ROUTE_UPDATE: &str = "PUT /api/v1/namespaces/{ns}/schedules/{name}";
+pub const ROUTE_UPDATE: &str = "PUT /api/v1/workspaces/{ws}/schedules/{name}";
 
 /// The most named topics one schedule may carry, as on create.
 pub const MAX_TOPICS: usize = 256;
@@ -725,12 +761,12 @@ pub async fn update(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::EditSchedulePolicy)?;
+    authorize(&state, &actor, &ws, Action::EditSchedulePolicy)?;
     check_name(&name)?;
     crate::http::parse_query(uri.query(), &[])?;
     // AN EDIT IS NOT A DURABLE CREATE. It has a precondition instead: the same
@@ -740,7 +776,7 @@ pub async fn update(
     IdempotencyKey::refuse_on(&headers, ROUTE_UPDATE, Some("expectedGeneration"))?;
     let request: UpdateSchedulePolicyRequest = read_json(body, MAX_JSON_BODY).await?;
 
-    let current = get_object::<BackupSchedule>(&state, &actor, &ns, &name).await?;
+    let current = get_object::<BackupSchedule>(&state, &actor, &ws, &name).await?;
     // THE PRECONDITION BEFORE ANY FIELD RULE (DUI-2): an edit written against
     // an older generation is 412 whatever its fields say, so a stale tab is
     // sent to read the schedule again, not to fix a field.
@@ -757,6 +793,7 @@ pub async fn update(
         ));
     }
     validate_update(&request)?;
+    refuse_references_elsewhere(&state, &ws, None, request.destination_ref.as_ref()).await?;
     let version = current
         .metadata
         .resource_version
@@ -801,7 +838,7 @@ pub async fn update(
 
     let updated = state
         .kube()
-        .set_schedule_policy(&ns, &name, &edit, &version)
+        .set_schedule_policy(&ws, &name, &edit, &version)
         .await
         .map_err(|failure| match failure {
             // THE OBJECT MOVED BETWEEN THE READ AND THE WRITE. The generation
@@ -814,7 +851,7 @@ pub async fn update(
             other => other.into_api_error(),
         })?;
     tracing::info!(
-        namespace = %ns,
+        workspace = %ws,
         name = %name,
         from_generation = generation,
         to_generation = updated.metadata.generation.unwrap_or_default(),

@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use http::Request;
 use http_body_util::BodyExt as _;
-use logweir_api::auth::ratelimit::STREAMS_PER_ACTOR_NAMESPACE;
+use logweir_api::auth::ratelimit::STREAMS_PER_ACTOR_WORKSPACE;
 use logweir_api::status::{set_stream_bounds_for_test, StreamBounds};
 use serde_json::{json, Value};
 use support::{repo_root, FakeKube, Options, TestApp, HOST};
@@ -59,14 +59,14 @@ fn app(namespace: &str) -> TestApp {
     TestApp::with(
         fake,
         Options {
-            namespaces: vec![namespace.to_string()],
+            workspaces: vec![namespace.to_string()],
             ..Options::default()
         },
     )
 }
 
 fn events_path(namespace: &str) -> String {
-    format!("/api/v1/namespaces/{namespace}/operations/backup/held/events")
+    format!("/api/v1/workspaces/{namespace}/operations/backup/held/events")
 }
 
 async fn open_without_reading(app: &TestApp, namespace: &str) -> axum::response::Response {
@@ -104,7 +104,7 @@ async fn open_without_reading(app: &TestApp, namespace: &str) -> axum::response:
 async fn a_client_that_never_reads_releases_its_slot_at_the_ceiling() {
     let app = app(NS_HELD);
     let mut held = Vec::new();
-    for _ in 0..STREAMS_PER_ACTOR_NAMESPACE {
+    for _ in 0..STREAMS_PER_ACTOR_WORKSPACE {
         held.push(open_without_reading(&app, NS_HELD).await);
     }
     // The ceiling is full: the next subscribe is refused.

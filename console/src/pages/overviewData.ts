@@ -32,7 +32,7 @@ export function freshestPoint(policies: ProtectionPolicy[], now: number): Freshe
 /** A catalog's newest selectable point, as the Overview reads it. */
 export type CatalogPoint = { catalog: string; point: PointView };
 
-/** Where the namespace's newest recovery point was found. Only a policy's point has an objective. */
+/** Where the workspace's newest recovery point was found. Only a policy's point has an objective. */
 export type NewestPoint =
   | { kind: "policy"; ageSeconds: number; verified: boolean; policy: ProtectionPolicy; withinObjective: boolean }
   | { kind: "backup"; ageSeconds: number; verified: true; backup: Backup }
@@ -44,11 +44,11 @@ function msOf(value: string | null | undefined): number {
 }
 
 /**
- * DUI-3: the newest recovery point the namespace HOLDS, not only the one a protection
+ * DUI-3: the newest recovery point the workspace HOLDS, not only the one a protection
  * policy names. Candidates: each policy's newest available point (judged by its own
  * objective), every Backup the controller verified (aged from its creation, which
  * precedes its capture start, so never younger than it is), and each catalog's
- * newest selectable point. A namespace with no policy but verified backups has a
+ * newest selectable point. A workspace with no policy but verified backups has a
  * point; "none" is said only when no source holds one.
  */
 export function newestPoint(policies: ProtectionPolicy[], backups: Backup[], catalogPoints: CatalogPoint[], now: number): NewestPoint | undefined {

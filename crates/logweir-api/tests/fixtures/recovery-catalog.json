@@ -4,7 +4,8 @@
   "metadata": {
     "generation": 1,
     "name": "primary",
-    "namespace": "team-a"
+    "namespace": "team-a",
+    "uid": "catalog-primary-uid"
   },
   "spec": {
     "destinationRef": {

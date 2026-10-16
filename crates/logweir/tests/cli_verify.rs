@@ -11,7 +11,9 @@ fn schema_scorecard_prints_the_schema() {
     assert!(
         s.contains(&format!(
             r#""$id": "https://logweir.dev/schemas/logweir-drill-scorecard-{}.json""#,
-            // The newest version (2.4.0: a partition-subset restore that
+            // The newest version (2.5.0: a partition-subset restore that
+            // imported or did not import schemas, PROD-03.2; 1.13.0 for any
+            // other). Before it 2.4.0: a partition-subset restore that
             // mapped consumer positions, PROD-04.2; 1.12.0 for any other such
             // restore). Before it, 2.3.0 for a partition-subset restore whose
             // plan carries `target.topic_configuration` (PROD-05.2) and 1.11.0
@@ -24,7 +26,7 @@ fn schema_scorecard_prints_the_schema() {
             // original topic names, 1.7.0 for one that states a window start
             // only, 1.6.0 for every other sampled drill, and 1.4.0/1.5.0 for a
             // complete one.
-            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING
+            logweir_core::scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS
         )),
         "{s}"
     );
@@ -510,11 +512,21 @@ fn the_signed_receipt_fixture_verifies() {
     // `the_signature_only_verdict_is_still_reachable` below keeps the weaker
     // sentence honest for the two document types that still get it.
     assert!(
-        stdout.contains("the signature AND all forty-five backup-receipt invariants"),
+        stdout.contains("the signature AND all forty-nine backup-receipt invariants"),
         "an exit 0 that checked the invariants must say so on stdout (twenty-nine since \
          PROD-03.0's eight schema_dependency arms, forty since PROD-04.1's six \
          consumer_positions arms and PROD-01.4a's five generations arms, forty-five since \
-         PROD-02.1's five source_watermarks arms), got: {stdout}"
+         PROD-02.1's five source_watermarks arms, forty-nine since PROD-03.1's four \
+         schema_registry arms), got: {stdout}"
+    );
+    // SR-10: the checked-in receipt predates schema_registry, so its registry
+    // reads NOT CAPTURED — never captured.
+    assert!(
+        stdout.contains(
+            "schema_registry: registry not captured: this receipt holds no schema \
+             snapshot"
+        ),
+        "a receipt without schema_registry must read registry not captured, got: {stdout}"
     );
     // The checked-in receipt predates source_watermarks, so
     // its coverage reads NOT RECORDED — never complete.

@@ -1,5 +1,5 @@
 // One Restore's approval: the facts an approver needs to decide, and the one
-// action the namespace's mode takes (OD-8):
+// action the workspace's mode takes (OD-8):
 //   two-person  Approve: the second person's click, with the request and its whole
 //               scope (every topic, the window, the target, the plan hash) shown first;
 //   strict      Countersign: the console's confirmation to copy, the command, and
@@ -131,7 +131,7 @@ function StateLine({ found, subject, approvalError, showAbsent = false }: { foun
 }
 
 /** The subject as read from the Restore, for every mode but two-person. */
-function SubjectCard({ ns, restore, subject, mode, computed }: { ns: string; restore: Restore; subject: Subject; mode: string; computed: boolean }) {
+function SubjectCard({ ws, restore, subject, mode, computed }: { ws: string; restore: Restore; subject: Subject; mode: string; computed: boolean }) {
   return (
     <Card>
       <CardHeader>
@@ -143,7 +143,7 @@ function SubjectCard({ ns, restore, subject, mode, computed }: { ns: string; res
         </Content>
         <DescriptionList isCompact orientation={{ md: "horizontal" }} horizontalTermWidthModifier={{ default: "14ch" }} className="lw-gap-top lw-approval-facts">
           <Term term="Restore">
-            <Link to="/$ns/restores/$name" params={{ ns, name: restore.name }}>
+            <Link to="/$ws/restores/$name" params={{ ws, name: restore.name }}>
               {restore.name}
             </Link>
           </Term>
@@ -256,7 +256,7 @@ function RequestCard({ request, grant }: { request: ApprovalRequest; grant: Appr
   );
 }
 
-function MismatchRefusal({ ns, subject, mismatches }: { ns: string; subject: Subject; mismatches: Mismatch[] }) {
+function MismatchRefusal({ ws, subject, mismatches }: { ws: string; subject: Subject; mismatches: Mismatch[] }) {
   return (
     <Refusal title={`This link does not match Restore ${subject.name}, so nothing will be submitted from it`} id="route-mismatch">
       <ul className="lw-plain-list">
@@ -268,7 +268,7 @@ function MismatchRefusal({ ns, subject, mismatches }: { ns: string; subject: Sub
       </ul>
       <p>
         Open the Restore&apos;s own approval page instead:{" "}
-        <Link to="/$ns/approvals/$name" params={{ ns, name: subject.name }} search={{}}>
+        <Link to="/$ws/approvals/$name" params={{ ws, name: subject.name }} search={{}}>
           {subject.name}
         </Link>
         .
@@ -278,33 +278,33 @@ function MismatchRefusal({ ns, subject, mismatches }: { ns: string; subject: Sub
 }
 
 export function ApprovalPage() {
-  const { ns, name } = useParams({ from: "/$ns/approvals/$name" });
-  const claim = useSearch({ from: "/$ns/approvals/$name" }) as RouteClaim;
+  const { ws, name } = useParams({ from: "/$ws/approvals/$name" });
+  const claim = useSearch({ from: "/$ws/approvals/$name" }) as RouteClaim;
   // One page per subject: what was approved here, and the click's own state,
   // never carry over to the next Restore's page.
-  return <SubjectPage key={`${ns}/${name}`} ns={ns} name={name} claim={claim} />;
+  return <SubjectPage key={`${ws}/${name}`} ws={ws} name={name} claim={claim} />;
 }
 
-function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: RouteClaim }) {
-  const grant = useApprovalGrant(ns);
-  const policyQ = useApprovalPolicy(ns, grant.approvalsRead);
-  const restoreQ = useSubjectRestore(ns, name, grant.restoresRead);
+function SubjectPage({ ws, name, claim }: { ws: string; name: string; claim: RouteClaim }) {
+  const grant = useApprovalGrant(ws);
+  const policyQ = useApprovalPolicy(ws, grant.approvalsRead);
+  const restoreQ = useSubjectRestore(ws, name, grant.restoresRead);
   const restore = restoreQ.data;
   const hash = usePlanHash(restore);
   const subject = restore && hash ? subjectOf(restore, hash) : null;
   const approvalName = restore?.approvalRef.name ?? claim.approval ?? "";
-  const approvalQ = useApproval(ns, approvalName, grant.approvalsRead && restoreQ.isSuccess);
+  const approvalQ = useApproval(ws, approvalName, grant.approvalsRead && restoreQ.isSuccess);
   const policy = policyQ.data;
   const mode = policy ? approvalMode(policy) : null;
-  const requestQ = useApprovalRequest(ns, name, mode === "twoPerson" && Boolean(restore) && policy?.consoleApprovalAvailable === true);
-  const confirmationQ = useApprovalPacket(ns, confirmationNameFor(approvalName), mode === "strict" && Boolean(restore) && grant.approvalPacketRead);
-  const typedQ = useApprovalPacket(ns, approvalName, approvalQ.data?.approvalSubject === "originalName" && grant.approvalPacketRead);
-  const approve = useConsoleApproval(ns);
+  const requestQ = useApprovalRequest(ws, name, mode === "twoPerson" && Boolean(restore) && policy?.consoleApprovalAvailable === true);
+  const confirmationQ = useApprovalPacket(ws, confirmationNameFor(approvalName), mode === "strict" && Boolean(restore) && grant.approvalPacketRead);
+  const typedQ = useApprovalPacket(ws, approvalName, approvalQ.data?.approvalSubject === "originalName" && grant.approvalPacketRead);
+  const approve = useConsoleApproval(ws);
   const [written, setWritten] = useState<Written | null>(null);
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/approvals" params={{ ns }}>Approvals</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/approvals" params={{ ws }}>Approvals</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -326,7 +326,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
         <PageSection>
           <Card>
             <Empty title="You can't read this approval" icon={SearchIcon}>
-              Your sign-in holds no role in {ns} that reads restores and approvals.
+              Your sign-in holds no role in {ws} that reads restores and approvals.
             </Empty>
           </Card>
         </PageSection>
@@ -352,7 +352,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
             <StackItem>
               <Card>
                 <Empty title={`No Restore named ${name}`} icon={SearchIcon}>
-                  No Restore named {name} exists in namespace {ns}, so there is nothing to approve and no form is offered. An approval is recorded for a Restore that exists.
+                  No Restore named {name} exists in workspace {ws}, so there is nothing to approve and no form is offered. An approval is recorded for a Restore that exists.
                 </Empty>
               </Card>
             </StackItem>
@@ -375,13 +375,13 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
   const blocked = mismatches.length > 0 || hashDisagrees;
 
   const status = found ? <ApprovalStatus found={found} waiting /> : <StatusLabel tone="neutral" text={approvalQ.isPending ? "Reading" : "State unknown"} />;
-  const description = policy ? `${MODE_WORDS[approvalMode(policy)]} · policy ${policy.name}` : "The namespace's approval policy could not be read.";
+  const description = policy ? `${MODE_WORDS[approvalMode(policy)]} · policy ${policy.name}` : "The workspace's approval policy could not be read.";
 
   const refusals = (
     <>
       {mismatches.length > 0 && (
         <StackItem>
-          <MismatchRefusal ns={ns} subject={subject} mismatches={mismatches} />
+          <MismatchRefusal ws={ws} subject={subject} mismatches={mismatches} />
         </StackItem>
       )}
       {hashDisagrees && (
@@ -399,7 +399,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
     body = (
       <>
         <StackItem>
-          <SubjectCard ns={ns} restore={restore} subject={subject} mode="unknown" computed={typeof restore.planBytes === "string"} />
+          <SubjectCard ws={ws} restore={restore} subject={subject} mode="unknown" computed={typeof restore.planBytes === "string"} />
         </StackItem>
         <StackItem>
           <Card>
@@ -409,7 +409,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
             <CardBody>
               <ErrorState error={policyQ.error ?? new Error("The approval policy could not be read.")} onRetry={() => void policyQ.refetch()} />
               <Content component="p" className="lw-subtle">
-                Without the namespace&apos;s policy this page cannot say how this restore is approved, so it offers nothing.
+                Without the workspace&apos;s policy this page cannot say how this restore is approved, so it offers nothing.
               </Content>
             </CardBody>
           </Card>
@@ -456,7 +456,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
       decision = (
         <Refusal title={readerOnly ? "Not offered to you" : (REFUSAL_TITLE[request.approve.refusal ?? ""] ?? "Not offered to you")} id="approve-not-offered">
           {readerOnly
-            ? "This login may read the request and not approve it: that needs the approver role in this namespace, held by someone other than the requester."
+            ? "This login may read the request and not approve it: that needs the approver role in this workspace, held by someone other than the requester."
             : <Prose text={request.approve.sentence || "This login is not offered an approval for this request."} />}
         </Refusal>
       );
@@ -478,7 +478,7 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
           {request ? (
             <RequestCard request={request} grant={grant} />
           ) : (
-            <SubjectCard ns={ns} restore={restore} subject={subject} mode={mode} computed={typeof restore.planBytes === "string"} />
+            <SubjectCard ws={ws} restore={restore} subject={subject} mode={mode} computed={typeof restore.planBytes === "string"} />
           )}
         </StackItem>
         {request && request.state !== "notConfirmed" && typeof request.requester === "string" && (
@@ -538,10 +538,10 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
             <LoadingRows rows={2} label="Reading the console's confirmation" />
           ) : grant.approvalPacketRead && confirmationQ.data === null ? (
             <Refusal title="Nothing to countersign" id="no-confirmation">
-              No console confirmation {confirmationNameFor(subject.approvalName)} exists for this Restore. A Restore submitted through the console carries one; a Restore written directly to the cluster in a governed namespace never runs.
+              No console confirmation {confirmationNameFor(subject.approvalName)} exists for this Restore. A Restore submitted through the console carries one; a Restore written directly to the cluster in a governed workspace never runs.
             </Refusal>
           ) : (
-            <CountersignForm ns={ns} subject={subject} packet={confirmationQ.data ?? null} onDone={setWritten} />
+            <CountersignForm ws={ws} subject={subject} packet={confirmationQ.data ?? null} onDone={setWritten} />
           )}
         </>
       );
@@ -550,16 +550,16 @@ function SubjectPage({ ns, name, claim }: { ns: string; name: string; claim: Rou
       const offered = pending && !blocked && subject.approvalName.length > 0 && (absent || approvalQ.isError);
       action = !offered ? null : !grant.approvalSubmit ? (
         <Refusal title="Not offered to you" id="files-read-only">
-          This login may read the approval and not record one: that needs the approver role in this namespace.
+          This login may read the approval and not record one: that needs the approver role in this workspace.
         </Refusal>
       ) : (
-        <ApprovalFilesForm ns={ns} subject={subject} onDone={setWritten} />
+        <ApprovalFilesForm ws={ws} subject={subject} onDone={setWritten} />
       );
     }
     body = (
       <>
         <StackItem>
-          <SubjectCard ns={ns} restore={restore} subject={subject} mode={mode} computed={typeof restore.planBytes === "string"} />
+          <SubjectCard ws={ws} restore={restore} subject={subject} mode={mode} computed={typeof restore.planBytes === "string"} />
         </StackItem>
         <StackItem>
           <Card id="decision">

@@ -165,10 +165,10 @@ export function Verdict({ preflight, groupsSelected = true }: { preflight: Prefl
 }
 
 /** `request` null: this draft cannot be checked yet, for the reason given. */
-export function Readiness({ ns, request, why, groupsSelected }: { ns: string; request: BackupCheck | null; why: string; groupsSelected: boolean }) {
-  const start = useStartReadiness(ns);
+export function Readiness({ ws, request, why, groupsSelected }: { ws: string; request: BackupCheck | null; why: string; groupsSelected: boolean }) {
+  const start = useStartReadiness(ws);
   const [asked, setAsked] = useState<{ id: string; key: string } | null>(null);
-  const preflight = usePreflight(ns, asked?.id);
+  const preflight = usePreflight(ws, asked?.id);
   const key = request ? JSON.stringify(request) : "";
   const outdated = asked !== null && asked.key !== key;
 

@@ -1,4 +1,4 @@
-//! `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` -- the read
+//! `GET /api/v1/workspaces/{ws}/protection-policies[/{name}]` -- the read
 //! half of protection health: is this data protected, and by when.
 //!
 //! THE THREE THINGS THIS PAGE EXISTS TO KEEP APART. "A schedule is enabled",
@@ -35,7 +35,7 @@ use crate::status::condition_view;
 use crate::validate::bounded;
 
 /// The cursor scope's route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/protection-policies";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/protection-policies";
 
 /// The most alerts, schedules and topics a response carries.
 pub const MAX_ROWS: usize = 16;
@@ -185,7 +185,7 @@ pub struct AlertView {
 pub struct ProtectionPolicyView {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -448,13 +448,13 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadProtectionPolicies)?;
+    authorize(&state, &actor, &ws, Action::ReadProtectionPolicies)?;
     let query = list_query(uri.query())?;
     let (items, page) =
-        list_page::<ProtectionPolicy>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+        list_page::<ProtectionPolicy>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &ProtectionPolicyList {
@@ -470,12 +470,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
     crate::http::parse_query(uri.query(), &[])?;
-    authorize(&state, &actor, &ns, Action::ReadProtectionPolicies)?;
-    let object = get_object::<ProtectionPolicy>(&state, &actor, &ns, &name).await?;
+    authorize(&state, &actor, &ws, Action::ReadProtectionPolicies)?;
+    let object = get_object::<ProtectionPolicy>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &ProtectionPolicyResponse {

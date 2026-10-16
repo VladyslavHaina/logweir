@@ -128,6 +128,8 @@ export interface PlanFields {
   topics: string[];
   pointInTime: string;
   timeBasis?: string | null;
+  /** PROD-00.3h: `restore.rate_limit_bytes_per_sec`, for the whole restore; absent is no limit. */
+  rateLimitBytesPerSec?: number | null;
   point?: PlanPointBinding;
   source: PlanStorage;
   target: {
@@ -145,6 +147,8 @@ export interface PlanFields {
     topicConfiguration?: { transition: "afterVerification" | "none"; owners?: DeclaredOwner[] } | null;
     originalName?: boolean;
     originalNameNoOwner?: boolean;
+    /** PROD-03.2: the target connection's Schema Registry; the controller refuses a plan that names another. */
+    schemaRegistry?: { url: string; username?: string } | null;
   };
   sample: {
     windowStart: string;
@@ -305,11 +309,24 @@ export function renderPlanBytes(fields: PlanFields): string {
     }
   }
 
+  const registry = target.schemaRegistry;
+  if (registry) {
+    out.push("  schema_registry:");
+    out.push(`    url: ${quote(needed(registry.url, "target.schemaRegistry.url"))}`);
+    if (registry.username) out.push(`    username: ${quote(registry.username)}`);
+  }
+
   // The recovery point: the window's END only. Its start is the archive's own floor.
   out.push("restore:");
   out.push(`  point_in_time: ${quote(needed(f.pointInTime, "pointInTime"))}`);
   const timeBasis = timeBasisOf(f.timeBasis);
   if (timeBasis !== null) out.push(`  time_basis: ${quote(timeBasis)}`);
+  const rate = f.rateLimitBytesPerSec;
+  if (rate !== undefined && rate !== null) {
+    const n = integer(rate, "rateLimitBytesPerSec");
+    if (Number(n) < 1) throw new TypeError(`rateLimitBytesPerSec must be at least 1, not ${String(rate)}`);
+    out.push(`  rate_limit_bytes_per_sec: ${n}`);
+  }
 
   out.push("sample:");
   out.push(`  window_start: ${quote(needed(sample.windowStart, "sample.windowStart"))}`);

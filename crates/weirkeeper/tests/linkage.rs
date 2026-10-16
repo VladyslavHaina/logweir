@@ -420,28 +420,44 @@ impl Drop for Overlay {
 
 // The Secret refusal
 
-/// The controller never reads a Secret: a source-level refusal, not a
+/// The controller never reads a Secret's data: a source-level refusal, not a
 /// permission and not a comment. A controller that reads a SCRAM password or a
 /// signing key directly is holding credential material it has no business
 /// holding; the credential goes to the Job, by reference, and the Job mounts
-/// it.
+/// it. The one Secret handle is the workspace gate's (`workspace.rs`), and it
+/// reads metadata only (PROD-19.1): its labels, never its data.
 #[test]
 fn the_controller_never_reads_a_secret() {
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut offenders = Vec::new();
     let mut files = 0usize;
+    let mut gate_reads = 0usize;
     walk(&src, &mut |path, text| {
         files += 1;
-        for needle in ["Api::<Secret>", "\"secrets\""] {
-            if text.contains(needle) {
+        let gate = path.ends_with("workspace.rs");
+        for needle in ["Api::<Secret>", "Api<Secret>", "\"secrets\""] {
+            if text.contains(needle) && !gate {
                 offenders.push(format!("{}: {needle}", path.display()));
+            }
+        }
+        if gate {
+            // One Secret handle, and its one call is the metadata read
+            // (`manifest_lint::weirkeeper_reads_secret_metadata_only` holds
+            // the method set across the crate).
+            gate_reads = text.matches("Api<Secret>").count();
+            if gate_reads != 1 || !text.contains("api.get_metadata_opt(&name)") {
+                offenders.push(format!(
+                    "{}: the gate's Secret read changed",
+                    path.display()
+                ));
             }
         }
     });
     assert!(files >= 3, "the walk must see src/, got {files} files");
+    assert!(gate_reads >= 1, "the gate's Secret read was not found");
     assert!(
         offenders.is_empty(),
-        "weirkeeper must not read Secrets: {offenders:?}"
+        "weirkeeper must not read Secrets' data: {offenders:?}"
     );
 }
 
@@ -603,6 +619,45 @@ fn weirkeeper_version_exits_zero() {
         stderr.contains("--reconcile-everything"),
         "the refusal must name what it got, got {stderr:?}"
     );
+}
+
+/// **PROD-19.1: no install, no controller.** Without the install's namespace,
+/// or with a workspace list that is absent or malformed, the binary refuses to
+/// start (exit 1) and names the variable, before any client is built.
+/// CONTROL: the start-up rows above set both and run.
+#[test]
+fn weirkeeper_refuses_to_start_without_its_namespace_and_workspaces() {
+    for (namespace, workspaces, named) in [
+        (None, Some("dev"), "LOGWEIR_INSTALLATION_NAMESPACE"),
+        (Some("logweir"), None, "LOGWEIR_WORKSPACES"),
+        (Some("logweir"), Some("dev,Dev"), "LOGWEIR_WORKSPACES"),
+        (Some("logweir"), Some("dev,dev"), "LOGWEIR_WORKSPACES"),
+    ] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_weirkeeper"));
+        cmd.env("RUST_LOG", "info")
+            .env("KUBECONFIG", "/nonexistent")
+            .env_remove("LOGWEIR_INSTALLATION_NAMESPACE")
+            .env_remove("LOGWEIR_WORKSPACES")
+            .env_remove("KUBERNETES_SERVICE_HOST")
+            .env_remove("KUBERNETES_SERVICE_PORT");
+        if let Some(n) = namespace {
+            cmd.env("LOGWEIR_INSTALLATION_NAMESPACE", n);
+        }
+        if let Some(w) = workspaces {
+            cmd.env("LOGWEIR_WORKSPACES", w);
+        }
+        let out = cmd.output().expect("the built binary runs");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(out.status.code(), Some(1), "{named}: {text}");
+        assert!(
+            text.contains("refusing to start") && text.contains(named),
+            "{named}: {text}"
+        );
+    }
 }
 
 /// `weirkeeper --help` exits 0 and prints one paragraph.
@@ -944,6 +999,8 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
         .env("KUBECONFIG", fixture.path())
         .env("LOGWEIR_HEALTH_ADDR", &health_addr)
+        .env("LOGWEIR_INSTALLATION_NAMESPACE", "logweir")
+        .env("LOGWEIR_WORKSPACES", "dev,prd")
         // The subscriber filters from RUST_LOG; `info` is what makes the
         // startup line and the SIGTERM line observable.
         .env("RUST_LOG", "info")
@@ -1108,6 +1165,8 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
     let broken = Fixture::write("proc-unresolvable", &unresolvable_kubeconfig());
     let out = Command::new(env!("CARGO_BIN_EXE_weirkeeper"))
         .env("KUBECONFIG", broken.path())
+        .env("LOGWEIR_INSTALLATION_NAMESPACE", "logweir")
+        .env("LOGWEIR_WORKSPACES", "dev,prd")
         .env("RUST_LOG", "info")
         .env_remove("KUBERNETES_SERVICE_HOST")
         .env_remove("KUBERNETES_SERVICE_PORT")

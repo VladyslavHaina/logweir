@@ -1,6 +1,6 @@
 {
   "item": {
-    "namespace": "team-a",
+    "workspace": "team-a",
     "name": "prod-pair",
     "mode": "governed",
     "legacy": false,

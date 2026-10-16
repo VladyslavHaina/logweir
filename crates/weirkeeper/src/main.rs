@@ -230,10 +230,10 @@ fn run() -> ExitCode {
     };
     info!(
         approval_policy_digest = %approval_policies.digest(),
-        bound_namespaces = ?approval_policies.bound_namespaces(),
+        bound_workspaces = ?approval_policies.bound_workspaces(),
         allow_ordinary_confirmation = approval_policies.allows_ordinary_confirmation(),
         default_mode = ?approval_policies.default_mode(),
-        "the approval policies this controller enforces; an unbound namespace is \
+        "the approval policies this controller enforces; an unbound workspace is \
          legacy-governed-v1 unless defaultMode or the fresh-install marker says confirm"
     );
     // Where the fresh-install marker is read: both variables or neither (the
@@ -257,33 +257,54 @@ fn run() -> ExitCode {
         image_pull_policy: runner_pull_policy,
     };
 
-    // The namespaces this process watches and acts in. Unset or empty is the
-    // whole cluster; a list scopes every namespaced reconciler and every
-    // cross-object read to it, as the chart's per-namespace RoleBindings require
-    // (`weirkeeper::scope`). A malformed list refuses to start rather than leave
-    // a namespace silently unreconciled.
-    let scope = match weirkeeper::scope::configured(std::env::var(
-        weirkeeper::scope::WATCH_NAMESPACES_ENV,
+    // The install: one namespace, where every watch runs and every object
+    // lives, and the workspaces inside it (PROD-19.1). Both are required; a
+    // malformed list, or an approval binding naming a workspace the list does
+    // not, refuses to start rather than leave objects unreconciled.
+    let Some(install_namespace) =
+        std::env::var(weirkeeper::check::policy::INSTALLATION_NAMESPACE_ENV)
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+    else {
+        error!(
+            env = weirkeeper::check::policy::INSTALLATION_NAMESPACE_ENV,
+            "refusing to start: the install's namespace is not set"
+        );
+        return ExitCode::FAILURE;
+    };
+    let workspaces = match weirkeeper::workspace::Workspaces::configured(std::env::var(
+        weirkeeper::workspace::WORKSPACES_ENV,
     )) {
-        Ok(scope) => scope,
+        Ok(workspaces) => workspaces,
         Err(message) => {
-            error!(error = %message, "refusing to start: the watched-namespace list is malformed");
+            error!(error = %message, "refusing to start: the workspace list is malformed");
             return ExitCode::FAILURE;
         }
     };
-    match &scope {
-        weirkeeper::scope::WatchScope::Cluster => info!(
-            env = weirkeeper::scope::WATCH_NAMESPACES_ENV,
-            "watching every namespace (the cluster-wide default)"
-        ),
-        weirkeeper::scope::WatchScope::Namespaces(namespaces) => info!(
-            env = weirkeeper::scope::WATCH_NAMESPACES_ENV,
-            namespaces = %namespaces.join(","),
-            "watching and acting in these namespaces only; cluster-scoped trust kinds are still \
-             read cluster-wide"
-        ),
+    if let Some(unlisted) = approval_policies
+        .effective()
+        .bound_workspaces()
+        .into_iter()
+        .find(|bound| !workspaces.list().iter().any(|w| w.as_str() == bound))
+    {
+        error!(
+            workspace = %unlisted,
+            "refusing to start: the approval policy binds a workspace that is not in {}",
+            weirkeeper::workspace::WORKSPACES_ENV
+        );
+        return ExitCode::FAILURE;
     }
-    weirkeeper::scope::init(scope);
+    info!(
+        namespace = %install_namespace,
+        workspaces = %workspaces
+            .list()
+            .iter()
+            .map(weirkeeper::workspace::Workspace::as_str)
+            .collect::<Vec<_>>()
+            .join(","),
+        "watching one namespace; cluster-scoped trust kinds are read cluster-wide"
+    );
+    weirkeeper::workspace::install(install_namespace, workspaces);
 
     // The health listener's address. The decision is
     // `weirkeeper::health::configured_addr`; a non-loopback address refuses to

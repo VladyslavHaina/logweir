@@ -1,4 +1,4 @@
-//! The structured audit record: who asked for what, in which namespace, and
+//! The structured audit record: who asked for what, in which workspace, and
 //! whether it was allowed.
 //!
 //! ONE RECORD PER REQUEST, EMITTED ONCE, AT THE END. The audit middleware puts
@@ -74,10 +74,10 @@ pub struct AuditRecord {
     pub session_id_hash: String,
     /// The revision of the role-binding configuration this decision used.
     pub binding_revision: String,
-    /// The roles the actor held in `namespace`, sorted.
+    /// The roles the actor held in `workspace`, sorted.
     pub roles: Vec<String>,
-    /// The namespace, when the route has one.
-    pub namespace: String,
+    /// The workspace, when the route has one.
+    pub workspace: String,
     /// The product action.
     pub action: String,
     /// The product resource, `<kind>/<name>` when known.
@@ -86,7 +86,7 @@ pub struct AuditRecord {
     pub decision: String,
     /// The approval policy identity/digest, when a decision consulted one:
     /// `<policy name>@<snapshot digest>`, or `legacy-governed-v1` for an
-    /// unbound namespace.
+    /// unbound workspace.
     pub policy_digest: String,
     /// The SHA-256 of the idempotency scope. The raw key never appears.
     pub idempotency_key_hash: String,
@@ -184,18 +184,18 @@ impl AuditContext {
         });
     }
 
-    /// Record which namespace and action the route asked about, and which
+    /// Record which workspace and action the route asked about, and which
     /// roles and binding revision decided it.
     pub fn set_decision(
         &self,
-        namespace: &str,
+        workspace: &str,
         action: &str,
         roles: &[String],
         binding_revision: &str,
         decision: Decision,
     ) {
         self.with(|f| {
-            f.record.namespace = crate::validate::bounded(namespace, 253);
+            f.record.workspace = crate::validate::bounded(workspace, 253);
             f.record.action = action.to_string();
             f.record.roles = roles.to_vec();
             f.record.binding_revision = crate::validate::bounded(binding_revision, 128);
@@ -203,7 +203,7 @@ impl AuditContext {
         });
     }
 
-    /// Record the action alone, for routes with no namespace.
+    /// Record the action alone, for routes with no workspace.
     pub fn set_action(&self, action: &str, decision: Decision) {
         self.with(|f| {
             f.record.action = action.to_string();
@@ -657,7 +657,7 @@ mod tests {
         assert!(out.ends_with("bearer [redacted]"), "{out}");
         assert!(redact(&"x".repeat(2000)).len() <= 520);
         // A value that merely CONTAINS a sensitive word is not mangled.
-        assert_eq!(redact("namespace=team-a"), "namespace=team-a");
+        assert_eq!(redact("workspace=team-a"), "workspace=team-a");
         assert_eq!(redact("decoded=ok"), "decoded=ok");
     }
 
@@ -686,7 +686,7 @@ mod tests {
 
     #[test]
     fn a_record_defaults_to_deny_and_a_failure_cannot_be_an_allow() {
-        let ctx = AuditContext::new("audit-1", "POST", "/api/v1/namespaces/team-a/restores");
+        let ctx = AuditContext::new("audit-1", "POST", "/api/v1/workspaces/team-a/restores");
         let blank = ctx.finish(500, 3);
         assert_eq!(blank.decision, "deny");
         assert_eq!(blank.failure_code, "http_500");
@@ -699,10 +699,10 @@ mod tests {
             Decision::Allow,
         );
         assert_eq!(ctx.finish(201, 4).decision, "allow");
-        ctx.set_failure("namespace_forbidden");
+        ctx.set_failure("workspace_forbidden");
         let denied = ctx.finish(404, 5);
         assert_eq!(denied.decision, "deny");
-        assert_eq!(denied.failure_code, "namespace_forbidden");
+        assert_eq!(denied.failure_code, "workspace_forbidden");
     }
 
     #[test]

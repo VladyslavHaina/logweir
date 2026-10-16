@@ -127,8 +127,8 @@ pub struct LocalRef {
 #[serde(rename_all = "camelCase")]
 pub struct RunQueue {
     /// The ceiling this run is queued behind: the installation policy's
-    /// `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or
-    /// `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run
+    /// `runs.maxManualBackupsActivePerWorkspace` (a `Backup`) or
+    /// `runs.maxManualRestoresActivePerWorkspace` (a `Restore`) when the run
     /// was queued.
     pub limit: i64,
     /// A queued `Restore`'s approval deadline: the signed
@@ -363,7 +363,7 @@ pub struct EvidenceObservation {
     pub mode: Option<String>,
     /// The evidence-fetch Job of the current attempt, once it exists. Absent
     /// while the run waits for a slot under
-    /// `checks.maxEvidenceFetchActivePerNamespace`.
+    /// `checks.maxEvidenceFetchActivePerWorkspace`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_ref: Option<ObservedJobRef>,
     /// Which attempt this is, from 1. A failed fetch is retried at +1 m,

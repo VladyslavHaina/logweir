@@ -274,6 +274,15 @@ pub fn admit(
             ),
         );
     };
+    // PROD-19.1: the switchover, its restore and its approval are in one
+    // workspace, one the install lists.
+    if let Err(refusal) = crate::workspace::installed()
+        .of(sw)
+        .map(|_| ())
+        .and_then(|()| crate::workspace::same(sw, restore))
+    {
+        return Admission::Refuse(refusal.reason(), refusal.to_string());
+    }
     if restore.spec.target.mode == TargetMode::Scratch {
         return Admission::Refuse(
             so::RESTORE_IS_SCRATCH,
@@ -337,6 +346,9 @@ pub fn admit(
             format!("Approval {} does not exist yet", sw.spec.approval_ref.name),
         );
     };
+    if let Err(refusal) = crate::workspace::same(sw, approval) {
+        return Admission::Refuse(refusal.reason(), refusal.to_string());
+    }
     if approval.spec.subject_ref.kind != SubjectKind::Switchover {
         return Admission::Refuse(
             SUBJECT_KIND_MISMATCH,
@@ -679,6 +691,10 @@ pub fn runner_argv(
         scorecard_key.to_string(),
         "--namespace".to_string(),
         sw.namespace().unwrap_or_default(),
+        "--workspace".to_string(),
+        crate::workspace::label_of(sw)
+            .unwrap_or_default()
+            .to_string(),
         "--name".to_string(),
         sw.name_any(),
         "--uid".to_string(),
@@ -745,6 +761,7 @@ pub fn job_spec(sw: &Switchover, access: Access, scorecard_key: &str, v2: bool) 
             kind: Switchover::kind(&()).to_string(),
             name: sw.name_any(),
             uid: sw.uid().unwrap_or_default(),
+            workspace: crate::workspace::label_of(sw).map(str::to_string),
         },
         args: runner_argv(
             sw,
@@ -916,6 +933,20 @@ fn hold_or_refuse(phase: &str, reason: &str, message: String) -> SwitchoverStatu
 /// # Errors
 ///
 /// A Kubernetes API failure.
+/// [`reconcile`] behind the workspace gate: what the watch runs.
+async fn gated(
+    sw: Arc<Switchover>,
+    ctx: Arc<Context>,
+    policies: crate::approval_policy::PolicySource,
+) -> Result<Action, SwitchoverError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, sw.as_ref()).await? {
+        return Ok(action);
+    }
+    reconcile(sw, ctx, policies).await
+}
+
 pub async fn reconcile(
     sw: Arc<Switchover>,
     ctx: Arc<Context>,
@@ -1231,7 +1262,11 @@ pub async fn reconcile(
     let v2 = match st.authorization.as_ref() {
         None => None,
         Some(a) => {
-            let effective = policies.effective().resolve(&namespace);
+            // The switchover's workspace, which admission held to be listed
+            // and the approval's.
+            let effective = policies
+                .effective()
+                .resolve(crate::workspace::label_of(sw.as_ref()).unwrap_or_default());
             let (Some(bound), Some(console)) =
                 (effective.bound(), trust.key(&a.confirmation_key_id))
             else {
@@ -1352,28 +1387,22 @@ pub async fn controller(
     runner_image: job::RunnerImage,
     policies: crate::approval_policy::PolicySource,
 ) {
-    crate::scope::run_everywhere(move |namespace| {
-        let api: Api<Switchover> = crate::scope::api(&client, namespace.as_deref());
-        let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
-        let ctx = Arc::new(Context {
-            client: client.clone(),
-            archive: None,
-            runner_image: runner_image.clone(),
-        });
-        let policies = policies.clone();
-        async move {
-            Controller::new(api, watcher::Config::default())
-                .owns(jobs, watcher::Config::default())
-                .run(
-                    move |object, context| reconcile(object, context, policies.clone()),
-                    error_policy,
-                    ctx,
-                )
-                .for_each(|_| std::future::ready(()))
-                .await;
-        }
-    })
-    .await;
+    let api: Api<Switchover> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let ctx = Arc::new(Context {
+        client,
+        archive: None,
+        runner_image,
+    });
+    Controller::new(api, watcher::Config::default())
+        .owns(jobs, watcher::Config::default())
+        .run(
+            move |object, context| gated(object, context, policies.clone()),
+            error_policy,
+            ctx,
+        )
+        .for_each(|_| std::future::ready(()))
+        .await;
 }
 
 #[cfg(test)]
@@ -1416,7 +1445,7 @@ mod tests {
     fn switchover(name: &str, uid: &str, plan: &str) -> Switchover {
         serde_json::from_value(json!({
             "apiVersion": "logweir.dev/v1alpha1", "kind": "Switchover",
-            "metadata": {"name": name, "namespace": "ns", "uid": uid,
+            "metadata": {"labels": {"logweir.dev/workspace": "dev"}, "name": name, "namespace": "ns", "uid": uid,
                          "creationTimestamp": "2026-10-13T08:00:00Z"},
             "spec": {"planBytes": plan, "approvalRef": {"name": "ok"},
                      "restoreRef": {"name": "incident", "uid": "r-uid"}, "deadlineSeconds": 600}
@@ -1427,7 +1456,7 @@ mod tests {
     fn restore(mode: &str, phase: &str, verdict: &str) -> Restore {
         serde_json::from_value(json!({
             "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-            "metadata": {"name": "incident", "namespace": "ns", "uid": "r-uid"},
+            "metadata": {"labels": {"logweir.dev/workspace": "dev"}, "name": "incident", "namespace": "ns", "uid": "r-uid"},
             "spec": {"planBytes": "x", "approvalRef": {"name": "a"},
                      "sourceArchive": {"url": "s3://b/p"}, "backupSetRef": "b1",
                      "pointInTime": "2026-10-13T08:00:00Z",
@@ -1444,7 +1473,7 @@ mod tests {
     fn approval(kind: &str, verified: bool, subject_uid: &str, plan: &str) -> Approval {
         serde_json::from_value(json!({
             "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
-            "metadata": {"name": "ok", "namespace": "ns"},
+            "metadata": {"labels": {"logweir.dev/workspace": "dev"}, "name": "ok", "namespace": "ns"},
             "spec": {"subjectRef": {"kind": kind, "name": "sw"},
                      "planHash": logweir_core::ids::sha256_prefixed(plan.as_bytes()),
                      "approvalBytes": "{}", "sidecarBytes": "{}"},
@@ -1468,6 +1497,7 @@ mod tests {
     /// another restore accepted.
     #[test]
     fn admission_refuses_by_name() {
+        crate::testing::install_test_workspaces();
         let plan = plan_bytes("incident", "r-uid");
         let sw = switchover("sw", "s-uid", &plan);
         let ok_restore = restore("newTopic", "Succeeded", "Valid");
@@ -1475,6 +1505,36 @@ mod tests {
         assert_eq!(
             admit(&sw, Some(&ok_restore), &[], Some(&ok_approval)),
             Admission::Admit
+        );
+        // PROD-19.1: an approval of another workspace, a restore of another
+        // workspace, and an unlabelled switchover are each refused by reason;
+        // relabelling the Approval does not carry `dev`'s approval to `prd`.
+        let relabel = |labels: &mut Option<std::collections::BTreeMap<String, String>>,
+                       to: Option<&str>| {
+            *labels = to.map(|w| [(crate::workspace::LABEL.to_string(), w.to_string())].into());
+        };
+        let mut prd_approval = ok_approval.clone();
+        relabel(&mut prd_approval.metadata.labels, Some("prd"));
+        assert_eq!(
+            reason(&admit(&sw, Some(&ok_restore), &[], Some(&prd_approval))),
+            crate::workspace::REASON_MISMATCH
+        );
+        let mut prd_restore = ok_restore.clone();
+        relabel(&mut prd_restore.metadata.labels, Some("prd"));
+        assert_eq!(
+            reason(&admit(&sw, Some(&prd_restore), &[], Some(&ok_approval))),
+            crate::workspace::REASON_MISMATCH
+        );
+        let mut unlabelled = sw.clone();
+        relabel(&mut unlabelled.metadata.labels, None);
+        assert_eq!(
+            reason(&admit(
+                &unlabelled,
+                Some(&ok_restore),
+                &[],
+                Some(&ok_approval)
+            )),
+            crate::workspace::REASON_UNKNOWN
         );
         let other_plan = switchover("sw", "s-uid", &plan_bytes("other", "r-uid"));
         assert_eq!(

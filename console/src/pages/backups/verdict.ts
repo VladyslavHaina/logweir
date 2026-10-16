@@ -270,7 +270,7 @@ export function progressWord(b: Pick<Backup, "operation" | "queue">): string {
 
 /** What a queued manual run is, in fixed words. */
 export const QUEUED_RUN_SENTENCE =
-  "This manual run is waiting for a slot. The namespace lets a fixed number of manual runs be active at once, and this one starts, in creation order, when one of them finishes. Nothing has been created for it yet: no plan and no Job. Scheduled runs are not counted and are never queued.";
+  "This manual run is waiting for a slot. The workspace lets a fixed number of manual runs be active at once, and this one starts, in creation order, when one of them finishes. Nothing has been created for it yet: no plan and no Job. Scheduled runs are not counted and are never queued.";
 
 /** The covered window, both ends as UTC instants (end exclusive), or what is true instead. */
 export function windowWords(b: Pick<Backup, "windowCovered" | "operation">): string {

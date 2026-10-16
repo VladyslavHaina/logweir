@@ -118,11 +118,11 @@ function scheduleWords(p: ProtectionPolicy): string {
 }
 
 export function ProtectionList() {
-  const { ns } = useParams({ from: "/$ns/protection" });
+  const { ws } = useParams({ from: "/$ws/protection" });
   // A localAdmin console holds no roles: its one actor is the installation's administrator.
   const session = useSessionDoc();
-  const administers = session.authenticationMode === "localAdmin" || grantOf(session, ns)?.roles.includes("administrator") === true;
-  const policies = useProtection(ns);
+  const administers = session.authenticationMode === "localAdmin" || grantOf(session, ws)?.roles.includes("administrator") === true;
+  const policies = useProtection(ws);
   const narrow = useNarrow();
   const rows = policies.data ?? [];
   return (
@@ -144,15 +144,15 @@ export function ProtectionList() {
               Nothing here is checking whether a recoverable backup exists or how old it is.{" "}
               {/* DUI-31.11: an administrator is the one who sets it, so it is not told to ask one. */}
               {administers
-                ? `This console reads protection policies and does not create them: as an administrator of ${ns}, you add one with kubectl, as a ProtectionPolicy in ${ns} that names its schedules and objectives.`
-                : `Protection policies are set by whoever administers Logweir for ${ns}; this console reads them and does not create them.`}
+                ? `This console reads protection policies and does not create them: as an administrator of ${ws}, you add one with kubectl, as a ProtectionPolicy in ${ws} that names its schedules and objectives.`
+                : `Protection policies are set by whoever administers Logweir for ${ws}; this console reads them and does not create them.`}
             </Empty>
           ) : narrow ? (
             <CompactList
               label="Protection policies"
               items={rows.map((p) => ({
                 key: p.name,
-                href: `#/${ns}/protection/${p.name}`,
+                href: `#/${ws}/protection/${p.name}`,
                 title: p.name,
                 meta: `${ageVsObjective(p).text} · objective ${duration(p.objectives.maxRecoveryPointAgeSeconds)}`,
                 status: <HealthStatus health={p.health} />,
@@ -174,7 +174,7 @@ export function ProtectionList() {
                 {rows.map((p) => (
                   <Tr key={p.name}>
                     <Td dataLabel="Policy" className="lw-name-cell">
-                      <Link to="/$ns/protection/$name" params={{ ns, name: p.name }} className="lw-break">
+                      <Link to="/$ws/protection/$name" params={{ ws, name: p.name }} className="lw-break">
                         {p.name}
                       </Link>
                       <div className="lw-subtle lw-small">
@@ -208,12 +208,12 @@ export function ProtectionList() {
 const yes = (v: boolean) => (v ? "Required" : "Not required");
 
 export function ProtectionDetail() {
-  const { ns, name } = useParams({ from: "/$ns/protection/$name" });
-  const policy = useProtectionPolicy(ns, name);
+  const { ws, name } = useParams({ from: "/$ws/protection/$name" });
+  const policy = useProtectionPolicy(ws, name);
   const narrow = useNarrow();
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/protection" params={{ ns }}>Protection</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/protection" params={{ ws }}>Protection</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -306,7 +306,7 @@ export function ProtectionDetail() {
                       </Term>
                       <Term term="Backup">
                         {point.backupRef ? (
-                          <Link to="/$ns/backups/$name" params={{ ns, name: point.backupRef.name }}>
+                          <Link to="/$ws/backups/$name" params={{ ws, name: point.backupRef.name }}>
                             {point.backupRef.name}
                           </Link>
                         ) : (
@@ -320,7 +320,7 @@ export function ProtectionDetail() {
                     </DescriptionList>
                   ) : historyTooLarge(p) ? (
                     <Content component="p" className="lw-gap-top">
-                      Not known: the controller could not read every Backup in this namespace, so it names no newest point.
+                      Not known: the controller could not read every Backup in this workspace, so it names no newest point.
                     </Content>
                   ) : (
                     <Content component="p" className="lw-gap-top">
@@ -352,7 +352,7 @@ export function ProtectionDetail() {
                       label="Schedules this policy counts"
                       items={schedules.map((s) => ({
                         key: s.name,
-                        href: `#/${ns}/schedules/${s.name}`,
+                        href: `#/${ws}/schedules/${s.name}`,
                         title: s.name,
                         meta: s.suspended ? "Suspended" : s.nextFireTime ? <>next <When value={s.nextFireTime} /></> : "Next run not recorded",
                         status: <StatusLabel tone={s.ready === "True" ? "success" : s.ready === "False" ? "danger" : "neutral"} text={s.ready === "True" ? "Ready" : s.ready === "False" ? "Not ready" : "Not recorded"} />,
@@ -373,7 +373,7 @@ export function ProtectionDetail() {
                         {schedules.map((s) => (
                           <Tr key={s.name}>
                             <Td dataLabel="Schedule">
-                              <Link to="/$ns/schedules/$name" params={{ ns, name: s.name }} search={{}}>
+                              <Link to="/$ws/schedules/$name" params={{ ws, name: s.name }} search={{}}>
                                 {s.name}
                               </Link>
                             </Td>
@@ -502,7 +502,7 @@ export function ProtectionDetail() {
                     <Term term="Last attempt">
                       {p.lastAttempt?.backupRef ? (
                         <>
-                          <Link to="/$ns/backups/$name" params={{ ns, name: p.lastAttempt.backupRef.name }}>
+                          <Link to="/$ws/backups/$name" params={{ ws, name: p.lastAttempt.backupRef.name }}>
                             {p.lastAttempt.backupRef.name}
                           </Link>
                           <div className="lw-subtle lw-small">
@@ -533,7 +533,7 @@ export function ProtectionDetail() {
                       </Term>
                       <Term term="Restore">
                         {p.rehearsalLastRestoreRef ? (
-                          <Link to="/$ns/restores/$name" params={{ ns, name: p.rehearsalLastRestoreRef.name }}>
+                          <Link to="/$ws/restores/$name" params={{ ws, name: p.rehearsalLastRestoreRef.name }}>
                             {p.rehearsalLastRestoreRef.name}
                           </Link>
                         ) : (

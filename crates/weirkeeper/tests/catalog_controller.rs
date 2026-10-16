@@ -1464,6 +1464,7 @@ fn a_page_is_immutable_and_owned_by_the_job_without_blocking_its_deletion() {
         kind: "Job".to_string(),
         name: "sync".to_string(),
         uid: JOB_UID.to_string(),
+        workspace: None,
     };
     let cm = view::page_config_map("p0", NS, &owner, UID, &built.pages[0], 0);
     assert_eq!(cm.immutable, Some(true));
@@ -1549,6 +1550,7 @@ fn the_trust_bundle_is_public_material_owned_by_the_catalog() {
         kind: "RecoveryCatalog".to_string(),
         name: NAME.to_string(),
         uid: UID.to_string(),
+        workspace: None,
     };
     let cm = view::trust_config_map("t", NS, &owner, &trust);
     assert_eq!(cm.immutable, Some(true));
@@ -1609,6 +1611,7 @@ fn sync_job_spec() -> view::SyncJobSpec {
             kind: "RecoveryCatalog".to_string(),
             name: NAME.to_string(),
             uid: UID.to_string(),
+            workspace: None,
         },
         plan_config_map: "plan".to_string(),
         plan_sha256: format!("sha256:{}", "3".repeat(64)),
@@ -2924,12 +2927,14 @@ fn every_object_is_labelled_with_the_catalogs_uid_and_not_the_jobs() {
         kind: "Job".to_string(),
         name: "sync".to_string(),
         uid: JOB_UID.to_string(),
+        workspace: None,
     };
     let catalog_owner = weirkeeper::job::RunnerOwner {
         api_version: "logweir.dev/v1alpha1".to_string(),
         kind: "RecoveryCatalog".to_string(),
         name: NAME.to_string(),
         uid: UID.to_string(),
+        workspace: None,
     };
     let page = view::page_config_map("p0", NS, &job_owner, UID, &built.pages[0], 0);
     let document = view::index_document(
@@ -3687,6 +3692,7 @@ fn a_roster_only_namespace_projects_exactly_as_the_roster_did() {
         kind: "RecoveryCatalog".to_string(),
         name: NAME.to_string(),
         uid: UID.to_string(),
+        workspace: None,
     };
     assert_eq!(
         view::trust_config_map("n", NS, &owner, &after).data,

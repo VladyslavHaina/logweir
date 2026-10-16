@@ -43,6 +43,7 @@ metadata:
   name: nightly
   labels:
     app.kubernetes.io/name: logweir
+    logweir.dev/workspace: default   # required: the workspace this object belongs to
 spec:
   # Five fields, space-separated, and a hand-written parser — no cron crate
   # (Global Constraint 38 closes the workspace graph).

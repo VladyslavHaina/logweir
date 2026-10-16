@@ -4,6 +4,14 @@ use logweir::drill::InvokedAs;
 use logweir::{cli, exit, schema, show, verify};
 
 fn main() -> std::process::ExitCode {
+    // PROD-07.2: this binary as the engine's launcher (Linux), before clap:
+    // the argument is never typed and never parsed as a subcommand.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if argv.get(1).and_then(|a| a.to_str()) == Some(logweir_engine_oso::subprocess::ENGINE_EXEC_ARG)
+    {
+        let code = logweir_engine_oso::subprocess::exec_engine(&argv[2..]);
+        return std::process::ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // clap's `Parser::parse` exits 2 on a usage error, and Global Constraint
     // 11 reserves 2 for "a drill ran and did not pass; a signed scorecard
     // exists". A typo'd flag runs no drill, so usage errors map to
@@ -30,9 +38,6 @@ fn main() -> std::process::ExitCode {
     let code = match args.command {
         cli::Command::Identity(cmd) => match logweir::identity::Invocation::from(cmd) {
             logweir::identity::Invocation::Bootstrap(args) => logweir::identity::run(&args),
-            logweir::identity::Invocation::Distribute(args) => {
-                logweir::identity::run_distribution(&args)
-            }
         },
         cli::Command::Schema { which } => schema::run(&which),
         cli::Command::Catalog(cli::CatalogCmd::Sync {
@@ -209,11 +214,18 @@ fn main() -> std::process::ExitCode {
         cli::Command::Restore(cli::RestoreCmd::Run(a)) => {
             // See the `backup run` arm.
             logweir::exit::set_line_tokens(a.line_token.clone(), a.runner_line_token.clone());
+            stoppable();
             logweir::drill::run_named(a.into(), InvokedAs::Restore)
         }
         cli::Command::Drill(cli::DrillCmd::Run(a)) => {
             logweir::exit::set_line_tokens(a.line_token.clone(), a.runner_line_token.clone());
+            stoppable();
             logweir::drill::run_named(a.into(), InvokedAs::DrillAlias)
+        }
+        // PROD-07.2: an interrupted restore's reconcile Job.
+        cli::Command::Restore(cli::RestoreCmd::Reconcile(a)) => {
+            logweir::exit::set_line_tokens(a.line_token.clone(), a.runner_line_token.clone());
+            logweir::drill::reconcile::run(a.into())
         }
         // PROD-11.1a: a TTL clone's cleanup Job.
         cli::Command::Restore(cli::RestoreCmd::Cleanup(a)) => {
@@ -270,6 +282,7 @@ fn main() -> std::process::ExitCode {
             signing_key,
             scorecard_key,
             namespace,
+            workspace,
             name,
             uid,
             store_contract_version,
@@ -289,6 +302,7 @@ fn main() -> std::process::ExitCode {
                 signing_key,
                 scorecard_key,
                 namespace,
+                workspace,
                 name,
                 uid,
                 store_contract_version,
@@ -307,4 +321,13 @@ fn main() -> std::process::ExitCode {
         }
     };
     code.into()
+}
+
+/// PROD-07.2: a restore stops on SIGTERM and SIGINT, and on Linux its engine
+/// dies with it (`PR_SET_PDEATHSIG` through this binary as the launcher).
+fn stoppable() {
+    logweir::stop_signal::install();
+    if let Ok(me) = std::env::current_exe() {
+        logweir_engine_oso::subprocess::launch_engines_through(me);
+    }
 }

@@ -404,6 +404,7 @@ evidence: {{backend: filesystem, path: {evidence}}}
             (wire::SUBJECT_KIND_ENV, "Restore".into()),
             (wire::SUBJECT_NAME_ENV, "restore-a".into()),
             (wire::SUBJECT_NAMESPACE_ENV, "team-a".into()),
+            (wire::SUBJECT_WORKSPACE_ENV, "dev".into()),
             (wire::SUBJECT_UID_ENV, "restore-uid-a".into()),
             (wire::APPROVAL_NAME_ENV, "approval-a".into()),
             (wire::APPROVAL_UID_ENV, "approval-uid-a".into()),

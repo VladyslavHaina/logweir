@@ -962,7 +962,6 @@ pub fn destination_hold_patch(
 /// a merge patch replaces the array.
 #[must_use]
 pub fn queued_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> Value {
-    let namespace = backup.namespace().unwrap_or_default();
     let existing = backup.status.as_ref().and_then(|s| s.conditions.as_ref());
     let admitted = condition(
         backup,
@@ -971,7 +970,7 @@ pub fn queued_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> V
         crate::conditions::REASON_CONCURRENCY_LIMITED,
         &crate::run_pool::queued_message(
             "Backup",
-            &namespace,
+            crate::workspace::label_of(backup).unwrap_or_default(),
             limit,
             crate::run_pool::BACKUP_LIMIT_FIELD,
         ),
@@ -1001,7 +1000,6 @@ pub fn queued_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> V
 /// is behind it.
 #[must_use]
 pub fn admitted_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) -> Value {
-    let namespace = backup.namespace().unwrap_or_default();
     let conditions = crate::conditions::upsert_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![condition(
@@ -1011,7 +1009,7 @@ pub fn admitted_status_patch(backup: &Backup, limit: u32, now: DateTime<Utc>) ->
             crate::conditions::REASON_ADMITTED,
             &crate::run_pool::admitted_message(
                 "Backup",
-                &namespace,
+                crate::workspace::label_of(backup).unwrap_or_default(),
                 limit,
                 crate::run_pool::BACKUP_LIMIT_FIELD,
             ),
@@ -1407,6 +1405,7 @@ fn backup_owner(backup: &Backup) -> Option<RunnerOwner> {
         kind: Backup::kind(&()).to_string(),
         name: backup.name_any(),
         uid: backup.uid()?,
+        workspace: crate::workspace::label_of(backup).map(str::to_string),
     })
 }
 
@@ -1532,6 +1531,7 @@ async fn evidence_fetch_pass(
     let step = crate::evidence_fetch::advance(&crate::evidence_fetch::Inputs {
         client,
         namespace,
+        workspace: crate::workspace::label_of(backup).unwrap_or_default(),
         owner: &owner,
         attempt,
         request: &request,
@@ -2635,15 +2635,21 @@ pub fn runner_job_spec_from_inputs(
     // reference still resolve to what the frozen plan was rendered from. This
     // function is public and pure, so a caller holding frozen inputs may reach
     // it without the reconciler's `verify_frozen_config_map` pass.
+    let resolved_registry = connection
+        .schema_registry
+        .as_ref()
+        .map(crate::connection::ResolvedRegistry::plan);
     let frozen_connection = (
         &inputs.source.bootstrap_servers,
         &inputs.source.auth,
         &inputs.source.tls_ca,
+        &inputs.source.schema_registry,
     );
     let resolved_connection = (
         &connection.bootstrap_servers,
         &connection.auth,
         &connection.tls_ca,
+        &resolved_registry,
     );
     if frozen_connection != resolved_connection {
         return Err(BackupError::Refused(
@@ -2753,6 +2759,7 @@ pub fn runner_job_spec_from_inputs(
             kind: Backup::kind(&()).to_string(),
             name,
             uid,
+            workspace: crate::workspace::label_of(backup).map(str::to_string),
         },
         args: inputs.runner.args.clone(),
         deadline_seconds: inputs.runner.deadline_seconds,
@@ -5498,6 +5505,11 @@ async fn reconcile_with_trust(
     synced: Arc<AtomicBool>,
     objects: reflector::Store<Backup>,
 ) -> Result<Action, BackupError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, backup.as_ref()).await? {
+        return Ok(action);
+    }
     if synced.load(Ordering::Relaxed) {
         let value = serde_json::to_value(&*backup).ok();
         let status = value.as_ref().and_then(|v| v.get("status"));
@@ -5594,38 +5606,28 @@ pub async fn controller(
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
 ) {
-    // One watch per watched namespace: `crate::scope` is the whole cluster
-    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
-    // then this reconciler runs once per namespace with an `Api::namespaced`
-    // watch, the only shape the scoped chart's RoleBindings permit.
-    //
     // The `TrustPolicy` store is built once and shared by every copy: the kind
     // is cluster-scoped, so a reflector per namespace would be N identical
     // cluster-wide watches.
     let policies = crate::trust::spawn_policy_reflector(&client);
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(
-            client.clone(),
-            archive.clone(),
-            runner_image.clone(),
-            policies.clone(),
-            namespace,
-        )
-    })
+    controller_in(
+        client.clone(),
+        archive.clone(),
+        runner_image.clone(),
+        policies.clone(),
+    )
     .await;
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
     shared: crate::trust::SharedPolicies,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<Backup> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<Backup> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let client_for_watch = client.clone();
     let ctx = Arc::new(Context {
         client,

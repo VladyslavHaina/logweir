@@ -49,7 +49,7 @@ import { cadenceWords, latestPoint, outcomeOf, runsOf, zoneOf } from "./model";
 import { NextRuns, ScheduleStatus, Term, WriteAlert, useGrant } from "./parts";
 import { Prose } from "../../components/Prose";
 
-function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; canRestore: boolean; label: string }) {
+function Runs({ ws, runs, canRestore, label }: { ws: string; runs: Backup[]; canRestore: boolean; label: string }) {
   const narrow = useNarrow();
   const navigate = useNavigate();
   const [page, setPage] = useState(1);
@@ -70,7 +70,7 @@ function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; can
         titles={{ paginationAriaLabel: `${label} pages` }}
       />
     ) : null;
-  const restore = (b: Backup) => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name, uid: b.uid } });
+  const restore = (b: Backup) => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { backup: b.name, uid: b.uid } });
   if (narrow) {
     return (
       <>
@@ -79,7 +79,7 @@ function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; can
           label={label}
           items={shown.map((b) => ({
             key: b.name,
-            href: `#/${ns}/backups/${b.name}`,
+            href: `#/${ws}/backups/${b.name}`,
             title: b.name,
             meta: (
               <>
@@ -110,7 +110,7 @@ function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; can
           {shown.map((b) => (
             <Tr key={b.name}>
               <Td dataLabel="Run" className="lw-name-cell">
-                <Link to="/$ns/backups/$name" params={{ ns, name: b.name }} className="lw-break">
+                <Link to="/$ws/backups/$name" params={{ ws, name: b.name }} className="lw-break">
                   {b.name}
                 </Link>
                 <div className="lw-subtle lw-small">
@@ -129,7 +129,7 @@ function Runs({ ns, runs, canRestore, label }: { ns: string; runs: Backup[]; can
               <Td isActionCell>
                 <ActionsColumn
                   items={[
-                    { title: "View details", onClick: () => void navigate({ to: "/$ns/backups/$name", params: { ns, name: b.name } }) },
+                    { title: "View details", onClick: () => void navigate({ to: "/$ws/backups/$name", params: { ws, name: b.name } }) },
                     ...(canRestore ? [{ title: "Restore this point", isDisabled: !b.operation.verifiedSuccess, onClick: () => restore(b) }] : []),
                   ]}
                 />
@@ -153,14 +153,14 @@ function Section({ open, text, children }: { open: boolean; text: string; childr
   );
 }
 
-function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid: string | undefined; canRestore: boolean }) {
-  const history = useBackups(ns);
-  const readable = useCan(ns, "backupsRead");
+function History({ ws, name, uid, canRestore }: { ws: string; name: string; uid: string | undefined; canRestore: boolean }) {
+  const history = useBackups(ws);
+  const readable = useCan(ws, "backupsRead");
   const navigate = useNavigate();
   if (!readable) {
     return (
       <Content component="p" className="lw-subtle">
-        Your roles in {ns} do not include reading backups, so this schedule's runs are not shown.
+        Your roles in {ws} do not include reading backups, so this schedule's runs are not shown.
       </Content>
     );
   }
@@ -176,7 +176,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
             ? "This schedule has made no run yet. Its first one starts at its next slot, or use Back up now."
             : groups.earlier.length + groups.legacy.length > 0
               ? "This schedule no longer exists, so no run is placed as its own; the runs that name it are below, by schedule identity."
-              : "No run in this namespace names this schedule."}
+              : "No run in this workspace names this schedule."}
         </Content>
       ) : (
         <>
@@ -191,12 +191,12 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
               )}
             </Content>
             {latest && canRestore && (
-              <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: latest.name, uid: latest.uid } })}>
+              <Button variant="secondary" onClick={() => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { backup: latest.name, uid: latest.uid } })}>
                 Restore the latest point
               </Button>
             )}
           </Flex>
-          <Runs ns={ns} runs={groups.mine} canRestore={canRestore} label={`Runs of ${name}`} />
+          <Runs ws={ws} runs={groups.mine} canRestore={canRestore} label={`Runs of ${name}`} />
         </>
       )}
       {[...new Set(groups.earlier.map((b) => b.scheduleRef!.uid!))].map((identity, i) => {
@@ -207,7 +207,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
               They carry schedule identity {identity}. A schedule deleted and created again under one name is a different
               schedule, so these are never merged with another identity's runs. Their points can still be restored.
             </Content>
-            <Runs ns={ns} runs={runs} canRestore={canRestore} label={`Runs of schedule identity ${identity}`} />
+            <Runs ws={ws} runs={runs} canRestore={canRestore} label={`Runs of schedule identity ${identity}`} />
           </Section>
         );
       })}
@@ -217,7 +217,7 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
             They record no schedule identity, so nothing tells whether this schedule or an earlier one of the same name
             made them. They are never offered as this schedule's latest point; each can still be restored on its own.
           </Content>
-          <Runs ns={ns} runs={groups.legacy} canRestore={canRestore} label="Runs naming this schedule without its identity" />
+          <Runs ws={ws} runs={groups.legacy} canRestore={canRestore} label="Runs naming this schedule without its identity" />
         </Section>
       )}
     </Stack>
@@ -226,14 +226,14 @@ function History({ ns, name, uid, canRestore }: { ns: string; name: string; uid:
 
 const or = (value: number | null | undefined, fallback: string, unit = " s") => (typeof value === "number" ? `${value}${unit}` : fallback);
 
-function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
-  const destinations = useDestinations(ns);
+function WhatItBacksUp({ ws, s }: { ws: string; s: Schedule }) {
+  const destinations = useDestinations(ws);
   const dest = s.destinationRef ? destinations.data?.find((d) => d.name === s.destinationRef!.name) : undefined;
   const exclude = s.allUserTopics?.exclude;
   return (
     <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "14ch" }}>
       <Term term="Source">
-        <Link to="/$ns/connections/$name" params={{ ns, name: s.sourceRef.name }} className="lw-break">
+        <Link to="/$ws/connections/$name" params={{ ws, name: s.sourceRef.name }} className="lw-break">
           {s.sourceRef.name}
         </Link>
       </Term>
@@ -266,7 +266,7 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
       <Term term="Written to">
         {s.destinationRef ? (
           <>
-            <Link to="/$ns/destinations/$name" params={{ ns, name: s.destinationRef.name }} className="lw-break">
+            <Link to="/$ws/destinations/$name" params={{ ws, name: s.destinationRef.name }} className="lw-break">
               {s.destinationRef.name}
             </Link>
             {dest ? (
@@ -274,7 +274,7 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
             ) : destinations.isError ? (
               <div className="lw-subtle lw-small">The destinations could not be read, so where this is cannot be shown.</div>
             ) : destinations.data ? (
-              <div className="lw-subtle lw-small">No destination of this name is in the namespace now.</div>
+              <div className="lw-subtle lw-small">No destination of this name is in the workspace now.</div>
             ) : null}
           </>
         ) : (
@@ -298,7 +298,7 @@ function WhatItBacksUp({ ns, s }: { ns: string; s: Schedule }) {
   );
 }
 
-function LastSlot({ ns, s }: { ns: string; s: Schedule }) {
+function LastSlot({ ws, s }: { ws: string; s: Schedule }) {
   const slot = s.status.lastSlot;
   const missed = s.status.missedSlots;
   const ready = s.status.ready;
@@ -330,7 +330,7 @@ function LastSlot({ ns, s }: { ns: string; s: Schedule }) {
               {slot.backupRef ? (
                 <>
                   {" · "}
-                  <Link to="/$ns/backups/$name" params={{ ns, name: slot.backupRef.name }}>
+                  <Link to="/$ws/backups/$name" params={{ ws, name: slot.backupRef.name }}>
                     {slot.backupRef.name}
                   </Link>
                 </>
@@ -366,7 +366,7 @@ function LastSlot({ ns, s }: { ns: string; s: Schedule }) {
         ) : (
           active.map((r) => (
             <div key={r.name}>
-              <Link to="/$ns/backups/$name" params={{ ns, name: r.name }}>
+              <Link to="/$ws/backups/$name" params={{ ws, name: r.name }}>
                 {r.name}
               </Link>{" "}
               <span className="lw-subtle lw-small">{r.kind === "Retry" ? `retry ${r.attempt}` : r.kind.toLowerCase()}</span>
@@ -439,7 +439,7 @@ function WhenItRuns({ s }: { s: Schedule }) {
   );
 }
 
-function Gone({ ns, name }: { ns: string; name: string }) {
+function Gone({ ws, name }: { ws: string; name: string }) {
   return (
     <>
       <PageSection>
@@ -454,7 +454,7 @@ function Gone({ ns, name }: { ns: string; name: string }) {
             <CardTitle component="h2">Runs naming {name}</CardTitle>
           </CardHeader>
           <CardBody>
-            <History ns={ns} name={name} uid={undefined} canRestore />
+            <History ws={ws} name={name} uid={undefined} canRestore />
           </CardBody>
         </Card>
       </PageSection>
@@ -463,20 +463,20 @@ function Gone({ ns, name }: { ns: string; name: string }) {
 }
 
 export function ScheduleDetail() {
-  const { ns, name } = useParams({ from: "/$ns/schedules/$name" });
-  const search = useSearch({ from: "/$ns/schedules/$name" });
+  const { ws, name } = useParams({ from: "/$ws/schedules/$name" });
+  const search = useSearch({ from: "/$ws/schedules/$name" });
   const navigate = useNavigate();
-  const schedule = useSchedule(ns, name);
-  const retention = useRetentionPolicies(ns);
-  const grant = useGrant(ns);
-  const suspension = useSetSuspension(ns, name);
+  const schedule = useSchedule(ws, name);
+  const retention = useRetentionPolicies(ws);
+  const grant = useGrant(ws);
+  const suspension = useSetSuspension(ws, name);
   const [backUp, setBackUp] = useState(false);
   const [flash, setFlash] = useState(search.done);
   useUntilComputed(schedule.data, schedule.refetch);
 
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/schedules" params={{ ns }}>Schedules</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/schedules" params={{ ws }}>Schedules</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -497,7 +497,7 @@ export function ScheduleDetail() {
       <>
         <PageHeader title={name} breadcrumb={breadcrumb} status={gone ? <StatusLabel tone="neutral" text="Deleted" /> : undefined} />
         {gone ? (
-          <Gone ns={ns} name={name} />
+          <Gone ws={ws} name={name} />
         ) : (
           <PageSection>
             <ErrorState error={schedule.error} onRetry={() => void schedule.refetch()} />
@@ -531,7 +531,7 @@ export function ScheduleDetail() {
               </Button>
             )}
             {grant?.scheduleCreate && (
-              <Button variant="secondary" onClick={() => void navigate({ to: "/$ns/schedules/$name/edit", params: { ns, name } })}>
+              <Button variant="secondary" onClick={() => void navigate({ to: "/$ws/schedules/$name/edit", params: { ws, name } })}>
                 Edit policy
               </Button>
             )}
@@ -581,7 +581,7 @@ export function ScheduleDetail() {
                   <CardTitle component="h2">Runs and recovery points</CardTitle>
                 </CardHeader>
                 <CardBody>
-                  <History ns={ns} name={s.name} uid={s.uid} canRestore={grant?.restoreCreate === true} />
+                  <History ws={ws} name={s.name} uid={s.uid} canRestore={grant?.restoreCreate === true} />
                 </CardBody>
               </Card>
             </Stack>
@@ -593,7 +593,7 @@ export function ScheduleDetail() {
                   <CardTitle component="h2">What it backs up</CardTitle>
                 </CardHeader>
                 <CardBody>
-                  <WhatItBacksUp ns={ns} s={s} />
+                  <WhatItBacksUp ws={ws} s={s} />
                 </CardBody>
               </Card>
               <Card>
@@ -601,7 +601,7 @@ export function ScheduleDetail() {
                   <CardTitle component="h2">Last slot</CardTitle>
                 </CardHeader>
                 <CardBody>
-                  <LastSlot ns={ns} s={s} />
+                  <LastSlot ws={ws} s={s} />
                 </CardBody>
               </Card>
               <Card>
@@ -616,7 +616,7 @@ export function ScheduleDetail() {
           </GridItem>
         </Grid>
       </PageSection>
-      {grant?.manualBackupCreate && <BackUpNow ns={ns} schedule={s} open={backUp} onClose={() => setBackUp(false)} />}
+      {grant?.manualBackupCreate && <BackUpNow ws={ws} schedule={s} open={backUp} onClose={() => setBackUp(false)} />}
     </>
   );
 }

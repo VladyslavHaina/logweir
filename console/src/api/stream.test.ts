@@ -48,8 +48,8 @@ const view = (state: string, terminal: boolean) => JSON.stringify({ kind: "resto
 describe("the operation stream", () => {
   it("opens one same-origin stream with no token in the address", () => {
     follow();
-    expect(FakeSource.opened.map((s) => s.url)).toEqual(["/api/v1/namespaces/team-a/operations/restore/orders-drill/events"]);
-    expect(streamPath("team a", "backup", "x/y")).toBe("/api/v1/namespaces/team%20a/operations/backup/x%2Fy/events");
+    expect(FakeSource.opened.map((s) => s.url)).toEqual(["/api/v1/workspaces/team-a/operations/restore/orders-drill/events"]);
+    expect(streamPath("team a", "backup", "x/y")).toBe("/api/v1/workspaces/team%20a/operations/backup/x%2Fy/events");
   });
 
   it("puts each operation and reset into the cache, and refreshes the lists when the run is final", () => {

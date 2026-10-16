@@ -1547,7 +1547,7 @@ pub fn scheduled_run(schedule: &BackupSchedule, schedule_uid: &str, plan: &RunPl
     let schedule_name = schedule.name_any();
     let policy = run_policy_spec(&schedule.spec);
     let digest = crate::policy::run_policy_sha256(&policy);
-    Backup {
+    let mut run = Backup {
         metadata: ObjectMeta {
             name: Some(plan.name.clone()),
             namespace: schedule.namespace(),
@@ -1598,7 +1598,10 @@ pub fn scheduled_run(schedule: &BackupSchedule, schedule_uid: &str, plan: &RunPl
             ..policy
         },
         status: None,
-    }
+    };
+    // The run is in its schedule's workspace.
+    crate::workspace::copy_label(schedule, &mut run);
+    run
 }
 
 /// Whether `backup` is a run of this schedule that participates in
@@ -3337,6 +3340,11 @@ async fn reconcile(
     schedule: Arc<BackupSchedule>,
     ctx: Arc<Context>,
 ) -> Result<Action, ScheduleError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, schedule.as_ref()).await? {
+        return Ok(action);
+    }
     reconcile_pass(&schedule, &ctx.client, ctx.archive.as_ref(), Utc::now())
         .await
         .map(|(_, action)| action)
@@ -3468,23 +3476,15 @@ pub fn controller(
     client: kube::Client,
     archive: Option<Arc<Store>>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // One watch per watched namespace: `crate::scope` is the whole cluster
-    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
-    // then this reconciler runs once per namespace with an `Api::namespaced`
-    // watch, the only shape the scoped chart's RoleBindings permit.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(client.clone(), archive.clone(), namespace)
-    })
+    controller_in(client.clone(), archive.clone())
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     archive: Option<Arc<Store>>,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<BackupSchedule> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<BackupSchedule> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let ctx = Arc::new(Context {
         client,
         archive,

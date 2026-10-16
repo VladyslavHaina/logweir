@@ -1,4 +1,4 @@
-// The Approvals page: what waits for an approval in this namespace, and every
+// The Approvals page: what waits for an approval in this workspace, and every
 // Approval recorded here. Neither list takes the page away when it cannot be
 // read: an approver who may read one and not the other still gets a usable page.
 import { Link, useParams } from "@tanstack/react-router";
@@ -38,27 +38,27 @@ import "./approvals.css";
 /**
  * Where an Approval's subject is decided: a Restore's page, or a Switchover's (theme A).
  * DUI-46: a Switchover's approval page is the two-person request, which exists only in a
- * two-person namespace; under any other mode (or one not known) its record opens the
+ * two-person workspace; under any other mode (or one not known) its record opens the
  * Switchover's own page, as the Waiting table's link does.
  */
-export function subjectHref(ns: string, approval: Approval, mode: ApprovalMode | null): string | undefined {
+export function subjectHref(ws: string, approval: Approval, mode: ApprovalMode | null): string | undefined {
   if (approval.subjectRef.kind === "Restore") {
-    return `#/${ns}/approvals/${encodeURIComponent(approval.subjectRef.name)}?approval=${encodeURIComponent(approval.name)}`;
+    return `#/${ws}/approvals/${encodeURIComponent(approval.subjectRef.name)}?approval=${encodeURIComponent(approval.name)}`;
   }
-  if (approval.subjectRef.kind === "Switchover") return switchoverHref(ns, approval.subjectRef.name, mode);
+  if (approval.subjectRef.kind === "Switchover") return switchoverHref(ws, approval.subjectRef.name, mode);
   return undefined;
 }
 
 /** A switchover's link from Approvals: its two-person approval page, or its own page. */
-export function switchoverHref(ns: string, name: string, mode: ApprovalMode | null): string {
-  return mode === "twoPerson" ? `#/${ns}/approvals/switchover/${encodeURIComponent(name)}` : `#/${ns}/switchovers/${encodeURIComponent(name)}`;
+export function switchoverHref(ws: string, name: string, mode: ApprovalMode | null): string {
+  return mode === "twoPerson" ? `#/${ws}/approvals/switchover/${encodeURIComponent(name)}` : `#/${ws}/switchovers/${encodeURIComponent(name)}`;
 }
 
 const NOTHING_WAITS: Record<ApprovalMode, string> = {
   confirm: "Under confirm a restore or a switchover runs on its requester's own confirmation, so nothing waits for an approver here.",
   twoPerson: "When someone asks for a restore or a switchover, it waits here until a second person approves it.",
   strict: "When someone asks for a restore or a switchover, it waits here until an approver countersigns it with their key.",
-  files: "A restore or a switchover created in this namespace waits here until an approver records the files logweir drill approve wrote.",
+  files: "A restore or a switchover created in this workspace waits here until an approver records the files logweir drill approve wrote.",
 };
 
 /** The part of a restore's or a switchover's request that says what happens next. */
@@ -85,7 +85,7 @@ function nextStep(mode: ApprovalMode | null, grant: ApprovalGrant, request: Requ
     case "confirm":
       return { text: "The console's confirmation is being verified", mine: false };
     default:
-      return { text: "Open it for the namespace's approval policy", mine: false };
+      return { text: "Open it for the workspace's approval policy", mine: false };
   }
 }
 
@@ -106,24 +106,24 @@ function byNewest<T extends { createdAt?: string | null; name: string }>(items: 
 }
 
 export function ApprovalList() {
-  const { ns } = useParams({ from: "/$ns/approvals" });
-  const grant = useApprovalGrant(ns);
+  const { ws } = useParams({ from: "/$ws/approvals" });
+  const grant = useApprovalGrant(ws);
   const narrow = useNarrow();
-  const policy = useApprovalPolicy(ns, grant.approvalsRead);
-  const approvals = useApprovals(ns, grant.approvalsRead);
-  const waiting = useWaitingRestores(ns, grant.restoresRead);
+  const policy = useApprovalPolicy(ws, grant.approvalsRead);
+  const approvals = useApprovals(ws, grant.approvalsRead);
+  const waiting = useWaitingRestores(ws, grant.restoresRead);
   // DUI-27: a switchover held for its approval waits here too, as a restore does.
-  const waitingSwitchovers = useWaitingSwitchovers(ns, grant.restoresRead);
+  const waitingSwitchovers = useWaitingSwitchovers(ws, grant.restoresRead);
   const mode = policy.data ? approvalMode(policy.data) : null;
   const restores = byNewest(waiting.data ?? []);
   const switchovers: Switchover[] = waitingSwitchovers.data ?? [];
   const requests = useApprovalRequests(
-    ns,
+    ws,
     restores.map((r) => r.name),
     mode === "twoPerson",
   );
   const switchoverRequests = useSwitchoverApprovalRequests(
-    ns,
+    ws,
     switchovers.map((s) => s.name),
     mode === "twoPerson",
   );
@@ -131,7 +131,7 @@ export function ApprovalList() {
   const description = policy.data
     ? modeSentence(approvalMode(policy.data), policy.data.name)
     : policy.isError
-      ? "The namespace's approval policy could not be read, so this page cannot say how approving works here."
+      ? "The workspace's approval policy could not be read, so this page cannot say how approving works here."
       : "What waits for an approval here, and every approval recorded.";
 
   if (grant.known && !grant.approvalsRead) {
@@ -141,7 +141,7 @@ export function ApprovalList() {
         <PageSection>
           <Card>
             <Empty title="You can't read approvals here" icon={UserCheckIcon}>
-              Your sign-in holds no role in {ns} that reads approvals. An administrator binds the approver, operator or viewer role.
+              Your sign-in holds no role in {ws} that reads approvals. An administrator binds the approver, operator or viewer role.
             </Empty>
           </Card>
         </PageSection>
@@ -155,9 +155,9 @@ export function ApprovalList() {
     ...restores.map((r: Restore, i) => ({
       key: `restore/${r.name}`,
       name: r.name,
-      href: `#/${ns}/approvals/${encodeURIComponent(r.name)}`,
+      href: `#/${ws}/approvals/${encodeURIComponent(r.name)}`,
       link: (
-        <Link to="/$ns/approvals/$name" params={{ ns, name: r.name }} search={{}} className="lw-break">
+        <Link to="/$ws/approvals/$name" params={{ ws, name: r.name }} search={{}} className="lw-break">
           {r.name}
         </Link>
       ),
@@ -171,14 +171,14 @@ export function ApprovalList() {
       name: s.name,
       // A second person decides on the switchover's approval page; under strict or with
       // files the Switchover's own page gives the commands.
-      href: switchoverHref(ns, s.name, mode),
+      href: switchoverHref(ws, s.name, mode),
       link:
         mode === "twoPerson" ? (
-          <Link to="/$ns/approvals/switchover/$name" params={{ ns, name: s.name }} className="lw-break">
+          <Link to="/$ws/approvals/switchover/$name" params={{ ws, name: s.name }} className="lw-break">
             {s.name}
           </Link>
         ) : (
-          <Link to="/$ns/switchovers/$name" params={{ ns, name: s.name }} className="lw-break">
+          <Link to="/$ws/switchovers/$name" params={{ ws, name: s.name }} className="lw-break">
             {s.name}
           </Link>
         ),
@@ -204,19 +204,19 @@ export function ApprovalList() {
       <CardBody>
         {approvals.isError && (
           <Content component="p" className="lw-subtle">
-            The Approvals in this namespace could not be listed, so this page cannot say which restores or switchovers already have one. Each restore&apos;s own page reads its Approval directly.
+            The Approvals in this workspace could not be listed, so this page cannot say which restores or switchovers already have one. Each restore&apos;s own page reads its Approval directly.
             <ErrorLine error={approvals.error} />
           </Content>
         )}
         {waitingSwitchovers.isError && (
           <Content component="p" className="lw-subtle">
-            The switchovers in this namespace could not be listed, so one that waits for an approval is not shown here.
+            The switchovers in this workspace could not be listed, so one that waits for an approval is not shown here.
             <ErrorLine error={waitingSwitchovers.error} />
           </Content>
         )}
         {!grant.restoresRead && grant.known ? (
           <Content component="p" className="lw-subtle">
-            Your sign-in may not list restores or switchovers in {ns}, so none can be chosen here.
+            Your sign-in may not list restores or switchovers in {ws}, so none can be chosen here.
           </Content>
         ) : waitingPending ? (
           <LoadingRows rows={3} label="Loading what waits" />
@@ -225,7 +225,7 @@ export function ApprovalList() {
         ) : waitingRows.length === 0 ? (
           waitingSwitchovers.isError ? null : (
             <Empty title="Nothing waits for approval" icon={CheckCircleIcon}>
-              {mode ? NOTHING_WAITS[mode] : "No restore or switchover in this namespace waits for an approval."}
+              {mode ? NOTHING_WAITS[mode] : "No restore or switchover in this workspace waits for an approval."}
             </Empty>
           )
         ) : narrow ? (
@@ -292,7 +292,7 @@ export function ApprovalList() {
             <ErrorState error={approvals.error} onRetry={() => void approvals.refetch()} />
           ) : recorded.length === 0 ? (
             <Empty title="No approvals recorded" icon={UserCheckIcon}>
-              {mode ? noApprovalSentence(mode) : "No Approval in this namespace yet."}
+              {mode ? noApprovalSentence(mode) : "No Approval in this workspace yet."}
             </Empty>
           ) : narrow ? (
             <CompactList
@@ -300,7 +300,7 @@ export function ApprovalList() {
               label="Recorded approvals"
               items={recorded.map((a) => ({
                 key: a.name,
-                href: subjectHref(ns, a, mode),
+                href: subjectHref(ws, a, mode),
                 title: `${a.subjectRef.kind}/${a.subjectRef.name}`,
                 meta: (
                   <>
@@ -323,7 +323,7 @@ export function ApprovalList() {
               </Thead>
               <Tbody>
                 {recorded.map((a) => {
-                  const href = subjectHref(ns, a, mode);
+                  const href = subjectHref(ws, a, mode);
                   return (
                     <Tr key={a.name}>
                       <Td dataLabel="Subject" className="lw-break">

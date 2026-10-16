@@ -27,6 +27,8 @@ fn agrees(
 }
 
 const NS: &str = "team-a";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const NAME: &str = "rst-original";
 const UID: &str = "5c2e7b91-0000-4000-8000-0000000000b1";
 const APPROVAL: &str = "a1";
@@ -88,7 +90,7 @@ fn restore(plan: &str, declared: Option<bool>, prefix: &str) -> Restore {
     let mut object = serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Restore",
-        "metadata": { "name": NAME, "namespace": NS, "uid": UID, "generation": 1,
+        "metadata": {"labels": {"logweir.dev/workspace": WS},  "name": NAME, "namespace": NS, "uid": UID, "generation": 1,
                       "resourceVersion": "1" },
         "spec": {
             "planBytes": plan,
@@ -132,7 +134,7 @@ fn approval(plan: &str, subject: Option<&str>) -> weirkeeper::crds::approval::Ap
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Approval",
-        "metadata": { "name": APPROVAL, "namespace": NS, "uid": "aaaaaaaa-0000-4000-8000-0000000000b2" },
+        "metadata": {"labels": {"logweir.dev/workspace": WS},  "name": APPROVAL, "namespace": NS, "uid": "aaaaaaaa-0000-4000-8000-0000000000b2" },
         "spec": {
             "subjectRef": { "kind": "Restore", "name": NAME },
             "planHash": sha256_prefixed(plan.as_bytes()),
@@ -153,7 +155,7 @@ fn cluster() -> weirkeeper::crds::kafka_cluster::KafkaCluster {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "KafkaCluster",
-        "metadata": { "name": "prod", "namespace": NS, "uid": "c" },
+        "metadata": {"labels": {"logweir.dev/workspace": WS},  "name": "prod", "namespace": NS, "uid": "c" },
         "spec": { "bootstrapServers": ["prod-0.kafka:9092"], "auth": { "mode": "plaintext" },
                   "role": "target" },
         "status": { "reachable": true }

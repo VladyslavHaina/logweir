@@ -45,8 +45,15 @@ pub const SHARED_HOST: &str = "console.test";
 pub const ISSUER: &str = "https://idp.test/realms/logweir";
 pub const CLIENT_ID: &str = "logweir-console";
 pub const REDIRECT_URI: &str = "https://console.test/auth/callback";
+/// The two WORKSPACES most tests use. Since PROD-19.1 they are labels on
+/// objects in the one install namespace, [`INSTALL_NS`], not namespaces.
 pub const NS_A: &str = "team-a";
 pub const NS_B: &str = "team-b";
+/// The install's one namespace: every product object, check result and
+/// credential lives here, whatever its workspace.
+pub const INSTALL_NS: &str = "logweir-system";
+/// The workspace label.
+pub const WORKSPACE_LABEL: &str = weirkeeper::workspace::LABEL;
 pub const PLURALS: [&str; 12] = [
     "kafkaclusters",
     "backupschedules",
@@ -191,6 +198,30 @@ fn merge(target: &mut Value, patch: &Value) {
     }
 }
 
+/// Where the fake stores an object a test names by `(plural, namespace)`, and
+/// the workspace label it carries: the product kinds and secrets live in
+/// [`INSTALL_NS`] under the label `namespace`, check results in
+/// [`INSTALL_NS`] with no label, and everything else where it is told.
+fn placed(plural: &str, namespace: &str) -> (String, Option<String>) {
+    if PLURALS.contains(&plural) || plural == "secrets" {
+        (INSTALL_NS.to_string(), Some(namespace.to_string()))
+    } else if plural == "configmaps" {
+        (INSTALL_NS.to_string(), None)
+    } else {
+        (namespace.to_string(), None)
+    }
+}
+
+fn in_workspace(object: &Value, workspace: Option<&str>) -> bool {
+    workspace.is_none_or(|w| {
+        object
+            .pointer("/metadata/labels")
+            .and_then(|l| l.get(WORKSPACE_LABEL))
+            .and_then(Value::as_str)
+            == Some(w)
+    })
+}
+
 fn labels_match(object: &Value, selector: &str) -> bool {
     selector.split(',').filter(|t| !t.is_empty()).all(|term| {
         let (k, v) = term.split_once('=').unwrap_or((term, ""));
@@ -253,7 +284,24 @@ impl FakeKube {
     }
 
     /// Store an object as if it already existed in the cluster.
+    ///
+    /// For a product kind, a check result or a credential, `namespace` names
+    /// the WORKSPACE: the object is stored in [`INSTALL_NS`] and, unless it
+    /// already carries one, gets the workspace label. Any other plural
+    /// (`endpointslices`) keeps the namespace it is given.
     pub fn seed(&self, plural: &str, namespace: &str, mut object: Value) -> Value {
+        let (namespace, workspace) = placed(plural, namespace);
+        if let Some(workspace) = workspace {
+            let labels = object["metadata"]
+                .as_object_mut()
+                .expect("seeded objects have metadata")
+                .entry("labels")
+                .or_insert(json!({}));
+            if let Some(labels) = labels.as_object_mut() {
+                labels.entry(WORKSPACE_LABEL).or_insert(json!(workspace));
+            }
+        }
+        let namespace = namespace.as_str();
         let mut s = self.state.lock().unwrap();
         s.next_rv += 1;
         s.next_uid += 1;
@@ -310,22 +358,31 @@ impl FakeKube {
         object
     }
 
+    /// One stored object. As in [`FakeKube::seed`], `namespace` names the
+    /// workspace for the kinds that live in [`INSTALL_NS`], and an object of
+    /// another workspace is not returned.
     pub fn object(&self, plural: &str, namespace: &str, name: &str) -> Option<Value> {
+        let (stored_in, workspace) = placed(plural, namespace);
         self.state
             .lock()
             .unwrap()
             .objects
-            .get(&(plural.into(), namespace.into(), name.into()))
+            .get(&(plural.into(), stored_in, name.into()))
+            .filter(|v| in_workspace(v, workspace.as_deref()))
             .cloned()
     }
 
+    /// How many objects of a plural one workspace (or namespace) holds.
     pub fn count(&self, plural: &str, namespace: &str) -> usize {
+        let (stored_in, workspace) = placed(plural, namespace);
         self.state
             .lock()
             .unwrap()
             .objects
-            .keys()
-            .filter(|(p, n, _)| p == plural && n == namespace)
+            .iter()
+            .filter(|((p, n, _), v)| {
+                p == plural && *n == stored_in && in_workspace(v, workspace.as_deref())
+            })
             .count()
     }
 
@@ -409,11 +466,19 @@ fn check_attribution(s: &mut State, plural: &str, name: &str, object: &Value) {
 }
 
 /// The kinds whose spec this fake will accept a merge patch for.
-pub const PATCHABLE: [&str; 4] = [
+pub const PATCHABLE: [&str; 5] = [
     "backupschedules",
     "backupdestinations",
     "topicdiscoveries",
     "preflights",
+    // PROD-07.2: the cancel and cleanup annotations, and nothing else.
+    "restores",
+];
+
+/// The annotations a `Restore` patch may set (PROD-07.2).
+pub const RESTORE_REQUEST_ANNOTATIONS: [&str; 2] = [
+    "logweir.dev/cancel-requested-by",
+    "logweir.dev/cleanup-requested-by",
 ];
 
 /// The discovery group: a labelled LIST of `endpointslices`, and nothing else.
@@ -957,11 +1022,21 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
                 "topicdiscoveries" | "preflights" => &["cancelRequested"],
                 _ => &[],
             };
+            let restore_annotations = |k: &str, v: &Value| {
+                plural == "restores"
+                    && k == "annotations"
+                    && v.as_object().is_some_and(|a| {
+                        a.keys()
+                            .all(|k| RESTORE_REQUEST_ANNOTATIONS.contains(&k.as_str()))
+                    })
+            };
             let allowed = patch.as_object().is_some_and(|o| {
                 o.keys().all(|k| k == "metadata" || k == "spec")
                     && o.get("metadata").is_none_or(|m| {
-                        m.as_object()
-                            .is_some_and(|m| m.keys().all(|k| k == "resourceVersion"))
+                        m.as_object().is_some_and(|m| {
+                            m.iter()
+                                .all(|(k, v)| k == "resourceVersion" || restore_annotations(k, v))
+                        })
                     })
                     && o.get("spec").is_none_or(|sp| {
                         sp.as_object()
@@ -1009,6 +1084,9 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
             let mut updated = current;
             let mut body = patch.clone();
             body.as_object_mut().unwrap().remove("metadata");
+            if let Some(annotations) = patch.pointer("/metadata/annotations") {
+                merge(&mut updated["metadata"]["annotations"], annotations);
+            }
             let spec_changed = body.get("spec").is_some();
             merge(&mut updated, &body);
             // THE CRD'S OWN CEL, ON THE MERGED RESULT, LIKE A REAL API SERVER.
@@ -1130,7 +1208,7 @@ impl Clock for TestClock {
 
 /// Harness options.
 pub struct Options {
-    pub namespaces: Vec<String>,
+    pub workspaces: Vec<String>,
     pub authenticator: Option<Arc<dyn Authenticator>>,
     pub authorizer: Option<Arc<dyn Authorizer>>,
     pub deadline: Duration,
@@ -1151,7 +1229,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            namespaces: vec![NS_A.to_string(), NS_B.to_string()],
+            workspaces: vec![NS_A.to_string(), NS_B.to_string()],
             authenticator: None,
             authorizer: None,
             deadline: Duration::from_secs(10),
@@ -1348,18 +1426,17 @@ pub fn app_state(fake: &FakeKube, options: Options, clock: &Arc<TestClock>) -> A
         .unwrap_or_else(|| Arc::new(LocalAdminAuthenticator::new("admin", "Local administrator")));
     let authorizer = options
         .authorizer
-        .unwrap_or_else(|| Arc::new(LocalAdminAuthorizer::new(options.namespaces.clone())));
+        .unwrap_or_else(|| Arc::new(LocalAdminAuthorizer::new(options.workspaces.clone())));
     AppState::new(Settings {
         authenticator,
         authorizer,
-        kube: KubeAdapter::with_deadline(fake.client(), options.deadline),
+        kube: KubeAdapter::with_deadline(fake.client(), INSTALL_NS, options.deadline),
         cursor_key: CursorKey::new(options.cursor_key),
         clock: clock.clone() as Arc<dyn Clock>,
         public_origin: options.public_origin.clone(),
         allowed_hosts: options.allowed_hosts.clone(),
         assets: logweir_api::assets::StaticAssets::load(&options.ui_dir)
             .expect("the UI directory loads"),
-        readiness_namespace: options.namespaces[0].clone(),
         shared: options.shared.clone(),
         kubernetes_principal: options.kubernetes_principal.clone(),
         approval: options.approval.clone(),
@@ -1769,20 +1846,20 @@ impl Default for SharedOptions {
 }
 
 /// One binding, for the table a test declares.
-pub fn binding(role: Role, namespace: &str, groups: &[&str]) -> RoleBinding {
+pub fn binding(role: Role, workspace: &str, groups: &[&str]) -> RoleBinding {
     RoleBinding {
         role,
-        namespace: namespace.to_string(),
+        workspace: workspace.to_string(),
         groups: groups.iter().map(|g| (*g).to_string()).collect(),
         subjects: Vec::new(),
     }
 }
 
 /// One binding by exact subject.
-pub fn subject_binding(role: Role, namespace: &str, subjects: &[&str]) -> RoleBinding {
+pub fn subject_binding(role: Role, workspace: &str, subjects: &[&str]) -> RoleBinding {
     RoleBinding {
         role,
-        namespace: namespace.to_string(),
+        workspace: workspace.to_string(),
         groups: Vec::new(),
         subjects: subjects.iter().map(|s| (*s).to_string()).collect(),
     }
@@ -2025,7 +2102,7 @@ impl SharedApp {
 pub const SEEDED_PASSWORD: &str = "seeded-Pw-9c1f7e2a-never-echoed";
 
 pub fn connections() -> String {
-    format!("/api/v1/namespaces/{NS_A}/connections")
+    format!("/api/v1/workspaces/{NS_A}/connections")
 }
 
 pub fn sasl_body(mode: &str, tls: bool) -> Value {

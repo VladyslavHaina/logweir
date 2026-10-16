@@ -52,7 +52,7 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/backups";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/backups";
 
 /// `GET .../backups`. `labelSelector=logweir.dev/schedule=<name>` lists one
 /// schedule's runs.
@@ -60,12 +60,12 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadBackups)?;
+    authorize(&state, &actor, &ws, Action::ReadBackups)?;
     let query = list_query(uri.query())?;
-    let (items, page) = list_page::<Backup>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+    let (items, page) = list_page::<Backup>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &BackupList {
@@ -81,12 +81,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadBackups)?;
+    authorize(&state, &actor, &ws, Action::ReadBackups)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Backup>(&state, &actor, &ns, &name).await?;
+    let object = get_object::<Backup>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &BackupResponse {
@@ -101,7 +101,7 @@ pub async fn get_one(
 
 /// The create route identifier. It is part of the idempotency scope, so it is
 /// also part of the object's name.
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/backups";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/backups";
 
 /// D1 §3.1/§8.1: the deterministic name of a manual run. `logweir-manual-`
 /// plus the 26 base32 characters of the idempotency scope digest is 41
@@ -245,7 +245,6 @@ fn validate_acknowledgement(request: &CreateBackupRequest) -> Result<(), ApiErro
 /// trigger block; the only differences are the deterministic name and the
 /// idempotency annotations the console mode adds.
 fn build(
-    namespace: &str,
     name: String,
     mut annotations: BTreeMap<String, String>,
     request: &CreateBackupRequest,
@@ -350,7 +349,6 @@ fn build(
     Backup {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             labels: Some(labels),
             annotations: Some(annotations),
             ..ObjectMeta::default()
@@ -366,12 +364,12 @@ pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CreateManualBackup)?;
+    authorize(&state, &actor, &ws, Action::CreateManualBackup)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let request: CreateBackupRequest = read_json(body, MAX_JSON_BODY).await?;
@@ -380,6 +378,13 @@ pub async fn create(
     let from = match shape(&request)? {
         Shape::AdHoc => {
             validate_ad_hoc(&request)?;
+            super::schedules::refuse_references_elsewhere(
+                &state,
+                &ws,
+                request.source_ref.as_ref(),
+                request.destination_ref.as_ref(),
+            )
+            .await?;
             None
         }
         Shape::FromSchedule(reference) => {
@@ -391,7 +396,7 @@ pub async fn create(
                 )])
             })?;
             let schedule =
-                get_object::<BackupSchedule>(&state, &actor, &ns, &reference.name).await?;
+                get_object::<BackupSchedule>(&state, &actor, &ws, &reference.name).await?;
             // D1 §8.2: the REVISION the caller believes it is running.
             if let Some(expected) = reference.expected_generation {
                 let current = schedule.metadata.generation.unwrap_or_default();
@@ -417,7 +422,6 @@ pub async fn create(
     // 422 about the RUN rather than a run that fails at the guard rail.
     {
         let probe = build(
-            &ns,
             "probe".to_string(),
             BTreeMap::new(),
             &request,
@@ -444,22 +448,22 @@ pub async fn create(
 
     // THE PER-ACTOR CREATE LIMIT -- `429 rate_limited` with
     // `Retry-After` past `rateLimits.manualBackupsPerMinute` per actor, per
-    // namespace, per minute. After every refusal that is about the request
+    // workspace, per minute. After every refusal that is about the request
     // itself (a malformed run does not spend the window), before the object
     // exists. It bounds how fast one person can QUEUE runs; how many RUN at
     // once is the controller's manual-run pool, which holds whatever this
     // lets through.
-    super::run_create_rate(&state, &actor, &ns, super::ManualRun::Backup)?;
+    super::run_create_rate(&state, &actor, &ws, super::ManualRun::Backup)?;
     let created = create_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         NAME_PREFIX,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request, from.as_ref()),
+        |name, annotations| build(name, annotations, &request, from.as_ref()),
     )
     .await?;
 
@@ -485,7 +489,7 @@ pub async fn create(
             .unwrap_or_default(),
     });
     tracing::info!(
-        namespace = %ns,
+        workspace = %ws,
         name = %created.object.name_any(),
         schedule = %schedule.as_ref().map(|s| s.name.clone()).unwrap_or_default(),
         replayed = created.replayed,

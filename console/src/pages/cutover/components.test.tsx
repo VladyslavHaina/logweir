@@ -20,7 +20,7 @@ function request(over: Partial<SwitchoverApprovalRequest> = {}): SwitchoverAppro
   return {
     switchover: "swo-1",
     switchoverUid: "s-uid",
-    namespace: "team-b",
+    workspace: "team-b",
     approvalName: "swo-approval-x",
     confirmationName: "swo-approval-x-confirmation",
     confirmationSha256: sha("e"),

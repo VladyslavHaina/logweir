@@ -27,11 +27,15 @@
 //! stated on 0.21.0, re-measured unchanged on 0.23.3 by PROD-00.3f and on
 //! Logweir's build of it, `0.23.3+logweir.1`, by PROD-00.2, on build
 //! `0.23.3+logweir.2`, FX-21's patch 0002, by FX-21, on build
-//! `0.23.3+logweir.3`, PROD-00.3g's patch 0003, by PROD-00.3g, and on build
-//! `0.23.3+logweir.4`, patch 0001's rustls 0.23.46): the
+//! `0.23.3+logweir.3`, PROD-00.3g's patch 0003, by PROD-00.3g, on build
+//! `0.23.3+logweir.4`, patch 0001's rustls 0.23.46, and changed by build
+//! `0.23.3+logweir.5`, OD-23's patches 0004 to 0007: committed-only capture
+//! (the TXN row, EN-1), idempotent restore produce (the lost-acknowledgement
+//! row, EN-2), repeated header keys kept (the shapes row, EN-3) and one
+//! byte-rate limit on a restore (EN-4)): the
 //! known counterexamples, stated exactly. They are not desired behaviour.
-//! When the engine changes — READ_COMMITTED capture through PROD-00.3, say —
-//! the row goes red and the contract and this file change together.
+//! When the engine changes the row goes red and the contract and this file
+//! change together.
 //!
 //! Logweir's own verdict (exit code and signed outcome) is asserted as part of
 //! the same contract (`assert_verdict`), because the decision record's FX-6
@@ -57,9 +61,10 @@
 //!     --test record_semantics -- --test-threads=1 --nocapture <row>
 //! ```
 //!
-//! `a_lost_produce_acknowledgement_…` is `#[ignore]`d: it freezes the shared
-//! broker for longer than the engine's 60 s response timeout. Run it alone
-//! with `--ignored`.
+//! `a_lost_produce_acknowledgement_…` is `#[ignore]`d: it needs the
+//! `faultproxy` profile, which CI's e2e job does not start, and waits out the
+//! engine's 60 s response timeout. Run it with `--ignored` on a slot brought up
+//! with `--profiles faultproxy`.
 //!
 //! Each row writes its outcome to `.e2e/record-semantics/<row>.json`
 //! (`.e2e/<project>/record-semantics/` on a PROD-01.5 slot: `demo_dir()`).
@@ -460,9 +465,11 @@ fn kill_own_restores() {
 /// `0.23.3+logweir.2` (patch 0002 changes only the manifest's replication
 /// factors; these rows re-ran on it), PROD-00.3g to its build 3,
 /// `0.23.3+logweir.3` (patch 0003 changes only the restore checkpoint; these
-/// rows re-ran on it), and build 4, `0.23.3+logweir.4` (patch 0001 moves the
-/// engine's rustls to 0.23.46; these rows re-ran on it), which is the engine
-/// the images ship and
+/// rows re-ran on it), build 4, `0.23.3+logweir.4` (patch 0001 moves the
+/// engine's rustls to 0.23.46; these rows re-ran on it), and build 5,
+/// `0.23.3+logweir.5` (patches 0004 to 0007 change the TXN, shapes and
+/// lost-acknowledgement contracts and add the byte-rate row; these rows re-ran
+/// on it), which is the engine the images ship and
 /// CI's e2e job runs (OSO's 0.23.3 release now records outcomes like any other
 /// engine-matrix row). `crates/logweir/tests/engine_pin.rs`
 /// fails when it differs from the pin `doctor` accepts, so a bump cannot leave
@@ -470,7 +477,7 @@ fn kill_own_restores() {
 /// nothing. That guard runs in CI's workspace job and never in this package:
 /// `engine-matrix` runs this package with each row's own engine, so nothing
 /// here may compare the engine with the pin.
-const CONTRACT_ENGINE: &str = "0.23.3+logweir.4";
+const CONTRACT_ENGINE: &str = "0.23.3+logweir.5";
 
 fn contract_applies(row: &str) -> bool {
     let v = engine_version();
@@ -655,6 +662,19 @@ fn capture(raw: &[Rec], archive: &Archive) -> Vec<Divergence> {
     compare(&Comparison {
         expected: raw,
         committed: raw,
+        raw_source: raw,
+        observed: &archive.records,
+        headers: HeaderModel::AppendLineage,
+        lineage: LineageFrom::RecordOffset,
+    })
+}
+
+/// Capture of a committed-only engine (build 5): the committed input against
+/// the archive; the raw log classifies what the archive holds beyond it.
+fn capture_committed(committed: &[Rec], raw: &[Rec], archive: &Archive) -> Vec<Divergence> {
+    compare(&Comparison {
+        expected: committed,
+        committed,
         raw_source: raw,
         observed: &archive.records,
         headers: HeaderModel::AppendLineage,
@@ -1024,29 +1044,36 @@ fn detection_signals(
 /// Transactions: a transactional producer that commits and aborts, and one
 /// transaction held OPEN across the backup and aborted after it.
 ///
-/// Contract (the engine, 0.21.0 through 0.23.3, captures `READ_UNCOMMITTED`,
-/// keeps control records, and replays without a transactional producer):
-/// * capture: the archive holds every data record the log held, committed,
-///   aborted and open alike, plus every transaction marker below the captured
-///   high watermark as an ordinary record;
+/// Contract (engine build 5, patch 0004, PROD-00.3a: the engine fetches and
+/// lists offsets `READ_COMMITTED`, skips control batches and drops aborted
+/// transactions' batches; EN-1, A-C1-1):
+/// * capture: the archive is the committed input, record for record: no
+///   marker, nothing of the aborted transaction B, nothing of D (open at
+///   capture, so above the last stable offset) or of the late topic's E;
 /// * replay: the output is the archive, record for record;
-/// * end to end: every aborted or open-at-capture record and every marker is
-///   an extra; no committed record is missing, changed or reordered.
+/// * end to end: the output is the committed input;
+/// * the restore runs without `restore.allow_transaction_markers` and passes,
+///   its scorecard naming no marker.
+///
+/// Builds 1 to 4 captured `READ_UNCOMMITTED`: every marker below the high
+/// watermark and every aborted or open record was archived and restored (the
+/// row's control: seven `extra:control-marker` from a build that fetches
+/// `READ_COMMITTED` but keeps the control batches). An archive one of them
+/// wrote is still refused `TransactionMarkersInArchive` unless the plan
+/// allows it: `crates/logweir/tests/orchestrator.rs`'s
+/// `an_archive_holding_transaction_markers_is_refused_in_both_target_modes`
+/// and `a_marker_after_the_window_still_refuses_the_restore`.
 #[test]
 fn transactional_topic_committed_input_versus_restored_output() {
     let mut row = Row::new("txn");
     let topic = row.source_topic("txn", &[("message.timestamp.type", "CreateTime")]);
     // Review M3: a second topic whose ONLY transaction (E) opens after the
-    // pre-backup probe and aborts after the backup, so it leaves no marker in
-    // the archive and no gap in the probe.
+    // pre-backup probe and aborts after the backup.
     let late = row.source_topic("txn-late", &[("message.timestamp.type", "CreateTime")]);
     let late_plain: Vec<Out> = (0..PARTS)
         .map(|part| Out::kv(part, None, &format!("l{part}"), &format!("l{part}-value")))
         .collect();
     kafka::produce_plain(&late, &late_plain).expect("late topic's committed records");
-    // PROD-01.1a R1's control: the same records written by a producer that is
-    // not transactional (no markers), in the same backup.
-    let plain = row.source_topic("txn-plain", &[("message.timestamp.type", "CreateTime")]);
     let mut p = Txn::new(&format!("{topic}-tx")).expect("transactional producer");
     let rec = |part: i32, name: &str| Out::kv(part, None, name, &format!("{name}-value"));
     let mut intended_raw: Vec<Out> = Vec::new();
@@ -1079,23 +1106,13 @@ fn transactional_topic_committed_input_versus_restored_output() {
     run_txn(&mut p, &b, "abort");
     run_txn(&mut p, &c, "commit");
     run_txn(&mut p, &d, "open");
-    let plain_recs: Vec<Out> = a.iter().chain(&b).chain(&c).chain(&d).cloned().collect();
-    kafka::produce_plain(&plain, &plain_recs).expect("the plain twin's records");
 
     let hwm_at_capture = kafka::high_watermarks(&topic, PARTS).expect("watermarks");
-    // The open-transaction probes, taken while D is open (see
-    // `kafka::watermarks_at` and `kafka::committed_position_at_eof`).
+    // The open-transaction probes, taken while D is open.
     let wm_committed =
         kafka::watermarks_at(&topic, PARTS, Isolation::Committed).expect("committed watermarks");
     let wm_uncommitted = kafka::watermarks_at(&topic, PARTS, Isolation::Uncommitted)
         .expect("uncommitted watermarks");
-    let eof_committed: Vec<(i32, Result<i64, String>)> = (0..PARTS)
-        .map(|part| (part, kafka::committed_position_at_eof(&topic, part)))
-        .collect();
-    let late_wm_committed = kafka::watermarks_at(&late, PARTS, Isolation::Committed)
-        .expect("late committed watermarks");
-    let late_wm_uncommitted = kafka::watermarks_at(&late, PARTS, Isolation::Uncommitted)
-        .expect("late uncommitted watermarks");
     // E opens only now, after every probe, on p1 of the late topic.
     let mut q = Txn::new(&format!("{late}-tx")).expect("second transactional producer");
     let e = [
@@ -1108,7 +1125,7 @@ fn transactional_topic_committed_input_versus_restored_output() {
     }
     q.flush().expect("flush E");
     let backup_id = row.backup_id("txn");
-    backup_ok(&backup_id, &[&topic, &late, &plain], 1000);
+    backup_ok(&backup_id, &[&topic, &late], 1000);
     // D and E end AFTER the capture, as aborts.
     p.abort().expect("abort the open transaction");
     q.abort().expect("abort the late transaction");
@@ -1117,9 +1134,8 @@ fn transactional_topic_committed_input_versus_restored_output() {
     let committed = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("committed");
     // The fixture landed as designed: the committed view is A then C, the
     // raw view is A, B, C, D in order.
-    let intended_committed: Vec<Out> = a.iter().chain(c.iter()).cloned().collect();
     let order = |v: &mut Vec<Out>| v.sort_by_key(|o| o.partition);
-    let mut ic = intended_committed.clone();
+    let mut ic: Vec<Out> = a.iter().chain(c.iter()).cloned().collect();
     order(&mut ic);
     let mut ir = intended_raw.clone();
     order(&mut ir);
@@ -1127,29 +1143,14 @@ fn transactional_topic_committed_input_versus_restored_output() {
     assert_fixture_landed("txn raw view", &ir, &raw);
 
     let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
-    // PROD-01.1a R1: without the override the restore is refused by name, as
-    // a `newTopic` restore and as a drill, before anything reaches the target.
     let shaped = archive
         .records
         .iter()
         .filter(|x| is_control_shaped(x))
         .count();
     let span = archive_span(&archive);
-    let refused_new = restore_txn(&mut row, "refused", &backup_id, &topic, span, false, false);
-    let refused_drill = restore_txn(&mut row, "drill", &backup_id, &topic, span, true, false);
-    // R1's control: the plain twin restores as it always did.
-    let plain_archive = kafka::read_archive(&backup_id, &plain).expect("plain archive");
-    let rp = restore(
-        &mut row,
-        "plain",
-        &backup_id,
-        &plain,
-        None,
-        archive_span(&plain_archive),
-    );
-    // R2: the same archive with `restore.allow_transaction_markers: true`
-    // restores, and the run says so. It is the row's contract restore below.
-    let r = restore_txn(&mut row, "full", &backup_id, &topic, span, false, true);
+    // The plan states no `restore.allow_transaction_markers`.
+    let r = restore_txn(&mut row, "full", &backup_id, &topic, span, false, false);
 
     let late_raw = kafka::read_topic(&late, PARTS, Isolation::Uncommitted).expect("late raw");
     let late_committed =
@@ -1167,53 +1168,23 @@ fn transactional_topic_committed_input_versus_restored_output() {
         None,
         archive_span(&late_archive),
     );
-    let late_committed_ids: BTreeSet<(i32, i64)> = late_committed
-        .iter()
-        .map(|x| (x.partition, x.offset))
-        .collect();
-    let late_uncommitted = ids(&late_raw, |x| {
-        !late_committed_ids.contains(&(x.partition, x.offset))
-    });
-    let late_cap = capture(&late_raw, &late_archive);
+    let late_cap = capture_committed(&late_committed, &late_raw, &late_archive);
     let late_rep = replay(&late_archive, |_| true, &rl.observed);
     let late_e2e = end_to_end(&late_committed, &late_raw, |_| true, &rl.observed);
-    let late_sig = detection_signals(
-        &late_archive,
-        &late_raw,
-        &late_committed,
-        &late_wm_committed,
-        &late_wm_uncommitted,
-    );
 
-    // Offsets below the captured high watermark that no consumer returns are
-    // control records; the D abort marker lies above it and was not captured.
-    let raw_ids: BTreeSet<(i32, i64)> = raw.iter().map(|r| (r.partition, r.offset)).collect();
-    let markers: Vec<(i32, i64)> = hwm_at_capture
-        .iter()
-        .flat_map(|(part, hi)| (0..*hi).map(move |o| (*part, o)))
-        .filter(|id| !raw_ids.contains(id))
-        .collect();
-    let committed_ids: BTreeSet<(i32, i64)> =
-        committed.iter().map(|r| (r.partition, r.offset)).collect();
-    let uncommitted = ids(&raw, |x| !committed_ids.contains(&(x.partition, x.offset)));
-
-    let cap = capture(&raw, &archive);
+    let cap = capture_committed(&committed, &raw, &archive);
     let rep = replay(&archive, |_| true, &r.observed);
     let e2e = end_to_end(&committed, &raw, |_| true, &r.observed);
     let sig = detection_signals(&archive, &raw, &committed, &wm_committed, &wm_uncommitted);
-    let marker_kinds: Vec<Value> = archive
-        .records
-        .iter()
-        .filter(|x| markers.contains(&(x.partition, x.offset)))
-        .map(|x| {
-            json!({
-                "partition": x.partition,
-                "offset": x.offset,
-                "commit": control_is_commit(x),
-                "timestamp": x.timestamp,
-            })
-        })
-        .collect();
+    let named = |names: &[Out]| -> Vec<(i32, i64)> {
+        archive
+            .records
+            .iter()
+            .filter(|x| names.iter().any(|o| o.key == x.key))
+            .map(|x| (x.partition, x.offset))
+            .collect()
+    };
+    let (aborted_archived, open_archived) = (named(&b), named(&d));
     record_outcome(
         "txn",
         &raw,
@@ -1222,26 +1193,16 @@ fn transactional_topic_committed_input_versus_restored_output() {
         &[("full", &r, &rep[..], &e2e[..])],
         &cap,
         json!({
+            "hwm_at_capture": hwm_at_capture,
             "open_transaction_probe": {
                 "read_committed_watermarks": wm_committed,
                 "read_uncommitted_watermarks": wm_uncommitted,
-                "read_committed_position_at_eof": eof_committed
-                    .iter()
-                    .map(|(part, r)| json!({"partition": part, "position": r.as_ref().ok(), "error": r.as_ref().err()}))
-                    .collect::<Vec<_>>(),
                 "open_transaction_partitions": [0, 2],
             },
-            "hwm_at_capture": hwm_at_capture,
-            "marker_offsets": markers,
-            "uncommitted_offsets": uncommitted,
-            "archived_markers": marker_kinds,
+            "marker_shaped_records": shaped,
+            "aborted_records_archived": aborted_archived,
+            "open_records_archived": open_archived,
             "detection_signals": sig.to_json(),
-            "prod_01_1a": {
-                "marker_shaped_records": shaped,
-                "refused_new_topic": refused_new.verdict,
-                "refused_drill": refused_drill.verdict,
-                "plain_twin": rp.verdict,
-            },
         }),
     );
     record_outcome(
@@ -1251,211 +1212,60 @@ fn transactional_topic_committed_input_versus_restored_output() {
         &late_archive,
         &[("late", &rl, &late_rep[..], &late_e2e[..])],
         &late_cap,
-        json!({
-            "probe_read_committed_watermarks": late_wm_committed,
-            "probe_read_uncommitted_watermarks": late_wm_uncommitted,
-            "uncommitted_offsets": late_uncommitted,
-            "detection_signals": late_sig.to_json(),
-        }),
+        json!({}),
     );
     if !contract_applies("txn") {
         return;
     }
+    // No marker, nothing aborted, nothing open at capture in the archive.
+    assert_eq!(shaped, 0, "a marker-shaped record was archived");
+    assert!(
+        aborted_archived.is_empty(),
+        "B archived: {aborted_archived:?}"
+    );
+    assert!(open_archived.is_empty(), "D archived: {open_archived:?}");
+    assert_eq!(
+        archive.records.len(),
+        committed.len(),
+        "the archive is A and C"
+    );
+    // The restore needs no override and says nothing about markers.
     assert_verdict("txn", &r, 0, "pass");
     assert_verdict("txn late", &rl, 0, "pass");
-    // PROD-01.1a R1: both default restores refused by name, with the
-    // reference predicate's count, and nothing on either target.
-    assert_eq!(shaped, markers.len(), "the archived markers have the shape");
-    for (what, refused) in [("newTopic", &refused_new), ("drill", &refused_drill)] {
-        assert_eq!(refused.verdict["exit"], 3, "{what}: {}", refused.verdict);
-        assert_eq!(
-            refused.verdict["refusal_reason"], "refusal-reason=TransactionMarkersInArchive",
-            "{what}: {}",
-            refused.verdict
-        );
-        let said = refused.verdict["stderr_tail"].to_string();
+    for x in [&r, &rl] {
+        let note = x.verdict["coverage_note"].as_str().unwrap_or("");
         assert!(
-            said.contains(&format!("holds {shaped} record(s)"))
-                && said.contains(&format!("in topic `{topic}` (partitions 0, 1, 2)")),
-            "{what}: {said}"
-        );
-        assert!(
-            !topic_exists(&refused.target) && refused.observed.is_empty(),
-            "{what}: a refused restore created {}",
-            refused.target
+            !note.contains("allow_transaction_markers") && !note.contains("transaction-marker"),
+            "{note}"
         );
     }
-    // R1's control: the plain twin is not refused.
-    assert_verdict("txn plain twin", &rp, 0, "pass");
-    // R2: the override restores, and the signed scorecard says so; the late
-    // topic (no marker archived: PROD-01.1b's case) and the twin carry no note.
-    let note = |x: &Restored| {
-        x.verdict["coverage_note"]
-            .as_str()
-            .unwrap_or("")
-            .to_string()
-    };
-    assert!(
-        note(&r).contains("restore.allow_transaction_markers: true"),
-        "{}",
-        note(&r)
-    );
-    for x in [&rl, &rp] {
-        assert!(
-            !note(x).contains("allow_transaction_markers"),
-            "{}",
-            note(x)
-        );
-        assert!(!note(x).contains("transaction-marker"), "{}", note(x));
-    }
-    // §6.2 on the main topic: markers, the open-at-probe gap on p0 and p2,
-    // and D's records in the uncommitted tail.
-    let d_ids: BTreeSet<(i32, i64)> = raw
-        .iter()
-        .filter(|x| matches!(x.key.as_deref(), Some(b"d0") | Some(b"d1")))
-        .map(|x| (x.partition, x.offset))
-        .collect();
-    assert_eq!(
-        sig.markers,
-        markers.iter().copied().collect::<BTreeSet<_>>()
-    );
+    // The probes still see D open on p0 and p2; the archive holds no marker
+    // and no uncommitted tail.
+    assert!(sig.markers.is_empty(), "{}", sig.to_json());
     assert_eq!(sig.open_at_probe, vec![0, 2]);
-    assert_eq!(sig.uncommitted_tail, d_ids);
-    // §6.2 on the late topic: signals 1 and 2 see nothing; signal 3 finds E.
-    assert!(late_sig.markers.is_empty(), "{}", late_sig.to_json());
-    assert!(late_sig.open_at_probe.is_empty(), "{}", late_sig.to_json());
-    assert_eq!(
-        late_sig.uncommitted_tail,
-        late_uncommitted.iter().copied().collect::<BTreeSet<_>>()
-    );
-    assert_eq!(late_uncommitted.len(), 2, "E's two records");
-    assert_eq!(
-        keys(&late_cap),
-        BTreeSet::new(),
-        "late capture: {:#?}",
-        render(&late_cap)
-    );
-    assert_eq!(
-        keys(&late_rep),
-        BTreeSet::new(),
-        "late replay: {:#?}",
-        render(&late_rep)
-    );
-    let want_late = with_class("extra:uncommitted", &late_uncommitted);
-    assert_eq!(
-        keys(&late_e2e),
-        want_late,
-        "late end to end: {:#?}",
-        render(&late_e2e)
+    assert!(sig.uncommitted_tail.is_empty(), "{}", sig.to_json());
+    for (what, d) in [
+        ("capture", &cap),
+        ("replay", &rep),
+        ("end to end", &e2e),
+        ("late capture", &late_cap),
+        ("late replay", &late_rep),
+        ("late end to end", &late_e2e),
+    ] {
+        assert_eq!(keys(d), BTreeSet::new(), "{what}: {:#?}", render(d));
+    }
+    mutants_are_caught(
+        "txn",
+        |o| keys(&end_to_end(&committed, &raw, |_| true, o)),
+        &r.observed,
+        &BTreeSet::new(),
     );
     mutants_are_caught(
         "txn late",
         |o| keys(&end_to_end(&late_committed, &late_raw, |_| true, o)),
         &rl.observed,
-        &want_late,
+        &BTreeSet::new(),
     );
-
-    let want_capture = with_class("extra:control-marker", &markers);
-    let mut want_e2e = with_class("extra:uncommitted", &uncommitted);
-    want_e2e.extend(with_class("extra:control-marker", &markers));
-    assert_eq!(keys(&cap), want_capture, "capture: {:#?}", render(&cap));
-    assert_eq!(keys(&rep), BTreeSet::new(), "replay: {:#?}", render(&rep));
-    assert_eq!(keys(&e2e), want_e2e, "end to end: {:#?}", render(&e2e));
-    assert!(!markers.is_empty() && !uncommitted.is_empty());
-    mutants_are_caught(
-        "txn",
-        |o| keys(&end_to_end(&committed, &raw, |_| true, o)),
-        &r.observed,
-        &want_e2e,
-    );
-}
-
-/// **PROD-01.1a: a marker after the window's end.** One transaction writes
-/// two records on p0 at `T` and `T + 1` and aborts; the backup cuts a segment
-/// every two records, so the abort marker (stamped by the broker, now) is
-/// alone in p0's second segment. A point-in-time restore at `T + 1000` reads
-/// only the first segment, which holds the aborted records: it is refused all
-/// the same, by name, with nothing on the target. Control: the same archive
-/// restored to its end (the marker inside the window) is refused too.
-#[test]
-fn a_marker_after_the_window_refuses_a_point_in_time_restore() {
-    let mut row = Row::new("txn-after");
-    let topic = row.source_topic("txn-after", &[("message.timestamp.type", "CreateTime")]);
-    let mut p = Txn::new(&format!("{topic}-tx")).expect("transactional producer");
-    p.begin().expect("begin");
-    for (i, name) in ["x0", "x1"].into_iter().enumerate() {
-        let o = Out::kv(0, Some(T + i as i64), name, &format!("{name}-value"));
-        p.send(&topic, &o).expect("send");
-    }
-    p.flush().expect("flush");
-    p.abort().expect("abort");
-    let backup_id = row.backup_id("txn-after");
-    backup_ok(&backup_id, &[&topic], 2);
-    let raw = kafka::read_topic(&topic, PARTS, Isolation::Uncommitted).expect("raw");
-    let committed = kafka::read_topic(&topic, PARTS, Isolation::Committed).expect("committed");
-    let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
-    let pit = T + 1000;
-    let at_point = restore(&mut row, "pit", &backup_id, &topic, Some(pit), (T, pit));
-    let to_end = restore(
-        &mut row,
-        "end",
-        &backup_id,
-        &topic,
-        None,
-        archive_span(&archive),
-    );
-    let marker_segments: Vec<&kafka::Segment> = archive
-        .segments
-        .iter()
-        .filter(|s| {
-            archive.records.iter().any(|r| {
-                is_control_shaped(r)
-                    && r.partition == s.partition
-                    && (s.start_offset..=s.end_offset).contains(&r.offset)
-            })
-        })
-        .collect();
-    let where_markers: Vec<Value> = marker_segments
-        .iter()
-        .map(|s| json!([s.partition, s.key, s.start_timestamp]))
-        .collect();
-    record_outcome(
-        "txn-after",
-        &raw,
-        &committed,
-        &archive,
-        &[("pit", &at_point, &[], &[]), ("end", &to_end, &[], &[])],
-        &[],
-        json!({"point_in_time": pit, "marker_segments": where_markers}),
-    );
-    if !contract_applies("txn-after") {
-        return;
-    }
-    // The layout the row is about: one marker, in a segment wholly after the
-    // point; the two aborted records in the window.
-    assert_eq!(marker_segments.len(), 1, "{where_markers:?}");
-    assert!(
-        marker_segments[0].start_timestamp > pit,
-        "{where_markers:?}"
-    );
-    assert_eq!(raw.len(), 2, "the two aborted records");
-    assert!(committed.is_empty(), "the transaction aborted");
-    for (what, refused) in [("at the point", &at_point), ("to the end", &to_end)] {
-        assert_eq!(refused.verdict["exit"], 3, "{what}: {}", refused.verdict);
-        assert_eq!(
-            refused.verdict["refusal_reason"], "refusal-reason=TransactionMarkersInArchive",
-            "{what}: {}",
-            refused.verdict
-        );
-        assert!(
-            refused.verdict["stderr_tail"]
-                .to_string()
-                .contains("holds 1 record(s)"),
-            "{what}: {}",
-            refused.verdict
-        );
-        assert!(!topic_exists(&refused.target), "{what}: {}", refused.target);
-    }
 }
 
 // ======================================================== TIMESTAMPS
@@ -2120,13 +1930,13 @@ fn shapes_fixture() -> Vec<Out> {
 /// carries `x-original-offset`, binary bytes, one key's order, equal
 /// timestamps.
 ///
-/// Contract (the engine holds headers in an `IndexMap` when it decodes a
-/// fetch and when it encodes a produce):
-/// * capture: a repeated header key keeps its first position and its last
-///   value; everything else is exact;
-/// * replay: the record whose own `x-original-offset` was archived beside the
-///   engine's collapses the same way, losing the source's value;
-/// * end to end: those two records' headers, nothing else.
+/// Contract (engine build 5, patch 0006, PROD-00.3e: the engine reads and
+/// writes headers as a list; EN-3, A-C13-1): capture, replay and end to end
+/// are exact, a repeated header key included (p0@4), and the record that
+/// already carried `x-original-offset` (p0@6) keeps it beside the backup's;
+/// Logweir's verdict passes, sampled and complete. Builds 1 to 4 held headers
+/// in an `IndexMap`: the repeated key collapsed at capture (p0@4) and replay
+/// (p0@6), and both restores failed on p0@6.
 #[test]
 fn keys_nulls_tombstones_and_duplicate_headers() {
     let mut row = Row::new("shapes");
@@ -2191,14 +2001,10 @@ fn keys_nulls_tombstones_and_duplicate_headers() {
     if !contract_applies("shapes") {
         return;
     }
-    // Logweir fails this restore on p0@6 alone (its archive fingerprint holds
-    // two x-original-offset headers, the output one); p0@4's loss happened at
-    // capture, so the drill does not detect it.
-    assert_verdict("shapes", &r, 2, "fail-integrity");
-    // PROD-08.1: complete coverage fails the same record, p0@6 (its archive
-    // holds two x-original-offset headers, the output one), and only it:
-    // p0@4's loss is in the archive too (V3).
-    assert_verdict("shapes complete", &rc, 2, "fail-integrity");
+    assert_verdict("shapes", &r, 0, "pass");
+    // PROD-08.1: complete coverage compares headers in order, with every
+    // occurrence, and matches every record.
+    assert_verdict("shapes complete", &rc, 0, "pass");
     let b = complete_block(&rc);
     assert_eq!(
         (
@@ -2206,37 +2012,21 @@ fn keys_nulls_tombstones_and_duplicate_headers() {
             &b["replay"]["missing"],
             &b["replay"]["unexpected"]
         ),
-        (&json!(1), &json!(0), &json!(0)),
+        (&json!(0), &json!(0), &json!(0)),
         "{b}"
-    );
-    assert!(
-        complete_findings(&rc).contains("p0: source offset 6 at target offset"),
-        "{}",
-        complete_findings(&rc)
     );
     assert_eq!(
         rc.verdict["integrity"]["verification"]["header_order"], "verified",
         "a complete verification compares headers in order"
     );
-    assert_eq!(
-        keys(&cap),
-        with_class("headers-collapsed", &[(0, 4)]),
-        "capture: {:#?}",
-        render(&cap)
-    );
-    assert_eq!(
-        keys(&rep),
-        with_class("headers-collapsed", &[(0, 6)]),
-        "replay: {:#?}",
-        render(&rep)
-    );
-    let want = with_class("headers-collapsed", &[(0, 4), (0, 6)]);
-    assert_eq!(keys(&e2e), want, "end to end: {:#?}", render(&e2e));
+    for (what, d) in [("capture", &cap), ("replay", &rep), ("end to end", &e2e)] {
+        assert_eq!(keys(d), BTreeSet::new(), "{what}: {:#?}", render(d));
+    }
     mutants_are_caught(
         "shapes",
         |o| keys(&end_to_end(&source, &source, |_| true, o)),
         &r.observed,
-        &want,
+        &BTreeSet::new(),
     );
 }
 
@@ -2596,30 +2386,46 @@ fn recreated_topic_between_two_backups() {
 
 // ============================================== ACKNOWLEDGEMENT FAULTS
 
-/// **Fault injection around a produce acknowledgement.** The broker is frozen
-/// (`docker compose pause`) while the engine is producing a restore, for
-/// longer than the engine's 60 s response timeout
-/// (`kafka/client.rs RESPONSE_TIMEOUT_SECS`), then thawed. The engine
-/// classifies "timed out" as a connection error and resends the same batch
-/// non-idempotently (`kafka/partition_router.rs:500-551`); whether the first
-/// copy was appended as well is what this row measures, and records.
+/// One line to the `faultproxy` profile's control port, its JSON line back.
+fn faultproxy(cmd: &str) -> Value {
+    use std::io::{BufRead, BufReader, Write};
+    let mut s = std::net::TcpStream::connect(faultproxy_control())
+        .unwrap_or_else(|e| panic!("the proxy's control port: {e} — is `faultproxy` up?"));
+    s.set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("a read timeout");
+    s.write_all(format!("{cmd}\n").as_bytes())
+        .expect("the command is sent");
+    let mut line = String::new();
+    BufReader::new(s)
+        .read_line(&mut line)
+        .expect("the proxy answers");
+    serde_json::from_str(&line).unwrap_or_else(|e| panic!("{cmd}: {line:?}: {e}"))
+}
+
+/// **A lost produce acknowledgement during a restore (EN-2, A-C5-1).** The
+/// restore's target is the `faultproxy` profile's `kafka-faulty`, armed to
+/// drop the broker's response to the fifth Produce request: the broker
+/// appended the batch and the engine never hears so. After its 60 s response
+/// timeout (`kafka/client.rs RESPONSE_TIMEOUT_SECS`) the engine reconnects and
+/// resends the same batch.
 ///
-/// A single-node KRaft broker frozen that long is also fenced and re-registers
-/// when it thaws, so the resend can meet a partition with no leader. The
-/// outcome therefore varies between runs (PROD-01.1 §5.1 records three), and
-/// the row asserts only what must hold in every one: the fault was injected,
-/// and Logweir never signs `pass` over an output that differs from the
-/// committed input.
+/// Contract (engine build 5, patch 0005, PROD-00.3d: one idempotent producer
+/// per restore, the resend carrying the sequence it carried): the fault was
+/// injected (the proxy dropped exactly one response); the restored topic is
+/// the source, record for record, with no duplicate; Logweir's complete
+/// verification counts 0 duplicates and the run passes. Build 4 resends the
+/// batch as a new one, so its target holds a duplicate batch (the control).
 ///
-/// `#[ignore]`: it stops the shared broker for over a minute. Run it alone:
+/// `#[ignore]`: CI's e2e job does not start the profile.
+/// `eval "$(e2e/compose/stack-env.sh --slot N --profiles faultproxy)"`, then
 /// `… --test record_semantics -- --ignored --exact
 /// a_lost_produce_acknowledgement_during_restore`.
 #[test]
-#[ignore = "freezes the shared compose broker for over 60 s; run alone with --ignored"]
+#[ignore = "needs the faultproxy profile and waits out a 60 s timeout; run with --ignored"]
 fn a_lost_produce_acknowledgement_during_restore() {
     let mut row = Row::new("ack-fault");
     let topic = row.source_topic("ack", &[("message.timestamp.type", "CreateTime")]);
-    const PER_PARTITION: i64 = 20_000;
+    const PER_PARTITION: i64 = 5_000;
     let pad = "x".repeat(200);
     let fixture: Vec<Out> = (0..PARTS)
         .flat_map(|p| {
@@ -2641,128 +2447,51 @@ fn a_lost_produce_acknowledgement_during_restore() {
     backup_ok(&backup_id, &[&topic], 1000);
     let archive = kafka::read_archive(&backup_id, &topic).expect("archive");
     let (prefix, target) = row.target("fault", &topic);
-    let spec = restore_spec(&backup_id, &topic, &prefix, None, archive_span(&archive));
+    let faulty = bootstrap_faultproxy();
+    let mut spec = restore_spec(&backup_id, &topic, &prefix, None, archive_span(&archive));
+    spec["target"]["bootstrap_servers"] = serde_yaml::from_str(&format!("[\"{faulty}\"]")).unwrap();
+    spec["sample"]["coverage"] = "complete".into();
+    let faulty_id = logweir_kafka::rdkafka_reader::RdKafkaReader::connect(
+        std::slice::from_ref(&faulty),
+        logweir_kafka::reader::AuthConfig::Plaintext,
+    )
+    .and_then(|r| logweir_kafka::reader::ClusterReader::cluster_id(&r))
+    .unwrap_or_else(|e| panic!("kafka-faulty answers on {faulty}: {e}"));
+    let allow = demo_dir().join("recsem-ack-allowed-clusters.json");
+    std::fs::write(
+        &allow,
+        serde_json::to_vec(&json!({"allowed_cluster_ids": [faulty_id], "source_cluster_id": null}))
+            .unwrap(),
+    )
+    .unwrap();
 
-    // The restore runs on its own thread; this one watches the target and
-    // freezes the broker as soon as the first records have landed. Polled
-    // every 10 ms once the target exists (the first version of this row
-    // polled slowly and froze anywhere between 5,000 and 57,000 records).
+    let armed = faultproxy("arm drop 5");
+    assert_eq!(armed["mode"], "drop", "{armed}");
     let handle = std::thread::spawn(move || {
         let mut o = RunOpts::new(&spec);
         o.restore_run = true;
-        let r = run_with(o);
-        verdict(&r)
-    });
-    let total = PER_PARTITION * PARTS as i64;
-    let deadline = Instant::now() + Duration::from_secs(900);
-    let mut landed_at_pause = None;
-    let mut target_seen = false;
-    while Instant::now() < deadline && !handle.is_finished() {
-        if !target_seen {
-            target_seen = topic_exists(&target);
-        }
-        if target_seen {
-            if let Ok(w) = kafka::high_watermarks(&target, PARTS) {
-                let n: i64 = w.iter().map(|(_, h)| h).sum();
-                if n > 0 && n < total {
-                    landed_at_pause = Some(n);
-                    break;
-                }
-            }
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    let paused_for = Duration::from_secs(75);
-    // Armed before the pause: whatever happens next, the broker is thawed.
-    let mut thaw = kafka::Thaw { armed: false };
-    let pause_result = landed_at_pause.map(|n| {
-        thaw.armed = true;
-        let p = kafka::compose_broker("pause");
-        let t0 = Instant::now();
-        std::thread::sleep(paused_for);
-        let u = kafka::compose_broker("unpause");
-        thaw.armed = false;
-        eprintln!(
-            "[recsem] ack-fault: paused the broker at {n}/{total} restored records for {:?} \
-             (pause exit {:?}, unpause exit {:?})",
-            t0.elapsed(),
-            p.status.code(),
-            u.status.code()
-        );
-        (n, p.status.code(), u.status.code())
+        o.allowlist = Some(&allow);
+        verdict(&run_with(o))
     });
     let v = join_within(handle, RESTORE_DEADLINE_SECS, "the restore thread");
-    // Logweir's own account first, so a failed read below cannot lose it.
-    kafka::write_json(
-        &demo_dir()
-            .join("record-semantics")
-            .join("ack-fault-logweir.json"),
-        &json!({"paused_after_records": pause_result.map(|x| x.0), "logweir": v}),
-    );
-    // A single-node KRaft broker frozen past its session timeout is fenced
-    // and re-registers when it thaws, so for a moment its partitions have no
-    // leader. Read the target once leadership is back (bounded).
-    let deadline = Instant::now() + Duration::from_secs(180);
-    let observed = loop {
-        match kafka::read_topic(&target, PARTS, Isolation::Committed) {
-            Ok(o) => break o,
-            Err(e) if Instant::now() < deadline => {
-                eprintln!("[recsem] ack-fault: target not readable yet ({e}); retrying");
-                std::thread::sleep(Duration::from_secs(2));
-            }
-            Err(e) => panic!("target unreadable for 180 s after the thaw: {e}"),
-        }
-    };
+    let stats = faultproxy("stats");
+    faultproxy("off");
+    let observed = kafka::read_topic_on(&faulty, &target, PARTS, Isolation::Committed)
+        .unwrap_or_else(|e| panic!("reading {target} on kafka-faulty: {e}"));
     let e2e = end_to_end(&source, &source, |_| true, &observed);
-    let dups: Vec<&Divergence> = e2e
+    let duplicated = e2e
         .iter()
         .filter(|d| matches!(d, Divergence::Duplicate { .. }))
-        .collect();
-    let copies_total: usize = e2e
-        .iter()
-        .map(|d| match d {
-            Divergence::Duplicate { copies, .. } => copies - 1,
-            _ => 0,
-        })
-        .sum();
+        .count();
     let summary = summarize(&e2e);
-    // Per partition: the source-offset range and count of each class, so a
-    // duplicate can be read as whole batches (the engine produces 1,000
-    // records per request).
-    let ranges = |pick: &dyn Fn(&Divergence) -> Option<(i32, i64)>| -> Value {
-        let mut m: std::collections::BTreeMap<i32, (i64, i64, u64)> = Default::default();
-        for d in &e2e {
-            if let Some((p, o)) = pick(d) {
-                let e = m.entry(p).or_insert((i64::MAX, i64::MIN, 0));
-                e.0 = e.0.min(o);
-                e.1 = e.1.max(o);
-                e.2 += 1;
-            }
-        }
-        json!(m
-            .into_iter()
-            .map(|(p, (lo, hi, n))| json!({"partition": p, "from": lo, "to": hi, "count": n}))
-            .collect::<Vec<_>>())
-    };
-    let duplicate_ranges = ranges(&|d| match d {
-        Divergence::Duplicate {
-            partition,
-            source_offset,
-            ..
-        } => Some((*partition, *source_offset)),
-        _ => None,
-    });
-    let missing_ranges = ranges(&|d| match d {
-        Divergence::Missing {
-            partition,
-            source_offset,
-        } => Some((*partition, *source_offset)),
-        _ => None,
-    });
+    let complete = v["integrity"]["verification"]["complete"]["replay"].clone();
     eprintln!(
-        "[recsem] ack-fault: target={} source={} end to end {summary:?}; logweir {v}",
+        "[recsem] ack-fault: proxy {stats}; target={} source={} end to end {summary:?}; complete \
+         {complete}; logweir exit={} outcome={}",
         observed.len(),
-        source.len()
+        source.len(),
+        v["exit"],
+        v["outcome"]
     );
     kafka::write_json(
         &demo_dir().join("record-semantics").join("ack-fault.json"),
@@ -2770,48 +2499,115 @@ fn a_lost_produce_acknowledgement_during_restore() {
             "row": "ack-fault",
             "engine_version": engine_version(),
             "records_per_partition": PER_PARTITION,
-            "paused_after_records": pause_result.map(|x| x.0),
-            "pause_exit": pause_result.map(|x| x.1),
-            "unpause_exit": pause_result.map(|x| x.2),
-            "pause_seconds": paused_for.as_secs(),
+            "proxy": stats,
             "target_records": observed.len(),
             "source_records": source.len(),
-            "duplicated_source_offsets": dups.len(),
-            "extra_copies": copies_total,
-            "duplicate_ranges": duplicate_ranges,
-            "missing_ranges": missing_ranges,
+            "duplicated_source_offsets": duplicated,
             "end_to_end": { "by_class": summary, "first": render(&e2e).into_iter().take(40).collect::<Vec<_>>() },
             "logweir": v,
         }),
     );
-    assert!(
-        pause_result.is_some(),
-        "the restore finished before the first records could be observed; raise PER_PARTITION"
-    );
-    // The fault was injected: the pause happened mid-restore and both compose
-    // verbs succeeded (review L5c).
-    let (_, pause_exit, unpause_exit) = pause_result.expect("checked above");
-    assert_eq!(
-        (pause_exit, unpause_exit),
-        (Some(0), Some(0)),
-        "docker compose pause/unpause must both succeed"
-    );
-    // What holds in every sample, whatever the timing: Logweir never signs
-    // `pass` over an output that differs from the committed input, and an
-    // operational exit (1) leaves no scorecard claiming anything.
+    // What holds on every engine: the fault was injected, once, and Logweir
+    // never signs `pass` over an output that differs from the source.
+    let faulted = stats["faulted"].as_array().cloned().unwrap_or_default();
+    assert_eq!(faulted.len(), 1, "exactly one response dropped: {stats}");
+    assert_eq!(faulted[0]["mode"], "drop", "{stats}");
     if v["outcome"].as_str() == Some("pass") {
-        assert!(
-            e2e.is_empty(),
-            "Logweir signed pass over a divergent output: {summary:?}"
-        );
+        assert!(e2e.is_empty(), "Logweir signed pass over {summary:?}");
     }
-    if v["exit"].as_i64() == Some(1) {
-        assert!(
-            v["outcome"].is_null(),
-            "an operational failure must not come with a scorecard: {}",
-            v["outcome"]
-        );
+    if !contract_applies("ack-fault") {
+        return;
     }
+    assert_eq!(
+        duplicated, 0,
+        "a resent batch was appended twice: {summary:?}"
+    );
+    assert_eq!(keys(&e2e), BTreeSet::new(), "end to end: {summary:?}");
+    assert_eq!(complete["duplicates"], json!(0), "{complete}");
+    assert_eq!(
+        (v["exit"].as_i64(), v["outcome"].as_str()),
+        (Some(0), Some("pass")),
+        "ack-fault: {v}"
+    );
+    mutants_are_caught(
+        "ack-fault",
+        |o| keys(&end_to_end(&source, &source, |_| true, o)),
+        &observed,
+        &BTreeSet::new(),
+    );
+}
+
+/// **One byte-rate limit on the whole restore (EN-4, A-C12-1).** Two
+/// partitions of about 1 KiB records are restored twice in parallel, once
+/// with no limit, measuring the throughput `T` (key and value bytes over the
+/// signed restore phase, phase 6), and once with
+/// `restore.rate_limit_bytes_per_sec: L`, `L = T / 3`.
+///
+/// Contract (engine build 5, patch 0007, PROD-00.3h): the limited restore's
+/// throughput is at most `1.2 L` — a ratio of two measurements, never a
+/// duration — and both restores pass. Build 4 parses the key and paces
+/// nothing, so its limited restore measures about `T`, at least `3 L` (the
+/// control).
+#[test]
+fn a_byte_rate_limit_paces_the_whole_restore() {
+    let mut row = Row::new("byte-rate");
+    let topic = row.source_topic("rate", &[("message.timestamp.type", "CreateTime")]);
+    const PER_PARTITION: i64 = 20_000;
+    let pad = "r".repeat(1000);
+    let fixture: Vec<Out> = (0..2)
+        .flat_map(|p| {
+            let pad = pad.clone();
+            (0..PER_PARTITION).map(move |i| {
+                Out::kv(
+                    p,
+                    Some(T + i),
+                    &format!("rate-p{p}-{i:06}"),
+                    &format!("{i:06}{pad}"),
+                )
+            })
+        })
+        .collect();
+    let bytes: u64 = fixture
+        .iter()
+        .map(|o| (o.key.as_ref().map_or(0, Vec::len) + o.value.as_ref().map_or(0, Vec::len)) as u64)
+        .sum();
+    kafka::produce_plain(&topic, &fixture).expect("produce");
+    drop(fixture);
+    let backup_id = row.backup_id("rate");
+    backup_ok(&backup_id, &[&topic], 5_000);
+    let span = (T - 1000, T + PER_PARTITION + 1000);
+
+    let free = restore(&mut row, "free", &backup_id, &topic, None, span);
+    let free_ms = phase_ms(&free, 6).max(1);
+    let t = bytes * 1000 / free_ms as u64;
+    let limit = (t / 3).max(1);
+    let (prefix, target) = row.target("limited", &topic);
+    let mut spec = restore_spec(&backup_id, &topic, &prefix, None, span);
+    spec["restore"] = serde_yaml::from_str(&format!("rate_limit_bytes_per_sec: {limit}")).unwrap();
+    let limited = restore_spec_run(&mut row, "limited", target, spec);
+    let limited_ms = phase_ms(&limited, 6).max(1);
+    let t_limited = bytes * 1000 / limited_ms as u64;
+    let outcome = json!({
+        "bytes": bytes,
+        "free": {"phase6_ms": free_ms, "bytes_per_sec": t, "exit": free.verdict["exit"]},
+        "limit_bytes_per_sec": limit,
+        "limited": {"phase6_ms": limited_ms, "bytes_per_sec": t_limited, "exit": limited.verdict["exit"]},
+        "limited_over_limit": t_limited as f64 / limit as f64,
+    });
+    eprintln!("[recsem] byte-rate: {outcome}");
+    kafka::write_json(
+        &demo_dir().join("record-semantics").join("byte-rate.json"),
+        &outcome,
+    );
+    if !contract_applies("byte-rate") {
+        return;
+    }
+    assert_verdict("byte-rate free", &free, 0, "pass");
+    assert_verdict("byte-rate limited", &limited, 0, "pass");
+    assert!(
+        t_limited * 10 <= limit * 12,
+        "the limited restore ran at {t_limited} B/s, over 1.2 x its {limit} B/s limit: {outcome}"
+    );
 }
 
 /// **Why termination-based fault injection is blocked (`docs/stability.md`
@@ -3407,8 +3203,7 @@ fn complete_coverage_over_faulted_targets_on_the_real_broker_and_archive() {
             window_floor_source: WindowFloorSource::ArchiveManifest,
             source_partitions: Default::default(),
             default_replication_factor: 1,
-            checkpoint_state: demo_dir().join("cv-checkpoint.json"),
-            checkpoint_interval_secs: 30,
+            rate_limit_bytes_per_sec: None,
             offset_report: demo_dir().join("cv-offsets.json"),
         };
         let started = Instant::now();
@@ -3577,8 +3372,7 @@ fn complete_coverage_cost_per_gigabyte_and_partition() {
             window_floor_source: WindowFloorSource::ArchiveManifest,
             source_partitions: Default::default(),
             default_replication_factor: 1,
-            checkpoint_state: demo_dir().join("cv-cost-checkpoint.json"),
-            checkpoint_interval_secs: 30,
+            rate_limit_bytes_per_sec: None,
             offset_report: demo_dir().join("cv-cost-offsets.json"),
         };
         let started = Instant::now();

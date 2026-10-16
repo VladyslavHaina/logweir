@@ -24,7 +24,7 @@ dropped silently, so an approved object could be edited. The CRDs live in
 `just crds`; do not hand-edit them. Every `kubectl` command in this repository
 names its context.
 
-Thirteen kinds, on `logweir.dev/v1alpha1`:
+Fourteen kinds, on `logweir.dev/v1alpha1`:
 
 | Kind | Scope | What it is |
 |---|---|---|
@@ -41,6 +41,7 @@ Thirteen kinds, on `logweir.dev/v1alpha1`:
 | `Preflight` | Namespaced | One readiness check. Authorises nothing. [Readiness checks](#readiness-checks) |
 | `TopicDiscovery` | Namespaced | One observation of the topics a connection can see. [Topic discovery](#topic-discovery) |
 | `ProtectionPolicy` | Namespaced | A recovery objective and the health against it. [Protection health](#protection-health) |
+| `Switchover` | Namespaced | Applies a restore's reviewed consumer positions to stopped groups, under its own approval. [Consumer positions](#consumer-positions) |
 
 `RehearsalSchedule` is withdrawn in v1 (release-notes item 73).
 
@@ -83,10 +84,71 @@ the private half was not kept), at
 `/etc/logweir/org-root.fingerprint`; no runtime code reads it yet
 ([keys.md](keys.md)).
 
+**One namespace, workspaces inside it.** An install is one Helm release in one
+namespace, and everything Logweir creates lives there; [Workspaces](#workspaces)
+says how its objects are grouped.
+
 **Boundaries.** Approval is a DSSE signature checked against trusted public
 keys, not a `SubjectAccessReview`. Browser verification, resumable crashed
 restores and an HTTP metrics endpoint do not exist. A cluster-admin is not
 stopped by anything here ([stability.md](stability.md), O0).
+
+### Workspaces
+
+An install is one Helm release in one namespace. Its objects, credential
+Secrets, signing and console keys, runner Jobs, the controller and the console
+all live there, and the controller watches that namespace only. Inside it a
+**workspace** (`dev`, `tst`, `stg`, `prd`, …) is a name in the chart's
+`workspaces` list and the label `logweir.dev/workspace` on every object. A
+workspace has its own console role bindings, its own approval mode and its own
+manual-run and check pools; trust, the signing identity, the console keys and
+the images are per install.
+
+- **The label is required.** The console writes it from the workspace in the
+  address and never lets a body choose it. A `kubectl apply` must set it, to a
+  name in the list: an object without it, or with a name not listed, gets
+  `WorkspaceUnknown` and nothing runs. A run that had already finished keeps
+  its phase and conditions (nothing more runs for it), so a workspace dropped
+  from the list and put back finds its Backups and Restores as they were. List
+  one workspace with `kubectl get backups -l logweir.dev/workspace=prd`, or
+  all with `-L logweir.dev/workspace`.
+- **References never cross workspaces.** A `Backup`, `Restore`, schedule,
+  catalog or policy whose `…Ref` names an object of another workspace gets
+  `WorkspaceMismatch`, terminal, with no Job; an approval signed for one
+  workspace never authorises a run in another (`AuthorizationSubjectMismatch`).
+  The rule follows each reference to the end: a `Preflight` or `Switchover` of
+  a `dev` `Restore` whose connection, destination or credential is in `prd` is
+  refused at the `Preflight` or `Switchover` itself, and so is a TTL clone
+  being deleted (it keeps its finalizer and says why).
+  `prd` data reaches `stg` for a drill through a `stg` destination with a
+  read-only grant on `prd`'s bucket, which an administrator sets up.
+- **A credential Secret carries the label too.** The controller mounts a Secret
+  a Logweir object names (`auth.secretRef`, a destination's grants, a retention
+  credential) only when the Secret's `logweir.dev/workspace` equals the
+  referrer's. The console labels the Secrets it writes, and names an existing
+  one only as an inline archive's `credentialRef`; one you create with
+  `kubectl` needs the label of the workspace whose objects name it (see
+  [config/samples/secrets.yaml](../config/samples/secrets.yaml)). The install's
+  key Secrets (`logweir-signing-key`, the console's keys, the OIDC client
+  secret) carry no workspace label, so no object can name them.
+- **Names are unique per install.** Kubernetes enforces it: a name another
+  workspace holds is refused ("in use in this installation").
+
+**What Kubernetes RBAC can and cannot do here.** RBAC stops at the namespace and
+cannot see workspaces.
+
+1. Reading a Logweir kind in the namespace reads it in every workspace.
+   `logweir-viewer` is the one Role to hand out for `kubectl`: it reads every
+   workspace and no Secret.
+2. Creating a Logweir object is creating it in any workspace: the label is free
+   text, and the console's role bindings do not apply to `kubectl`.
+3. **Whoever can read Secrets, create Pods or Jobs, or create a Secret in the
+   namespace holds Logweir's keys** ([the signing-oracle
+   residual](#the-signing-oracle-residual)): with them a person can sign
+   evidence and forge any approval mode, `prd`'s two-person rule included.
+4. So give people the console, and `kubectl` write access to the namespace only
+   to the people you would make administrators of every workspace (Kubernetes'
+   own `admin`). The chart ships no `kubectl` write role.
 
 ## Backups and schedules
 
@@ -532,8 +594,7 @@ kubectl --context docker-desktop -n <namespace> \
 
 Re-pointing at another `KafkaCluster` is refused (`spec.sourceRef is immutable;
 create a new BackupSchedule to protect a different cluster`). Re-pointing at
-another destination is an edit. `kubectl edit` and `kubectl apply` work, which is
-why `logweir-operator` grants `patch` beside `update`.
+another destination is an edit. `kubectl edit` and `kubectl apply` work.
 
 **An edit reaches the next run and never a run that exists.** Each `Backup`
 copies the policy and records the revision in `spec.scheduleRef`; the schedule
@@ -607,12 +668,12 @@ before the child exists, so two replicas cannot admit the same slot.
 A **manual** run (`spec.trigger.kind: Manual`, "Back up now") copies the
 schedule's current policy and records it in `spec.scheduleRef`, which is a record,
 not an identity. It runs while the schedule is suspended, busy or deleted, never
-counts toward `concurrencyPolicy`, and is bounded instead by a per-namespace pool:
+counts toward `concurrencyPolicy`, and is bounded instead by a per-workspace pool:
 
 | Run | Ceiling ([installation policy](#weirkeeper-policy)) |
 |---|---|
-| manual `Backup` | `runs.maxManualBackupsActivePerNamespace`, default `4` |
-| admitted manual `Restore` | `runs.maxManualRestoresActivePerNamespace`, default `2` |
+| manual `Backup` | `runs.maxManualBackupsActivePerWorkspace`, default `4` |
+| admitted manual `Restore` | `runs.maxManualRestoresActivePerWorkspace`, default `2` |
 | `Scheduled`, `CatchUp`, `Retry` | none: `concurrencyPolicy` |
 
 A run over the ceiling waits `phase: Queued`, `Admitted=False/ConcurrencyLimited`,
@@ -804,6 +865,43 @@ older than 630 s (`ProbeStale`) clears `reachable`, keeps `clusterId` and
 `observedAt`, and is probed again on the 315 s cadence. A `Restore` admits a
 target only on `reachable: true`.
 
+### Schema Registry (PROD-03.1, 03.2)
+
+`spec.schemaRegistry: {url, username?, secretRef?: {name, passwordKey}}` names the
+cluster's Confluent-compatible registry (immutable with the rest of `spec`; the
+password key defaults to `registry-password`; `username` and `secretRef` go
+together, for HTTP basic auth). The console writes the password into the
+connection's own Secret. TLS trusts the public roots plus `auth.tlsCa` when set.
+
+- **Backup (source):** after the engine, the runner snapshots every subject and
+  version through the REST API into `<run_id>.schema-registry.json` beside the
+  receipt; the receipt's `schema_registry` block names it. A registry that does
+  not answer, refuses the credential, or is over 100 000 versions or 32 MiB never
+  fails the backup: the block says why it was not captured
+  ([backup-receipt.md](formats/backup-receipt.md#schema_registry--the-source-registrys-snapshot-format-190)).
+- **Restore (target):** before any topic is created, the runner reads the
+  framed schema IDs of every record it restores, takes the subjects holding them
+  and the subjects they reference, and registers what the target lacks in
+  `IMPORT` mode with the source's IDs and versions; each subject's mode is put
+  back exactly as it was. No record byte changes. Refused (exit 3, no topic
+  created): `SchemaConflict` (an ID or version held with other content),
+  `SchemaRegistryCannotKeepIds` (no `IMPORT` mode: Karapace, Apicurio's
+  compatibility API), `SchemaRegistryReadOnly`, `SchemaRegistryModeNotRestored`,
+  `SchemaSnapshotInvalid`, `SchemaRegistryUnreachable`. A target connection
+  without a registry is not refused; the scorecard says the schemas were not
+  imported. Imported schemas are never removed. The registry user must be
+  allowed to set a subject's mode (on Redpanda, a superuser). Any registry
+  answer other than the one that means "not there" refuses the run. The plan's
+  `target.schema_registry` must equal the target connection's
+  (`ConnectionPlanMismatch`).
+- **Checks:** `registry.reachable` (connection test and backup readiness,
+  advisory) and `target.schemas` (restore readiness, blocking) are listed only for
+  a connection that names a registry.
+- The registry Secret carries the connection's `logweir-binding` (it covers the
+  registry URL and username) and is projected as
+  `LOGWEIR_{SOURCE,TARGET}_REGISTRY_PASSWORD`, beside
+  `LOGWEIR_{SOURCE,TARGET}_REGISTRY_CREDENTIAL_BINDING`.
+
 ### Credential binding
 
 A credential Secret is used only when its data key `logweir-binding` equals the
@@ -827,8 +925,12 @@ endpoint they control and have Logweir present it there.
   store exists and refuses `CredentialBindingMismatch`: exit 3 for a run,
   `retention-refusal=CredentialBindingMismatch` for retention, a check code for a
   `Preflight`, the `Reachable` reason on a `KafkaCluster`.
-- **The console** never names an existing Secret: it takes the credential once,
-  creates a Secret owned by and bound to the object, and never reads it back.
+- **The console**, for a connection or a destination, never names an existing
+  Secret: it takes the credential once, creates a Secret owned by and bound to
+  the object, and never reads it back. Only an inline archive's `credentialRef`
+  (a schedule's, an ad-hoc backup's, a restore's without a destination, a
+  catalog's or a preflight's `legacyArchive`) names an existing Secret; the
+  workspace label rule and the location binding hold it.
 - **With `kubectl`**, create the object, read its binding and write it into the
   Secret:
 
@@ -982,7 +1084,7 @@ no token, TTL only after the status) and these volumes:
 | `approval` | immutable `ConfigMap` `<restore>-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json`; under v2 also `approval-policy.json` and `confirmation.pub.pem`; for a point-bound plan `evidence-keys.json` |
 | `signing` | Secret `logweir-signing-key`, `0440` | `/signing` | The runner's signing key, readable because `fsGroup: 65532` is set |
 | `plan` | `ConfigMap` `<restore>-plan` | `/plan` | `spec.planBytes`, verbatim |
-| `work` | `emptyDir` | `/work` | The scorecard, offset report and checkpoint, on a read-only root filesystem |
+| `work` | `emptyDir` | `/work` | The scorecard and offset report, on a read-only root filesystem |
 
 - The Job template pins the SHA-256 of the plan and every bundle member, and the
   Restore and Approval identities, and passes `--execution-contract-version 2`
@@ -1237,6 +1339,77 @@ kubectl --context docker-desktop get restore r1 \
 `Valid` alone says the document is authentic; `pass` alone says the drill passed
 by a document nobody verified. The `SIGNED` and `OUTCOME` columns show both.
 
+### Cancel, and an interrupted restore
+
+Nothing is ever resumed. A restore that stops part-way says so, lists what it
+left, and holds its recovery point until you retry or clean up (PROD-07.2).
+
+**Cancel** (`POST /api/v1/workspaces/<ws>/restores/<name>/cancel`, or the
+annotation `logweir.dev/cancel-requested-by: <you>`) is allowed to whoever may
+create restores in the workspace:
+
+| When | What happens |
+|---|---|
+| Before its Job exists (`Pending`, `Queued`) | `Failed`, reason `Cancelled`; nothing ran |
+| While it runs | The controller sets `spec.suspend: true` on the run Job. The runner gets SIGTERM, forwards it to the engine, SIGKILLs the engine after 10 s, signs nothing and exits 1 (`failure-reason=Cancelled`). The `Restore` stays `Running`, reason `Stopping`, until no pod of the Job is left; a pod on a lost node keeps it there (force-delete it) |
+| After the run signed | Nothing changes: the scorecard decides |
+
+The run Job's pod has a 30 s grace. On Linux the engine also gets
+`PR_SET_PDEATHSIG(SIGKILL)`, so it never outlives a killed runner.
+
+**`Interrupted`.** A run that ended without a signed scorecard *after* it
+created its target topics is `phase: Interrupted`, with `status.interruption.cause`
+`Cancelled`, `RunnerStopped` (a deleted or evicted pod, a deadline, a runner OOMKilled or crashed) or
+`RunFailed`. Before its engine starts, every run writes a create-only targets
+record, `logweir/drills/<run_id>.targets.json` (run id, plan hash, cluster ID,
+and each created topic's name, topic ID and partitions), signed by the run's
+signing key (`<run_id>.targets.sig`). A record that is missing its signature, or
+whose signature does not verify, is refused: nothing is verified and nothing is
+deleted. A run that ended before its creation step is `Failed`, as before.
+
+The controller then starts `logweir-reconcile-<uid>-<n>`, a copy of the run's pod
+running `logweir restore reconcile --run-id <the run>`. It keeps the recorded
+topics that the plan maps and that are still on the recorded cluster with their
+recorded topic IDs (a name deleted and created again is left out and named), waits until their end
+offsets hold still for 10 s (at most 5 minutes, else `TargetStillGrowing`), and
+verifies them against the archive with the complete lane, restoring nothing. It
+signs an ordinary scorecard for its own run id: `fail-integrity` with
+per-partition `expected`, `restored`, `matching`, `missing`, `duplicates`; the
+kept topics in `target.creation`; and a coverage note naming the interrupted run.
+
+| The reconcile found | The `Restore` |
+|---|---|
+| Every recorded topic kept and every partition exact | `Succeeded`, reason `ReconciledComplete`, without a second restore |
+| Anything else, including a recorded topic left out (`integrity.result: partial` names it) | Stays `Interrupted`, `interruption.verification: Done`; the counts are on `status.integrity` and the evidence is the reconcile's scorecard |
+| The run's own scorecard after all (it signed just before it stopped) | What that scorecard says |
+| No targets record, or none of its topics is still the run's | `Failed`, with the reason |
+| A failure (exit 1, no exit code) | Tried again, at most three times, five minutes apart; then `verification: Failed`. The point stays held and Clean up is not offered |
+
+The reconcile reads the targets record from the evidence location with the run's
+`archiveRead` grant, which must therefore read `logweir/drills/*` there
+([install.md §3.11](install.md#311-object-store-permissions-per-destination-role)).
+
+**Clean up** (`POST …/restores/<name>/cleanup`, or
+`logweir.dev/cleanup-requested-by`), only on an `Interrupted` restore whose
+reconcile signed, and with no second approval: the controller runs
+`logweir-cleanup-<uid>-<n>`, wired as a clone's cleanup (the evidence
+destination's `evidenceRead` grant reads the scorecard), running `logweir restore
+cleanup --run-id <the reconcile's run>`. It deletes only the topics that scorecard
+lists, each only while its topic ID is the recorded one, through a deleter scoped
+to the plan's mapped target names, and signs what it did. What it removed and
+left is on `status.teardown`; `interruption.cleanup.phase: Removed` releases the
+recovery point. A topic someone recreated, or one under its original name
+(an original-name restore), is left and named: delete it yourself once checked.
+
+**Retry** is a new `Restore` into fresh names, with its own approval; phase 0
+refuses any execution into the old partial targets.
+
+```bash
+kubectl --context docker-desktop get restore r1 \
+  -o jsonpath='{.status.phase}{"  "}{.status.interruption.cause}{"  "}{.status.interruption.verification}'
+# Interrupted  Cancelled  Done
+```
+
 ### Safe clones: a scratch restore kept for a declared time
 
 A clone (PROD-11.1a) is a `scratch` restore whose plan says how long to keep
@@ -1409,7 +1582,7 @@ an ordinary restore only when it is `Available` and `Verified` or
 - `deepCheck: ManifestDigest` is the default. `deepCheck: None` makes a point
   `Available` once its record and receipt read. `deepCheck: SegmentSample` is
   honoured as `ManifestDigest` (`catalogSegmentSample: notImplemented`).
-- **One catalog per destination per namespace.** A later catalog over the same
+- **One catalog per destination.** A later catalog over the same
   destination reports `Ready=False/DuplicateCatalog` and runs no sync; a
   `RetentionPolicy` or `ProtectionPolicy` pointed at it fails closed. Point them at
   the elder (a `RetentionPolicy.catalogRef` is immutable, so re-create it), or
@@ -1785,7 +1958,7 @@ by an evidence-fetch check Job, never by the controller, which holds no verb on
   `NotFound`, a broken relay) is retried with a new Job at +1 m, +5 m and
   +15 m (`observation.retryAfter`); the run itself is never re-run. A missing
   document and one over the cap are final.
-- At most `checks.maxEvidenceFetchActivePerNamespace` fetches run per namespace;
+- At most `checks.maxEvidenceFetchActivePerWorkspace` fetches run per workspace;
   a run over the limit waits `Pending`. The Job's TTL (10 minutes) is set after
   the verdict commits. A run whose runner reported no receipt digest
   (legacy-unbound) gets no Job.
@@ -1833,17 +2006,25 @@ signers and usage mismatches are decided at once, without the read.
 
 ### The signing-oracle residual
 
-`weirkeeper` is a **signing oracle**: Job CRUD in a namespace that holds
+`weirkeeper` is a **signing oracle**: Job CRUD in the namespace that holds
 `logweir-signing-key` is equivalent to holding that key, because a Job the
 controller creates can mount it. That is residual **O1**, accepted. The
 controller links no signing code (`weirkeeper` depends on `logweir-verify`,
 never on `logweir-evidence`; `scripts/check-one-signer.sh`), and the console
 links it only for its `ConsoleConfirmation` documents, but the capability to
-sign evidence stands while the controller can create Jobs there. The
-chart's `controller.watchNamespaces` replaces the cluster-wide binding with one
-RoleBinding per execution namespace, so O1 then covers those namespaces only; the
-release namespace is outside it. None of this stops a cluster-admin
-(`docs/stability.md`, **O0**).
+sign evidence stands while the controller can create Jobs there.
+
+Since OD-23 the install is one namespace, so the console's session, cursor and
+confirmation keys and the OIDC client secret share it with the signing key.
+**Whoever can read Secrets, create Pods or Jobs, or create a Secret in that
+namespace holds every key**, and can sign evidence and forge any approval mode.
+The console path is closed: a Secret a Logweir object names is mounted only
+when it carries the referrer's `logweir.dev/workspace` label, the key Secrets
+carry none, and the console can neither read a Secret nor create one without
+its workspace's label, so a compromised console cannot make a runner mount a
+key. `kubectl` users with Secret, Pod or Job rights in the namespace remain
+administrators of the install ([Workspaces](#workspaces)). None of this stops a
+cluster-admin (`docs/stability.md`, **O0**).
 
 ## Retention
 
@@ -1999,9 +2180,8 @@ removed too; `planMaxAgeSeconds` bounds that.
 - The enforcement Job runs the runner image (the chart's `runnerImage`) with the
   command `logweir-retention`; there is no separate retention image. It requests
   the `logweir-retention` ServiceAccount, which the chart renders when
-  `retention.enabled` is true, in the release namespace and every
-  `identity.authorizedRunnerNamespaces` entry. Without it the pod is not
-  admitted and nothing is deleted.
+  `retention.enabled` is true, in the release namespace. Without it the pod is
+  not admitted and nothing is deleted.
 - **The margin is the grant.** The binary is in every runner pod, so what stops
   an ordinary run from deleting is that `archiveWrite` carries no
   `s3:DeleteObject`. Do not grant it.
@@ -2107,7 +2287,7 @@ bytes that bind this plan, this subject and its kind.
 
 ### Choosing a mode
 
-Each namespace has one approval mode, set by the installation and frozen into
+Each workspace has one approval mode, set by the installation and frozen into
 every run's execution inputs.
 
 | Mode | Internal | Who approves a `Restore` |
@@ -2124,7 +2304,7 @@ the controller (`LOGWEIR_APPROVAL_POLICY_FILE`) and the console
 ```yaml
 approvalPolicy:
   allowOrdinaryConfirmation: true   # needed for any confirm policy; default false
-  default: confirm                  # optional: confirm or strict, for unbound namespaces
+  default: confirm                  # optional: confirm or strict, for unbound workspaces
   policies:
     - name: team-ordinary
       mode: confirm                 # rendered as Ordinary
@@ -2135,9 +2315,9 @@ approvalPolicy:
     - name: prod-strict
       mode: strict                  # rendered as Governed
       requireDistinctPrincipal: true  # must be true for Governed
-  namespaces:
-    team-a: team-ordinary
-    prod: prod-pair
+  workspaces:                       # each key must be in the chart's `workspaces`
+    dev: team-ordinary
+    prd: prod-pair
 ```
 
 - The controller and the console **refuse to start** on a document that does
@@ -2145,7 +2325,7 @@ approvalPolicy:
   `allowOrdinaryConfirmation: true`, a Governed policy with
   `requireDistinctPrincipal: false`, a binding to an undeclared policy, or the
   reserved names `legacy-governed-v1` and `default-confirm-v1`.
-- **An unbound namespace** resolves to `approvalPolicy.default` (`defaultMode`
+- **An unbound workspace** resolves to `approvalPolicy.default` (`defaultMode`
   in the document; `confirm` or `strict`, never `two-person`); else, on a fresh
   install, `confirm`; else `legacy-governed-v1`. Under `confirm` it resolves to the policy
   `default-confirm-v1` (`Ordinary`, 900 s). An explicit binding always wins.
@@ -2160,7 +2340,7 @@ approvalPolicy:
 
 **The fresh-install default.** Only the identity hook's first run, the one that
 generates the installation identity and the console key
-(`identity.bootstrapFeatures.consoleKey`), makes unbound namespaces `confirm`. It
+(`identity.bootstrapFeatures.consoleKey`), makes unbound workspaces `confirm`. It
 creates the default `TrustPolicy` (only when the cluster has no `TrustPolicy` and
 no `TrustRoster/default`) and writes the annotation
 `logweir.dev/approval-default: confirm;policy=<name>;uid=<uid>;signing=<keyId>;console=<keyId>`
@@ -2168,7 +2348,7 @@ on `logweir-signing-trust`. The controller (every 15 s) and the console honour i
 only when that policy exists with that UID, the provenance
 `logweir.dev/created-by: identity-bootstrap`, `default: true` and exactly the
 claimed signer and console key. Anything else is unmarked, logged as a WARN, and
-the namespace stays `legacy-governed-v1`. An upgrade never reaches this: the
+every unbound workspace stays `legacy-governed-v1`. An upgrade never reaches this: the
 identity already exists.
 
 - That first run needs `create` on `TrustPolicy`. The chart renders the grant
@@ -2183,11 +2363,11 @@ identity already exists.
   `logweir-console-trust`. An existing Secret of that name is adopted and
   trusted by nobody automatically.
 
-**To opt an older install's unbound namespaces into `confirm`:** (1) a trust
+**To opt an older install's unbound workspaces into `confirm`:** (1) a trust
 administrator adds the console key from `logweir-console-trust` to the governing
 `TrustPolicy`, usage `ConsoleConfirmation`; (2) the installation administrator
 sets `approvalPolicy.allowOrdinaryConfirmation: true` and
-`approvalPolicy.default: confirm` (or binds the namespaces) and rolls out
+`approvalPolicy.default: confirm` (or binds the workspaces) and rolls out
 ([install.md](install.md) §5f).
 
 **Residuals** ([SECURITY.md](../SECURITY.md)). In any console mode, whoever
@@ -2251,9 +2431,9 @@ the subject can choose.
 **Keys each mode needs in the namespace's `TrustPolicy`.** A fresh install's
 policy already carries the signer and the console key. Otherwise add the
 console's public key, usage `ConsoleConfirmation` (`GET
-/api/v1/namespaces/{ns}/approval-policy` prints its key id), and, for strict,
+/api/v1/workspaces/{ws}/approval-policy` prints its key id), and, for strict,
 each approver's key, usage `GovernedApproval`, with `principal.id:
-<issuer>#<subject>` (their OIDC identity). A namespace bound to a policy but
+<issuer>#<subject>` (their OIDC identity). A workspace bound to a policy in a namespace
 still on `legacy-roster-v1` refuses every v2 document `KeyIdNotInRoster`.
 
 ### What the controller checks
@@ -2341,7 +2521,7 @@ no `ConfigMap` and no Job.
 Under strict the console stores its signed request as
 `Approval/<approvalRef>-confirmation`, which authorises nothing. The approver
 runs `logweir drill countersign` over the same bytes on their own machine and
-submits the result (`POST /api/v1/namespaces/{ns}/restores/{name}/approval`,
+submits the result (`POST /api/v1/workspaces/{ws}/restores/{name}/approval`,
 Approver role); only then does the referenced `Approval` exist. The console
 refuses an approval submitted by the requester (403, whatever roles the actor
 holds).
@@ -2377,14 +2557,15 @@ signs with the same console key (format `2.2.0`) and stores the `Approval`.
 
 The console, `logweir-api` ([install.md](install.md) §5e), serves the page and a
 bounded product API ([api.md](api.md)) on one origin. Every request is
-authorised for the session's own identity and namespace grants. The legacy
+authorised for the session's own identity and workspace grants. The legacy
 `kubectl proxy` page and the `logweir-ui` image are withdrawn in v1
 (release-notes item 75); the chart refuses `ui.*` by name. The console's
 `shared` mode is the one component that may have an Ingress.
 
-The console is at `/ui/`; every page's address is `#/<namespace>/<page>`
+The console is at `/ui/`; every page's address is `#/<workspace>/<page>`
 ([console/README.md](../console/README.md), *Routes*). The navigation shows
-only what the session's role may read in the namespace.
+only what the session's role may read in the workspace, and the workspace
+picker appears only when the session holds roles in more than one.
 
 | Page | What it does |
 |---|---|
@@ -2794,26 +2975,32 @@ is its newest record.
 
 ### Roles
 
-The chart ships six ClusterRoles; [install.md](install.md) binds the five human
-ones.
+The chart ships four roles. The two human ones are unbound; people use the
+console, whose role bindings are per workspace.
 
 | Role | For |
 |---|---|
-| `weirkeeper` | The controller, bound by one `ClusterRoleBinding` (or one RoleBinding per namespace under `controller.watchNamespaces`) |
-| `logweir-viewer` | Read on all thirteen kinds; no verb on `configmaps` or `secrets` |
-| `logweir-operator` | `create` on the operational kinds; `update`/`patch` on `backupschedules`; `create`/`patch` on `backupdestinations`, `topicdiscoveries` and `preflights` |
-| `logweir-approver` | `create` on `approvals`; `get`/`list` on `preflights` |
-| `logweir-trust-admin` | Read and write on the cluster-scoped `trustpolicies`, and the only write on them. Needs a `ClusterRoleBinding`. Bind it to someone who does not hold `logweir-operator`. No `delete` |
-| `logweir-retention-admin` | Namespaced write on `retentionpolicies`, the only one. No `delete` |
+| `weirkeeper` (Role) and `weirkeeper-cluster-scope` (ClusterRole) | The controller: its namespaced rules in the release namespace only, and the two cluster-scoped trust kinds (`trustrosters`, `trustpolicies`) |
+| `logweir-viewer` (Role) | Read on every namespaced kind, in every workspace; no verb on `configmaps` or `secrets`. The one role to hand out for `kubectl` |
+| `logweir-trust-admin` (ClusterRole) | Read and write on the cluster-scoped `trustpolicies`, and the only write on them. Needs a `ClusterRoleBinding`. No `delete` |
 
-The controller reads all thirteen kinds, patches their status, creates
+There is no `kubectl` write role ([Workspaces](#workspaces)): `logweir-operator`,
+`logweir-approver` and `logweir-retention-admin` were withdrawn with OD-23,
+because a write in the namespace is a write in every workspace. Writing a
+`RetentionPolicy`, whose `spec.mode` moves an install from reporting to
+deleting, is therefore an installation administrator's act with `kubectl`; the
+console cannot write one.
+
+The controller reads all fourteen kinds, patches their status, creates
 `Backup`s, `Restore`s, Jobs and `ConfigMap`s, reads pods, `pods/log` and
 `events`, and holds one `patch` on `backups` (the history detach) and one on
-`trustpolicies` (the compromise finalizer). It holds **no verb on `secrets`, no
+`trustpolicies` (the compromise finalizer). On `secrets` it holds `get` alone,
+for the workspace gate's metadata read of each Secret an object names (its
+`logweir.dev/workspace` label, never its data). It holds **no verb on
 `pods/exec` or `pods/attach`, no `update` on anything, and `delete` on exactly
 two kinds**, `topicdiscoveries` and `preflights`. Every status write is a merge
 `PATCH` preconditioned on `metadata.resourceVersion`. The chart's
-[ClusterRole](../charts/logweir/templates/clusterrole.yaml) is the authority;
+[roles](../charts/logweir/templates/controller-rbac.yaml) are the authority;
 `manifest_lint.rs` checks every call site has a grant and every grant a caller.
 The console's own principal (`<release>-api`) is tabled in
 [install.md](install.md); it holds `create` on `secrets` and no read verb.
@@ -2829,8 +3016,8 @@ account. [UNVERIFIED — no API server has seen either document.]
 
 `logweir-runner-egress` selects every Job pod in its namespace
 (`batch.kubernetes.io/job-name: Exists`) and allows DNS, the broker ports and
-object-store ports 443/9000; apply it to each runner namespace
-([install.md](install.md)). [UNVERIFIED — enforcement needs a kind cluster with
+object-store ports 443/9000; the chart renders it in the release namespace,
+where every Job runs. [UNVERIFIED — enforcement needs a kind cluster with
 Calico and a runner probe that times out to a disallowed address while reaching
 Kafka.] Docker Desktop does not enforce NetworkPolicy.
 
@@ -2844,9 +3031,9 @@ document means the defaults, and `configuration.policy` reads ready.
 
 ```json
 {"version": 1,
- "checks": {"maxActivePerNamespace": 4, "maxActiveTotal": 20,
+ "checks": {"maxActivePerWorkspace": 4, "maxActiveTotal": 20,
             "maxActiveDiscoveriesPerConnection": 1,
-            "maxEvidenceFetchActivePerNamespace": 4},
+            "maxEvidenceFetchActivePerWorkspace": 4},
  "discovery": {"freshSeconds": 900, "retentionSeconds": 86400, "keepPerConnection": 5,
                "defaultMaxTopics": 20000, "hardMaxTopics": 50000,
                "visibilityAttestations": []},
@@ -2855,13 +3042,13 @@ document means the defaults, and `configuration.policy` reads ready.
  "evidence": {"controllerIdentityLocations": []},
  "legacyArchiveAddressing": {"endpoint": "", "region": "", "allowHttp": false,
                              "virtualHostedStyle": false},
- "runs": {"maxManualBackupsActivePerNamespace": 4,
-          "maxManualRestoresActivePerNamespace": 2}}
+ "runs": {"maxManualBackupsActivePerWorkspace": 4,
+          "maxManualRestoresActivePerWorkspace": 2}}
 ```
 
 | Block | Decides |
 |---|---|
-| `checks` | Check Jobs at once, per namespace and in total; evidence fetches have their own pool. Over a ceiling a request is `Queued`, `ConcurrencyLimited` |
+| `checks` | Check Jobs at once, per workspace and in total; evidence fetches have their own pool. Over a ceiling a request is `Queued`, `ConcurrencyLimited` |
 | `discovery.freshSeconds` | After this an inventory reads stale |
 | `discovery.retentionSeconds`, `keepPerConnection` | When terminal discoveries are collected |
 | `discovery.hardMaxTopics` | The ceiling a request's `maxTopics` is lowered to |
@@ -2870,15 +3057,15 @@ document means the defaults, and `configuration.policy` reads ready.
 | `discovery.defaultMaxTopics`, `preflight.defaultTimeoutSeconds` | Withdrawn: nothing reads them. Still accepted (any whole number to 4,294,967,295) so an older controller can read the document |
 | `engine.allowUnverifiedCustomCa` | Whether a destination with a private CA may run backups and restores |
 | `evidence.controllerIdentityLocations` | `[{endpoint, region, bucket}]` where the controller's own identity may read evidence; anything else is `ControllerIdentityNotAllowlisted` |
-| `runs` | Manual-run ceilings per namespace (defaults 4 and 2). The chart renders the block only when a value differs |
+| `runs` | Manual-run ceilings per workspace (defaults 4 and 2). The chart renders the block only when a value differs |
 | `legacyArchiveAddressing` | The inline-archive addressing, published read-only for the legacy restore check. Its `allowHttp` and `virtualHostedStyle` are read by nothing, by decision (FX-15): the check takes transport and addressing from the plan, as the restore runner does, and dropping them would change every install's policy digest |
 
 An attestation has nine required, non-blank fields and applies only on an exact
-match of namespace, `KafkaCluster`, the broker's cluster id and the principal,
+match of namespace (the release namespace), `KafkaCluster`, the broker's cluster id and the principal,
 before `expiresAt`, to an untruncated listing:
 
 ```json
-{"id": "att-orders-prod", "namespace": "team-a", "kafkaCluster": "source",
+{"id": "att-orders-prod", "namespace": "logweir-system", "kafkaCluster": "source",
  "clusterId": "M29I2S7FQPyHBEX12Vx7XA", "principal": "User:backup",
  "attestedBy": "platform-admin@example.invalid",
  "attestedAt": "2026-09-15T00:00:00Z", "expiresAt": "2026-12-15T00:00:00Z",
@@ -2896,7 +3083,7 @@ records the policy's digest in `status.binding.policyDigest`.
 **Collection of the two check kinds.** Terminal `TopicDiscovery` and `Preflight`
 objects are deleted on an hourly pass: terminal only, with a UID precondition,
 at most twenty per pass, and by age alone when the listing was truncated. A
-running check is never collected. Keep-last-five is per namespace and
+running check is never collected. Keep-last-five is per
 connection (`status.binding.connectionUid`, which only the controller writes), so
 creating six discoveries can retire that connection's older ones and nothing
 else. There is no per-object override: copy a verdict out to keep it.
@@ -2928,7 +3115,7 @@ run` without the controller. Its container is called `logweir`.
   | `LOGWEIR_ENGINE_BIN` | Set by the image to `/usr/local/bin/kafka-backup` |
   | `LOGWEIR_ENGINE_VERSION`, `LOGWEIR_ENGINE_DIGEST` | Not needed in the runner image, which declares its engine in `/etc/logweir/engine-identity`; mandatory outside it (an empty value is exit 1). The run checks the engine's `--version` either way |
   | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, or IRSA / Pod Identity | `object_store`'s own chain; `~/.aws/credentials`, `AWS_PROFILE` and SSO are not supported |
-  | `TMPDIR` | Where the rendered `restore.yaml` and the checkpoint land; point it at a writable volume |
+  | `TMPDIR` | Where the rendered `restore.yaml` lands; point it at a writable volume |
   | `RUST_LOG` | The example sets `info` |
 
 - **Metrics.** `--metrics-file` writes a Prometheus textfile; there is no HTTP
@@ -2983,7 +3170,7 @@ ServiceAccount), `VolumeMountFailed`, `CredentialReferenceMissing`,
 `job-name` label narrows the listing and never decides. Two pods claiming one Job
 is terminal `PodOwnershipContested` (not retryable): someone who could read the
 Job's UID planted one. Skipped pods are logged `ForeignPodIgnored`. Do not grant
-pod `create` in a namespace where runs execute: Kubernetes' `edit` role carries
+pod `create` in the install's namespace: Kubernetes' `edit` role carries
 both `pods: create` and `jobs: get`.
 
 ### Why a guard refused: the message
@@ -3094,7 +3281,9 @@ through `pods/log`, and writes `status.evidence.receiptKey` and `sidecarKey`.
 never guessed from the backup id.
 
 - `pods/log` is a subresource; `get` on `pods` does not cover it. The controller
-  holds no verb on `secrets`, `pods/exec` or `pods/attach`, and writes every
+  reads no Secret's data (only a named Secret's labels; its `get` on `secrets`
+  could, as RBAC has no metadata-only grant), holds no verb on
+  `pods/exec` or `pods/attach`, and writes every
   status with a merge `PATCH` preconditioned on `metadata.resourceVersion` (a
   `409` means another writer won; the next pass reads it).
 - `status.records` and `status.capture` are written only beside a `Valid`
@@ -3137,9 +3326,25 @@ mismatch, and image pruning can remove it.
 
 ## Upgrade
 
-The order is always: **CRDs, then the controller and runner images together,
+**0.4.x to 0.5.0 has no in-place upgrade** (OD-23: one namespace per install,
+workspaces inside it). Export trust as in [*Recover onto a clean installation
+with the kit*](install.md#recover-onto-a-clean-installation-with-the-kit), keep
+the bucket, `helm uninstall` the old release (one install per cluster), apply
+the 0.5.0 chart's CRDs server-side
+(`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`, then
+wait for them to be established), install 0.5.0 into one namespace with
+`workspaces`, import trust, and then in each
+workspace add connections, destinations and schedules and connect a catalog to
+see the old points. Delete the old namespaces when done. Every archive stays
+readable and verifiable: nothing in the bucket names a namespace. The CRDs go
+first because `helm uninstall` leaves the old ones and `helm install` does not
+replace a CRD that exists: without the apply, 0.5.0 runs on 0.4.x's schemas and
+the API server prunes the fields it added (`KafkaCluster.spec.schemaRegistry`,
+`Restore.status.interruption`).
+
+Within a release line, the order is always: **CRDs, then the controller and runner images together,
 then the console.** Helm installs `crds/` only on first install, so apply them
-by hand and wait for all thirteen to be established
+by hand and wait for all fourteen to be established
 ([install.md](install.md#upgrade-crds-before-upgrading-the-controller) has the
 loop). A controller started on older CRDs has its new fields pruned by the API
 server; CRDs ahead of an older controller are inert. Each release's own steps

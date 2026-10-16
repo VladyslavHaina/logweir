@@ -154,11 +154,11 @@ fn every_mention_of_a_topic_delete_is_where_this_inventory_says() {
         expect(&[
             // The trait method's declaration.
             (READER, 1),
-            // `impl TopicDeleter`: the method, the three refusal sentences
-            // (no scratch namespace, a protected name, outside the
-            // namespace) and the ONE broker call; plus one call in the
-            // file's own test module.
-            (RDKAFKA_READER, 6),
+            // `impl TopicDeleter`: the method, the four refusal sentences
+            // (no scratch namespace, a protected name, not a mapped target
+            // name (PROD-07.2), outside the namespace) and the ONE broker
+            // call; plus one call in the file's own test module.
+            (RDKAFKA_READER, 7),
             // The probe's delete of its own probe topic, and a test double.
             (PHASE0, 2),
             // Phase 9.
@@ -231,9 +231,11 @@ fn the_brokers_delete_call_is_the_deleters_alone_and_the_creator_names_none() {
     );
     assert!(deleter[call..].starts_with(".delete_topics(&allowed,"));
     for refusal in [
-        "self.scratch_prefix.as_deref() else",
+        "self.deletable_names.is_none() && self.scratch_prefix.is_none()",
         "self.protected_names.contains(n)",
         "n.starts_with(prefix)",
+        // PROD-07.2: a cleanup's exact mapped names.
+        "(Some(set), _) => set.contains(n)",
     ] {
         let at = deleter
             .find(refusal)
@@ -300,7 +302,10 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
     for before in [
         "verified_scorecard(inputs, store)?",
         "check_cluster(&sc.target.cluster_id, &current_cluster)",
-        "let plan = cleanup_plan(creation, &current);",
+        "let mut plan = cleanup_plan(creation, &current);",
+        // od23 review M-3: an original-name topic leaves the delete list
+        // before the one call.
+        ".partition(|t| inputs.spec.source.topics.contains(t));",
     ] {
         let at = cleanup
             .find(before)
@@ -370,8 +375,9 @@ fn the_deleter_is_called_from_the_probe_and_from_phase_9_and_nowhere_else() {
         .match_indices("torn_down")
         .map(|(i, _)| i)
         .collect();
-    // Its definition and the four error returns of phases 6, 7 and 8.
-    assert_eq!(uses.len(), 5, "{uses:?}");
+    // Its definition, the four error returns of phases 6, 7 and 8, and
+    // PROD-07.2's two stops (after phase 6, before signing).
+    assert_eq!(uses.len(), 7, "{uses:?}");
     assert!(
         uses[1..].iter().all(|i| *i > to),
         "the failure teardown runs only once the restore has started"

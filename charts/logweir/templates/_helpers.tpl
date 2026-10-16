@@ -101,20 +101,6 @@ that disagrees with the account this chart renders.
 {{- end -}}
 
 {{- /*
-The namespaces the console/API account is bound in: the release namespace, plus
-`api.namespaces`, or `kubernetes.namespace` when that list is empty.
-Deduplicated: `-n kafka` beside `kubernetes.namespace: kafka` would otherwise
-render one RoleBinding twice and fail the install.
-*/ -}}
-{{- define "logweir.api.namespaces" -}}
-{{- $extra := .Values.api.namespaces -}}
-{{- if and (not $extra) .Values.kubernetes.namespace -}}
-{{- $extra = list .Values.kubernetes.namespace -}}
-{{- end -}}
-{{- (prepend ($extra | default list) .Release.Namespace) | uniq | toJson -}}
-{{- end -}}
-
-{{- /*
 One `KafkaCluster.spec.auth` from the flat `security:` values. The CRD's enum is
 `plaintext|scramSha512` and the client speaks SCRAM-SHA-512 only; every other
 pair is refused in `_validate.tpl` before this runs.
@@ -166,13 +152,9 @@ endpoint as the AWS console shows it) or a list; each entry trimmed.
 {{- end -}}
 
 {{- /*
-Where `kafka.enabled`'s KafkaClusters and `minio.enabled`'s `logweir-s3` land:
-`kubernetes.connectionsNamespace`, or the release namespace. The controller
-reads them in the namespace a Backup runs in and sees only the namespaces it
-watches, so `_validate.tpl` refuses a namespace a scoped controller does not
-watch. The namespace must exist before the install.
+The workspace label of the chart's own objects (`kafka.enabled`'s KafkaClusters
+and MinIO's `logweir-s3`): the first entry of `workspaces`.
 */ -}}
-{{- define "logweir.connectionsNamespace" -}}
-{{- $ns := .Values.kubernetes.connectionsNamespace | default .Release.Namespace -}}
-{{- $ns -}}
+{{- define "logweir.workspaceLabel" -}}
+logweir.dev/workspace: {{ first .Values.workspaces | quote }}
 {{- end -}}

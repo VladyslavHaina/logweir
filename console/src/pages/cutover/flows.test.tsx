@@ -103,8 +103,8 @@ interface World {
 
 /** A viewer's grant: it reads restores and switchovers and creates nothing (DUI-30). */
 function viewerSession() {
-  const ns = sessionFixture.namespaces[0]!;
-  return { ...sessionFixture, namespaces: [{ ...ns, roles: ["viewer"], capabilities: { ...ns.capabilities, restoreCreate: false, approvalSubmit: false } }] };
+  const ws = sessionFixture.workspaces[0]!;
+  return { ...sessionFixture, workspaces: [{ ...ws, roles: ["viewer"], capabilities: { ...ws.capabilities, restoreCreate: false, approvalSubmit: false } }] };
 }
 
 const CONFIRM = { namespace: "team-a", name: "default-confirm-v1", mode: "ordinary", operatorMode: "confirm", legacy: false, basis: "freshInstall", requireDistinctPrincipal: false, ordinaryConfirmationAvailable: true, consoleApprovalAvailable: false, ticketRequired: false, installationDigest: sha("9") };
@@ -114,31 +114,31 @@ function serve(w: World) {
   net.answer = async (r, path) => {
     const ok = (item: unknown) => json(200, { item, requestId: "r" });
     if (path === "/session") return json(200, w.viewer ? viewerSession() : sessionFixture);
-    if (path === "/namespaces/team-a/approval-policy") return ok(w.policy ?? CONFIRM);
-    if (path === "/namespaces/team-a/restores/orders-recovery") return ok(w.restore ?? RESTORE);
-    if (r.method === "POST" && path === "/namespaces/team-a/preflights") return json(202, { item: w.review ?? review(), requestId: "r" });
-    if (path === "/namespaces/team-a/preflights/pf-sw1") return ok(w.review ?? review());
-    if (path.startsWith("/namespaces/team-a/preflights/pf-sw1/details")) return json(200, { items: w.lines ?? LINES, page: { limit: 200 }, requestId: "r" });
-    if (r.method === "POST" && path === "/namespaces/team-a/switchovers") {
+    if (path === "/workspaces/team-a/approval-policy") return ok(w.policy ?? CONFIRM);
+    if (path === "/workspaces/team-a/restores/orders-recovery") return ok(w.restore ?? RESTORE);
+    if (r.method === "POST" && path === "/workspaces/team-a/preflights") return json(202, { item: w.review ?? review(), requestId: "r" });
+    if (path === "/workspaces/team-a/preflights/pf-sw1") return ok(w.review ?? review());
+    if (path.startsWith("/workspaces/team-a/preflights/pf-sw1/details")) return json(200, { items: w.lines ?? LINES, page: { limit: 200 }, requestId: "r" });
+    if (r.method === "POST" && path === "/workspaces/team-a/switchovers") {
       creates += 1;
       return w.create ? w.create(net.sent.at(-1)!.body as Record<string, unknown>, creates) : json(201, { item: switchover(), authorization: { state: "confirmed" }, requestId: "r" });
     }
-    if (path.startsWith("/namespaces/team-a/switchovers?") || path === "/namespaces/team-a/switchovers") return json(200, { items: [w.switchover ?? switchover()], page: { limit: 50 }, requestId: "r" });
-    if (path === "/namespaces/team-a/switchovers/swo-1") {
-      const created = net.sent.filter((s) => s.method === "POST" && s.path === "/namespaces/team-a/switchovers").at(-1)?.body as { planBytes?: string } | undefined;
+    if (path.startsWith("/workspaces/team-a/switchovers?") || path === "/workspaces/team-a/switchovers") return json(200, { items: [w.switchover ?? switchover()], page: { limit: 50 }, requestId: "r" });
+    if (path === "/workspaces/team-a/switchovers/swo-1") {
+      const created = net.sent.filter((s) => s.method === "POST" && s.path === "/workspaces/team-a/switchovers").at(-1)?.body as { planBytes?: string } | undefined;
       return ok(w.switchover ?? switchover(created?.planBytes ? { planBytes: created.planBytes } : {}));
     }
-    if (r.method === "POST" && path === "/namespaces/team-a/switchovers/swo-1/console-approval") return json(201, { item: { name: "swo-approval-x" }, requestId: "r" });
-    if (path === "/namespaces/team-a/switchovers/swo-1/approval-request") return w.request ? ok(w.request) : json(409, { code: "policy_mismatch", detail: "not two-person", requestId: "r" });
+    if (r.method === "POST" && path === "/workspaces/team-a/switchovers/swo-1/console-approval") return json(201, { item: { name: "swo-approval-x" }, requestId: "r" });
+    if (path === "/workspaces/team-a/switchovers/swo-1/approval-request") return w.request ? ok(w.request) : json(409, { code: "policy_mismatch", detail: "not two-person", requestId: "r" });
     return null;
   };
 }
 
 function renderAt(path: string, prime?: (client: QueryClient) => void) {
   const root = createRootRoute({ component: Outlet });
-  const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
+  const ws = createRoute({ getParentRoute: () => root, path: "$ws", component: Outlet });
   const router = createRouter({
-    routeTree: root.addChildren([ns.addChildren([...cutoverRoutes(ns as never), ...approvalRoutes(ns as never)])]),
+    routeTree: root.addChildren([ws.addChildren([...cutoverRoutes(ws as never), ...approvalRoutes(ws as never)])]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -179,8 +179,8 @@ describe("the review offers only what the preflight admits", () => {
     expect(disabled(screen.getByRole("button", { name: "Continue with 2 groups" }))).toBe(false);
     expect(screen.getByText(/live still has consumers connected to orders-dr/)).toBeTruthy();
     expect(screen.getByText(/moved cannot be switched over/)).toBeTruthy();
-    expect(posts("/namespaces/team-a/preflights")).toHaveLength(1);
-    expect(posts("/namespaces/team-a/preflights")[0]!.body).toEqual({ operation: "switchover", switchover: { restoreName: "orders-recovery", restoreUid: RESTORE.uid } });
+    expect(posts("/workspaces/team-a/preflights")).toHaveLength(1);
+    expect(posts("/workspaces/team-a/preflights")[0]!.body).toEqual({ operation: "switchover", switchover: { restoreName: "orders-recovery", restoreUid: RESTORE.uid } });
   });
 
   it("a review that no longer applies offers nothing", async () => {
@@ -203,7 +203,7 @@ describe("the review offers only what the preflight admits", () => {
   it("DUI-42: the runner's remedy renders its code span, never raw backticks", async () => {
     // crates/logweir/src/check/kinds/switchover.rs EVIDENCE_REMEDY, verbatim.
     const remedy =
-      "Restore again with `coverage: complete` from a point that captured these consumer groups, or fix the namespace's evidence trust; the message names the switchover's own reason.";
+      "Restore again with `coverage: complete` from a point that captured these consumer groups, or fix the workspace's evidence trust; the message names the switchover's own reason.";
     serve({ review: review({}, { state: "notReady", code: "RestoreEvidenceRefused", message: "NoPositionsMapping: the restore's scorecard binds no positions mapping", remedy }) });
     renderAt(FLOW);
     const alert = (await screen.findByText("The review refused this restore")).closest(".pf-v6-c-alert") as HTMLElement;
@@ -216,14 +216,14 @@ describe("the review offers only what the preflight admits", () => {
     renderAt(FLOW);
     await screen.findByText("No positions to switch over");
     expect(screen.getByText("VerificationNotComplete")).toBeTruthy();
-    expect(posts("/namespaces/team-a/preflights")).toHaveLength(0);
+    expect(posts("/workspaces/team-a/preflights")).toHaveLength(0);
   });
 
   it("a clone is refused the same way", async () => {
     serve({ restore: { ...RESTORE, target: { ...RESTORE.target, mode: "scratch" } } });
     renderAt(FLOW);
     await screen.findByText("A clone cannot be switched over");
-    expect(posts("/namespaces/team-a/preflights")).toHaveLength(0);
+    expect(posts("/workspaces/team-a/preflights")).toHaveLength(0);
   });
 });
 
@@ -244,7 +244,7 @@ describe("confirm sends one create with the plan the page showed", () => {
     fireEvent.click(screen.getByLabelText(/stay stopped until the switchover finishes/));
     fireEvent.click(button);
     await screen.findAllByText("Waiting for the run's result");
-    const sent = posts("/namespaces/team-a/switchovers");
+    const sent = posts("/workspaces/team-a/switchovers");
     expect(sent).toHaveLength(1);
     const body = sent[0]!.body as Record<string, unknown>;
     const expected = planDocument({ name: RESTORE.name, uid: RESTORE.uid, planHash: RESTORE.planHash, scorecardSha256: sha("b"), mappingSha256: sha("c") }, reviewGroups(LINES.slice(0, 1)).groups);
@@ -275,7 +275,7 @@ describe("confirm sends one create with the plan the page showed", () => {
     fireEvent.click(screen.getByLabelText(/stay stopped until the switchover finishes/));
     fireEvent.click(screen.getByRole("button", { name: "Switch over 1 group" }));
     await screen.findAllByText("Waiting for the run's result");
-    const body = posts("/namespaces/team-a/switchovers")[0]!.body as { planBytes: string };
+    const body = posts("/workspaces/team-a/switchovers")[0]!.body as { planBytes: string };
     expect(body.planBytes).toContain('"gap"');
     expect(body.planBytes).not.toContain('"app"');
   });
@@ -288,7 +288,7 @@ describe("confirm sends one create with the plan the page showed", () => {
     await screen.findByText(UNKNOWN_OUTCOME);
     fireEvent.click(screen.getByRole("button", { name: "Submit again" }));
     await screen.findAllByText("Waiting for the run's result");
-    const sent = posts("/namespaces/team-a/switchovers");
+    const sent = posts("/workspaces/team-a/switchovers");
     expect(sent).toHaveLength(2);
     expect(sent[1]!.key).toBe(sent[0]!.key);
     expect((sent[1]!.body as { planBytes: string }).planBytes).toBe((sent[0]!.body as { planBytes: string }).planBytes);
@@ -296,27 +296,27 @@ describe("confirm sends one create with the plan the page showed", () => {
 
   it("a field refusal lands next to its field, and nothing moves on", async () => {
     const twoPerson = { ...CONFIRM, name: "prod-pair", mode: "governed", operatorMode: "two-person", consoleApprovalAvailable: true, ordinaryConfirmationAvailable: false, ticketRequired: false };
-    serve({ policy: twoPerson, create: () => json(422, { code: "validation_failed", detail: "One or more fields are invalid.", errors: [{ field: "ticket", code: "required", message: "a change ticket is required by this namespace's policy" }], requestId: "q" }) });
+    serve({ policy: twoPerson, create: () => json(422, { code: "validation_failed", detail: "One or more fields are invalid.", errors: [{ field: "ticket", code: "required", message: "a change ticket is required by this workspace's policy" }], requestId: "q" }) });
     await toConfirm();
     fireEvent.click(screen.getByLabelText(/stay stopped until the switchover finishes/));
     fireEvent.click(await screen.findByRole("button", { name: "Request a switchover of 1 group" }));
-    await screen.findByText("a change ticket is required by this namespace's policy");
+    await screen.findByText("a change ticket is required by this workspace's policy");
     expect(screen.getByLabelText(/Change ticket/).getAttribute("aria-invalid")).toBe("true");
     expect(screen.queryByText("Waiting for the run's result")).toBeNull();
   });
 
-  it("a namespace whose policy needs a ticket refuses the click without one, before any request", async () => {
+  it("a workspace whose policy needs a ticket refuses the click without one, before any request", async () => {
     serve({ policy: { ...CONFIRM, operatorMode: "strict", mode: "governed", ordinaryConfirmationAvailable: false, ticketRequired: true } });
     await toConfirm();
     fireEvent.click(screen.getByLabelText(/stay stopped until the switchover finishes/));
     fireEvent.click(await screen.findByRole("button", { name: "Request a switchover of 1 group" }));
-    await screen.findByText("This namespace's policy requires a change ticket.");
-    expect(posts("/namespaces/team-a/switchovers")).toHaveLength(0);
+    await screen.findByText("This workspace's policy requires a change ticket.");
+    expect(posts("/workspaces/team-a/switchovers")).toHaveLength(0);
     // Negative control: with a ticket the same click sends it.
     fireEvent.change(screen.getByLabelText(/Change ticket/), { target: { value: "CHG-1" } });
     fireEvent.click(screen.getByRole("button", { name: "Request a switchover of 1 group" }));
-    await waitFor(() => expect(posts("/namespaces/team-a/switchovers")).toHaveLength(1));
-    expect((posts("/namespaces/team-a/switchovers")[0]!.body as { ticket: string }).ticket).toBe("CHG-1");
+    await waitFor(() => expect(posts("/workspaces/team-a/switchovers")).toHaveLength(1));
+    expect((posts("/workspaces/team-a/switchovers")[0]!.body as { ticket: string }).ticket).toBe("CHG-1");
   });
 });
 
@@ -473,7 +473,7 @@ describe("the switchover's approval (R6's Approvals, subject kind Switchover)", 
     await screen.findByRole("grid", { name: "Positions of app" });
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await screen.findByText("Approved");
-    const sent = posts("/namespaces/team-a/switchovers/swo-1/console-approval");
+    const sent = posts("/workspaces/team-a/switchovers/swo-1/console-approval");
     expect(sent).toHaveLength(1);
     expect(sent[0]!.body).toEqual({ confirmationSha256: sha("e") });
   });
@@ -482,7 +482,7 @@ describe("the switchover's approval (R6's Approvals, subject kind Switchover)", 
     renderAt("/team-a/approvals/switchover/swo-1");
     await screen.findByText("You cannot approve your own request");
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
-    expect(posts("/namespaces/team-a/switchovers/swo-1/console-approval")).toHaveLength(0);
+    expect(posts("/workspaces/team-a/switchovers/swo-1/console-approval")).toHaveLength(0);
   });
 });
 
@@ -500,14 +500,14 @@ describe("round 4: the way back to a review, and who may start one", () => {
     renderAt(FLOW, cached);
     await screen.findByText("4 consumer groups with mapped positions");
     expect(screen.queryByText("This restore cannot be switched over")).toBeNull();
-    expect(posts("/namespaces/team-a/preflights")).toHaveLength(1);
+    expect(posts("/workspaces/team-a/preflights")).toHaveLength(1);
     // CONTROL: when the server's answer is that same restore, the page refuses and starts no review.
     cleanup();
     net.sent = [];
     serve({ restore: running });
     renderAt(FLOW, cached);
     await screen.findByText("This restore cannot be switched over");
-    expect(posts("/namespaces/team-a/preflights")).toHaveLength(0);
+    expect(posts("/workspaces/team-a/preflights")).toHaveLength(0);
   });
 
   it("DUI-28: a Succeeded switchover offers Review again on its page and in the list, which open a new review", async () => {
@@ -544,14 +544,14 @@ describe("round 4: the way back to a review, and who may start one", () => {
     serve({});
     renderAt(FLOW);
     await screen.findByText("4 consumer groups with mapped positions");
-    expect(posts("/namespaces/team-a/preflights")).toHaveLength(1);
+    expect(posts("/workspaces/team-a/preflights")).toHaveLength(1);
   });
 
   it("DUI-31.8: the Switchover page asks for its restore only by the name it reads, never an empty one", async () => {
     serve({ switchover: switchover({ phase: "Succeeded", reason: "Succeeded" }) });
     renderAt("/team-a/switchovers/swo-1");
     await screen.findByText("Outcome per group");
-    await waitFor(() => expect(net.sent.some((x) => x.path === "/namespaces/team-a/restores/orders-recovery")).toBe(true));
-    expect(net.sent.some((x) => x.path === "/namespaces/team-a/restores/" || x.path.startsWith("/namespaces/team-a/restores/?"))).toBe(false);
+    await waitFor(() => expect(net.sent.some((x) => x.path === "/workspaces/team-a/restores/orders-recovery")).toBe(true));
+    expect(net.sent.some((x) => x.path === "/workspaces/team-a/restores/" || x.path.startsWith("/workspaces/team-a/restores/?"))).toBe(false);
   });
 });

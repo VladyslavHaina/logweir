@@ -8,9 +8,9 @@
 #
 # The chart bootstraps the retained `logweir-signing-key` in its release
 # namespace. Before any custom resource, provision the remaining credentials
-# from docs/install.md step 3: `logweir-s3` goes in every namespace that runs
-# Jobs, while `logweir-evidence-ro` (a different, READ-ONLY principal) goes in
-# the release namespace beside the controller.
+# from docs/install.md step 3, all in the release namespace: `logweir-s3` for
+# the runner Jobs, and `logweir-evidence-ro` (a different, READ-ONLY principal)
+# for the controller.
 #
 # Controller/ordinary runner defaults use `latest`, but the privileged
 # `identity.bootstrapImage` is a reviewed digest the chart already pins, so a

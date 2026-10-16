@@ -27,31 +27,31 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
         "/api/v1/raw",
         "/api/v1/raw/apis/logweir.dev/v1alpha1/namespaces/team-a/backups",
         "/api/v1/proxy/namespaces/team-a/services/x",
-        "/api/v1/namespaces/team-a",
+        "/api/v1/workspaces/team-a",
         "/api/v1/namespaces/team-a/secrets",
         "/api/v1/namespaces/team-a/secrets/source-scram",
         "/api/v1/namespaces/team-a/pods",
         "/api/v1/namespaces/team-a/pods/runner-0/log",
         "/api/v1/namespaces/team-a/pods/runner-0/exec",
-        "/api/v1/namespaces/team-a/jobs",
+        "/api/v1/workspaces/team-a/jobs",
         "/api/v1/namespaces/team-a/configmaps",
-        "/api/v1/namespaces/team-a/trustrosters",
-        "/api/v1/namespaces/team-a/backups/x/status",
-        "/api/v1/namespaces/team-a/operations/secret/x",
+        "/api/v1/workspaces/team-a/trustrosters",
+        "/api/v1/workspaces/team-a/backups/x/status",
+        "/api/v1/workspaces/team-a/operations/secret/x",
         // `{id}` ROUTES AND NOT A COLLECTION ROUTE. A discovery
         // is always addressed through its connection or by its own id; there
         // is no namespace-wide list of checks, and a client that guessed one
         // gets 404 rather than an unbounded scan.
-        "/api/v1/namespaces/team-a/topic-discoveries",
-        "/api/v1/namespaces/team-a/destinations/x/topics",
-        "/api/v1/namespaces/team-a/backupdestinations",
+        "/api/v1/workspaces/team-a/topic-discoveries",
+        "/api/v1/workspaces/team-a/destinations/x/topics",
+        "/api/v1/workspaces/team-a/backupdestinations",
         // What stays a 404 is a stream for a kind that has none. A transient check
         // finishes in seconds and already has a cancel route; a long-lived
         // connection is a resource it does not need, and the route table is the
         // boundary.
-        "/api/v1/namespaces/team-a/operations/discovery/x/events",
-        "/api/v1/namespaces/team-a/operations/preflight/x/events",
-        "/api/v1/namespaces/team-a/operations/secret/x/events",
+        "/api/v1/workspaces/team-a/operations/discovery/x/events",
+        "/api/v1/workspaces/team-a/operations/preflight/x/events",
+        "/api/v1/workspaces/team-a/operations/secret/x/events",
         // The cluster-scoped trust read is a READ. There is no write route in
         // v1 and the shape of that is a 405, not a stub that answers 501.
         "/api/v1/trustpolicies",
@@ -68,7 +68,7 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
     }
     // `POST .../preflights` exists; `GET` on it does not. A readiness result
     // is addressed by id, and there is no namespace-wide list of checks.
-    app.get("/api/v1/namespaces/team-a/preflights")
+    app.get("/api/v1/workspaces/team-a/preflights")
         .await
         .assert_problem(405, "method_not_allowed");
     // `operations/{secret|...}` reaches the handler, which refuses the kind
@@ -93,14 +93,14 @@ async fn unimplemented_mutations_have_no_route() {
     // caller-supplied patch document, which is the one thing this API does not
     // accept, and it stays 405.
     for (method, path) in [
-        ("POST", "/api/v1/namespaces/team-a/approvals"),
-        ("DELETE", "/api/v1/namespaces/team-a/backups/x"),
-        ("DELETE", "/api/v1/namespaces/team-a/restores/x"),
-        ("DELETE", "/api/v1/namespaces/team-a/schedules/x"),
-        ("PATCH", "/api/v1/namespaces/team-a/schedules/x"),
-        ("PUT", "/api/v1/namespaces/team-a/backups/x"),
-        ("PUT", "/api/v1/namespaces/team-a/restores/x"),
-        ("OPTIONS", "/api/v1/namespaces/team-a/schedules"),
+        ("POST", "/api/v1/workspaces/team-a/approvals"),
+        ("DELETE", "/api/v1/workspaces/team-a/backups/x"),
+        ("DELETE", "/api/v1/workspaces/team-a/restores/x"),
+        ("DELETE", "/api/v1/workspaces/team-a/schedules/x"),
+        ("PATCH", "/api/v1/workspaces/team-a/schedules/x"),
+        ("PUT", "/api/v1/workspaces/team-a/backups/x"),
+        ("PUT", "/api/v1/workspaces/team-a/restores/x"),
+        ("OPTIONS", "/api/v1/workspaces/team-a/schedules"),
     ] {
         let response = app
             .send(
@@ -130,8 +130,8 @@ async fn unimplemented_mutations_have_no_route() {
 async fn the_manual_run_and_the_policy_edit_are_routed() {
     let app = TestApp::new();
     for (method, path, key) in [
-        ("POST", "/api/v1/namespaces/team-a/backups", true),
-        ("PUT", "/api/v1/namespaces/team-a/schedules/x", false),
+        ("POST", "/api/v1/workspaces/team-a/backups", true),
+        ("PUT", "/api/v1/workspaces/team-a/schedules/x", false),
     ] {
         let mut builder = Request::builder()
             .method(method)
@@ -216,10 +216,10 @@ async fn impersonation_headers_are_refused_on_every_route() {
     let app = TestApp::new();
     for (path, header) in [
         ("/api/v1/session", "Impersonate-User"),
-        ("/api/v1/namespaces/team-a/backups", "impersonate-group"),
-        ("/api/v1/namespaces/team-a/backups", "Impersonate-Uid"),
+        ("/api/v1/workspaces/team-a/backups", "impersonate-group"),
+        ("/api/v1/workspaces/team-a/backups", "Impersonate-Uid"),
         (
-            "/api/v1/namespaces/team-a/backups",
+            "/api/v1/workspaces/team-a/backups",
             "Impersonate-Extra-scopes",
         ),
         ("/ui/", "Impersonate-User"),
@@ -261,7 +261,7 @@ async fn forged_identity_headers_do_not_change_the_actor() {
         .await
         .json();
     assert_eq!(baseline["actor"], forged["actor"]);
-    assert_eq!(baseline["namespaces"], forged["namespaces"]);
+    assert_eq!(baseline["workspaces"], forged["workspaces"]);
     assert_eq!(forged["actor"]["id"], "urn:logweir:local-admin#admin");
 }
 
@@ -387,7 +387,7 @@ async fn the_probes_answer_any_host_and_nothing_else_does() {
 async fn unsafe_methods_need_the_exact_origin_and_json_before_anything_else() {
     let app = TestApp::new();
     let body = support::schedule_body().to_string();
-    let path = format!("/api/v1/namespaces/{NS_A}/schedules");
+    let path = format!("/api/v1/workspaces/{NS_A}/schedules");
     for origin in [
         None,
         Some("http://127.0.0.1:8484/"),
@@ -881,7 +881,7 @@ async fn health_and_readiness() {
         paths,
         vec![
             "/version",
-            "/apis/logweir.dev/v1alpha1/namespaces/team-a/kafkaclusters"
+            "/apis/logweir.dev/v1alpha1/namespaces/logweir-system/kafkaclusters"
         ]
     );
 

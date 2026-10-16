@@ -34,8 +34,6 @@ restore:
   default_replication_factor: 1
   header_preflight: full
   dry_run_check_segments: true
-  checkpoint_state: "/var/lib/logweir/01J9X/checkpoint.json"
-  checkpoint_interval_secs: 30
   time_window_start: 1787961600000
   time_window_end: 1788055200000
   strip_offset_headers: false

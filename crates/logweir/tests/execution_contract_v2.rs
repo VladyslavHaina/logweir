@@ -190,6 +190,7 @@ fn contract_for(bundle: &ApprovalBundleBytes, version: wire::ContractVersion) ->
         subject_kind: "Restore".to_string(),
         subject_name: "rehearsal-weekly-orders-1".to_string(),
         subject_namespace: "team-a".to_string(),
+        subject_workspace: "dev".to_string(),
         subject_uid: "restore-uid-a".to_string(),
         approval_name: "approval-a".to_string(),
         approval_uid: "approval-uid-a".to_string(),
@@ -209,7 +210,7 @@ fn contract_for(bundle: &ApprovalBundleBytes, version: wire::ContractVersion) ->
     }
 }
 
-/// The thirteen mandatory variables, plus whichever v2 ones the contract sets.
+/// The fourteen mandatory variables, plus whichever v2 ones the contract sets.
 fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
     let mut map: BTreeMap<String, String> = [
         (wire::VERSION_ENV, contract.version.as_str().to_string()),
@@ -222,6 +223,10 @@ fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
         (
             wire::SUBJECT_NAMESPACE_ENV,
             contract.subject_namespace.clone(),
+        ),
+        (
+            wire::SUBJECT_WORKSPACE_ENV,
+            contract.subject_workspace.clone(),
         ),
         (wire::SUBJECT_UID_ENV, contract.subject_uid.clone()),
         (wire::APPROVAL_NAME_ENV, contract.approval_name.clone()),

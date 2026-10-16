@@ -3,7 +3,7 @@
 //! THE NAME IS THE KEY. A durable POST's object name is a fixed per-route
 //! prefix plus 26 base32 characters (130 bits) of
 //! `SHA-256(scope)`, where the scope is the length-prefixed tuple
-//! `(issuer, subject, namespace, route, Idempotency-Key)`. A lost response, a
+//! `(issuer, subject, workspace, route, Idempotency-Key)`. A lost response, a
 //! double click or an API restart therefore targets the SAME name, and the API
 //! server's `AlreadyExists` is what makes a second object impossible. No
 //! process memory is consulted, so a new process — or a second replica — gives
@@ -150,7 +150,7 @@ fn push_field(buf: &mut Vec<u8>, value: &str) {
 #[must_use]
 pub fn identity(
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     prefix: &str,
     key: &IdempotencyKey,
@@ -159,7 +159,7 @@ pub fn identity(
     let mut scope = b"logweir-api/idempotency-scope/v1\n".to_vec();
     push_field(&mut scope, &actor.issuer);
     push_field(&mut scope, &actor.subject);
-    push_field(&mut scope, namespace);
+    push_field(&mut scope, workspace);
     push_field(&mut scope, route);
     push_field(&mut scope, &key.0);
     let scope_digest = Sha256::digest(&scope);
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn the_scope_is_mixed_in_and_the_replay_semantics_hold() {
         let body = br#"{"name":"primary","access":{"secretAccessKey":"<write-only>"}}"#;
-        let route = "POST /api/v1/namespaces/{ns}/destinations";
+        let route = "POST /api/v1/workspaces/{ws}/destinations";
         let published = identity(&actor("a"), "ns", route, "", &key("key-00001"), body);
         let other_key = identity(&actor("a"), "ns", route, "", &key("key-99999"), body);
         assert_ne!(other_key.request_hash, published.request_hash);

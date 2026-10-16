@@ -455,7 +455,7 @@ spec:
                         nullable: true
                         type: integer
                       jobRef:
-                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerNamespace`.
+                        description: The evidence-fetch Job of the current attempt, once it exists. Absent while the run waits for a slot under `checks.maxEvidenceFetchActivePerWorkspace`.
                         nullable: true
                         properties:
                           name:
@@ -837,6 +837,29 @@ spec:
                     description: '`pass`, `partial` or `fail`. `partial` is a selection whose evidence was inconclusive — something in the sample was not examined — and is NOT a pass.'
                     nullable: true
                     type: string
+                  schemas:
+                    description: 'What the signed scorecard''s `target.schemas` says: how many subject-versions the run imported into the target registry with their source IDs, how many were already there, or why none were. ABSENT: the scorecard carries no block (no registry on either side).'
+                    nullable: true
+                    properties:
+                      alreadyPresent:
+                        description: '`target.schemas.already_present`.'
+                        format: uint64
+                        minimum: 0
+                        type: integer
+                      imported:
+                        description: '`target.schemas.imported_count`.'
+                        format: uint64
+                        minimum: 0
+                        type: integer
+                      notImported:
+                        description: '`target.schemas.not_imported`: `noTargetRegistry` or `noSnapshot`.'
+                        maxLength: 64
+                        nullable: true
+                        type: string
+                    required:
+                    - alreadyPresent
+                    - imported
+                    type: object
                   selection:
                     description: |-
                       The signed `source.selection` (scorecard format 1.7.0 for a window start, 2.0.0 for a partition subset): this restore restored a SELECTION — a window from a stated start, or only the listed partitions of a narrowed topic — not every record of every partition of every restored topic from the archive's floor. Every verdict above (`result`, `coverage`, `complete`) is the selection's.
@@ -901,6 +924,93 @@ spec:
                     maxItems: 256
                     nullable: true
                     type: array
+                type: object
+              interruption:
+                description: 'A run that ended without a signed scorecard after it created its target topics (`phase: Interrupted`): why, the reconcile that verified what it left, and the cleanup. Absent on every other run.'
+                nullable: true
+                properties:
+                  attempts:
+                    description: 'How many reconcile Jobs were started: at most 3, five minutes apart.'
+                    format: int64
+                    nullable: true
+                    type: integer
+                  cause:
+                    description: '`Cancelled` (a cancel was requested), `RunnerStopped` (the runner was stopped or killed: a deleted or evicted pod, a deadline) or `RunFailed` (the run failed after it created its targets).'
+                    nullable: true
+                    type: string
+                  cleanup:
+                    description: The cleanup, once asked for.
+                    nullable: true
+                    properties:
+                      attempts:
+                        description: 'How many cleanup Jobs were started: at most 3, five minutes apart.'
+                        format: int64
+                        nullable: true
+                        type: integer
+                      jobRef:
+                        description: The current cleanup Job.
+                        nullable: true
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`, in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      phase:
+                        description: '`Removing`, `Removed` or `RemovalFailed`.'
+                        nullable: true
+                        type: string
+                      reason:
+                        description: Why it failed, when it did; bounded.
+                        maxLength: 1024
+                        nullable: true
+                        type: string
+                      requestedBy:
+                        description: Who asked for it, from `logweir.dev/cleanup-requested-by`.
+                        maxLength: 256
+                        nullable: true
+                        type: string
+                    type: object
+                  jobRef:
+                    description: The current reconcile Job.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  reconcileRunId:
+                    description: The run id of the reconcile's signed scorecard, which the cleanup reads.
+                    maxLength: 64
+                    nullable: true
+                    type: string
+                  requestedBy:
+                    description: Who asked for the cancel, from `logweir.dev/cancel-requested-by`.
+                    maxLength: 256
+                    nullable: true
+                    type: string
+                  runId:
+                    description: The interrupted run's id (its targets record is `logweir/drills/<runId>.targets.json`).
+                    maxLength: 64
+                    nullable: true
+                    type: string
+                  verification:
+                    description: '`Running`, `Done` or `Failed`: the reconcile''s state.'
+                    nullable: true
+                    type: string
+                  verificationReason:
+                    description: Why the reconcile failed (or the last attempt did); bounded.
+                    maxLength: 1024
+                    nullable: true
+                    type: string
+                  writerGoneAt:
+                    description: When the controller saw that no pod of the run was left.
+                    format: date-time
+                    nullable: true
+                    type: string
                 type: object
               jobRef:
                 description: The Job that ran, or is running, this restore.
@@ -973,7 +1083,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). Task 20 owns the phase vocabulary.'
+                description: 'Where the run is: `Pending`, `Queued`, `Running`, `Succeeded`, `Failed`, `Refused`, `Interrupted`. `Queued` is an admitted manual restore waiting for a slot in its namespace''s manual-restore pool (`status.queue`). `Interrupted` is a run that ended without a signed scorecard after it created its target topics (`status.interruption`). Task 20 owns the phase vocabulary.'
                 nullable: true
                 type: string
               progress:
@@ -1121,7 +1231,7 @@ spec:
                     nullable: true
                     type: string
                   limit:
-                    description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerNamespace` (a `Backup`) or `runs.maxManualRestoresActivePerNamespace` (a `Restore`) when the run was queued.'
+                    description: 'The ceiling this run is queued behind: the installation policy''s `runs.maxManualBackupsActivePerWorkspace` (a `Backup`) or `runs.maxManualRestoresActivePerWorkspace` (a `Restore`) when the run was queued.'
                     format: int64
                     type: integer
                 required:

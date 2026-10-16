@@ -1492,14 +1492,13 @@ fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
     );
 }
 
-/// `build_plan` puts the restore checkpoint at
-/// `temp_dir()/logweir-<run_id>/checkpoint.json`, and the engine does not
-/// create the parent, so without it `kafka-backup restore` exits 1 with
-/// `IO error: No such file or directory (os error 2)` on every real run while
-/// every double passes. This asserts the directory the plan names exists once
-/// the drill has run.
+/// `build_plan` puts the engine's offset report at
+/// `temp_dir()/logweir-<run_id>/offsets.json`, and the engine does not create
+/// the parent; its report write is only a warning, so without it a real run
+/// signs no `evidence.offset_report_key` while every double passes. This
+/// asserts the directory the plan names exists once the drill has run.
 #[test]
-fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
+fn the_offset_report_directory_exists_after_a_drill_runs() {
     let f = fixtures::orchestrator_args_against_fixture_engine();
     let dir = std::env::temp_dir().join(format!("logweir-{}", f.run_id));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1507,7 +1506,7 @@ fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
     execute_with(&f.args, &f.run_id, &f.ctx).expect("fixture drill passes");
     assert!(
         dir.is_dir(),
-        "{} was never created, so the engine's `restore.checkpoint_state` has no \
+        "{} was never created, so the engine's `restore.offset_report` has no \
          parent directory to write into",
         dir.display()
     );
@@ -1918,6 +1917,7 @@ fn bound_as_restored(f: &fixtures::OrchestratorFixture) -> logweir::drill::bindi
         manifest_key: set.manifest_key,
         manifest_sha256: facts.manifest_sha256,
         manifest_version_id: facts.manifest_version_id,
+        schema_registry: None,
     }
 }
 
@@ -2363,6 +2363,58 @@ fn a_partition_subset_is_restored_and_signed_as_format_2_0_0() {
         serde_json::from_slice(&scorecard_from_store(&control)).unwrap();
     assert!(sc.source.selection.is_none());
     assert!(sc.format_version.starts_with("1."), "{}", sc.format_version);
+}
+
+/// **A partition subset that imports no schemas still signs** (od23
+/// review H-1). The plan names a target registry and the archive captured
+/// none, so the run writes `target.schemas.not_imported: noSnapshot` before
+/// the selection picks major 2. The run passes, and its scorecard is a 2.x
+/// version that defines the block (arm SC-1), which the signer's own check
+/// and the verifier accept. The control is the same plan without the subset:
+/// a 1.x version that defines the block.
+///
+/// KILLS: the schemas raise left before the selection, which signed 2.2.0 and
+/// exited 4 after the restore had written.
+#[test]
+fn a_partition_subset_that_imports_no_schemas_signs_a_version_that_defines_the_block() {
+    for (shape, major) in [
+        (Drill::StatesAPartitionSelection, "2."),
+        (Drill::Passes, "1."),
+    ] {
+        let mut f = fixtures::orchestrator_fixture(shape);
+        f.ctx.spec.target.schema_registry = Some(logweir_core::spec::SchemaRegistrySpec {
+            url: "http://registry.invalid:8081".into(),
+            username: None,
+        });
+        execute_with(&f.args, &f.run_id, &f.ctx).expect("the run signs");
+        let bytes = scorecard_from_store(&f);
+        let sc: logweir_core::scorecard::Scorecard = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(sc.outcome, Outcome::Pass);
+        assert!(
+            sc.format_version.starts_with(major),
+            "{}",
+            sc.format_version
+        );
+        assert!(
+            logweir_core::scorecard::defines_schemas(&sc.format_version),
+            "{}",
+            sc.format_version
+        );
+        assert_eq!(sc.validate_invariants().map_err(|e| e.0), Ok(()));
+        assert_eq!(
+            sc.target.schemas.and_then(|s| s.not_imported).as_deref(),
+            Some(logweir_core::schema_registry::NOT_IMPORTED_NO_SNAPSHOT)
+        );
+        let sidecar: logweir_evidence::Sidecar =
+            serde_json::from_slice(&std::fs::read(f.out.with_extension("sig")).unwrap()).unwrap();
+        logweir_evidence::verify::verify_detached(
+            &signing_pub(&f),
+            logweir_evidence::PAYLOAD_TYPE_SCORECARD,
+            &bytes,
+            &sidecar,
+        )
+        .expect("the signed scorecard verifies");
+    }
 }
 
 /// **A stated window start is restored, judged over its window and

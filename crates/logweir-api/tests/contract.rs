@@ -51,54 +51,56 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/session/logout",
             "/auth/login",
             "/auth/callback",
-            "/api/v1/namespaces",
-            "/api/v1/namespaces/{ns}/connections",
-            "/api/v1/namespaces/{ns}/connections/{name}",
+            "/api/v1/workspaces",
+            "/api/v1/workspaces/{ws}/connections",
+            "/api/v1/workspaces/{ws}/connections/{name}",
             "/api/v1/cadence-previews",
-            "/api/v1/namespaces/{ns}/schedules",
-            "/api/v1/namespaces/{ns}/schedules/{name}",
-            "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension",
-            "/api/v1/namespaces/{ns}/backups",
-            "/api/v1/namespaces/{ns}/backups/{name}",
-            "/api/v1/namespaces/{ns}/restores",
-            "/api/v1/namespaces/{ns}/restores/{name}",
-            "/api/v1/namespaces/{ns}/restores/{name}/approval",
-            "/api/v1/namespaces/{ns}/restores/{name}/approval-request",
-            "/api/v1/namespaces/{ns}/restores/{name}/console-approval",
-            "/api/v1/namespaces/{ns}/switchovers",
-            "/api/v1/namespaces/{ns}/switchovers/{name}",
-            "/api/v1/namespaces/{ns}/switchovers/{name}/approval",
-            "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request",
-            "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval",
-            "/api/v1/namespaces/{ns}/approval-policy",
-            "/api/v1/namespaces/{ns}/approvals",
-            "/api/v1/namespaces/{ns}/approvals/{name}",
-            "/api/v1/namespaces/{ns}/approvals/{name}/packet",
-            "/api/v1/namespaces/{ns}/destinations",
-            "/api/v1/namespaces/{ns}/destinations/{name}",
-            "/api/v1/namespaces/{ns}/destinations/{name}:update-access",
-            "/api/v1/namespaces/{ns}/destinations/{name}:test",
-            "/api/v1/namespaces/{ns}/destinations/{name}/usage",
-            "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel",
-            "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
-            "/api/v1/namespaces/{ns}/preflights",
-            "/api/v1/namespaces/{ns}/preflights/{id}",
-            "/api/v1/namespaces/{ns}/preflights/{id}:cancel",
-            "/api/v1/namespaces/{ns}/preflights/{id}/details",
-            "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
+            "/api/v1/workspaces/{ws}/schedules",
+            "/api/v1/workspaces/{ws}/schedules/{name}",
+            "/api/v1/workspaces/{ws}/schedules/{name}:set-suspension",
+            "/api/v1/workspaces/{ws}/backups",
+            "/api/v1/workspaces/{ws}/backups/{name}",
+            "/api/v1/workspaces/{ws}/restores",
+            "/api/v1/workspaces/{ws}/restores/{name}",
+            "/api/v1/workspaces/{ws}/restores/{name}/cancel",
+            "/api/v1/workspaces/{ws}/restores/{name}/cleanup",
+            "/api/v1/workspaces/{ws}/restores/{name}/approval",
+            "/api/v1/workspaces/{ws}/restores/{name}/approval-request",
+            "/api/v1/workspaces/{ws}/restores/{name}/console-approval",
+            "/api/v1/workspaces/{ws}/switchovers",
+            "/api/v1/workspaces/{ws}/switchovers/{name}",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/approval",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/approval-request",
+            "/api/v1/workspaces/{ws}/switchovers/{name}/console-approval",
+            "/api/v1/workspaces/{ws}/approval-policy",
+            "/api/v1/workspaces/{ws}/approvals",
+            "/api/v1/workspaces/{ws}/approvals/{name}",
+            "/api/v1/workspaces/{ws}/approvals/{name}/packet",
+            "/api/v1/workspaces/{ws}/destinations",
+            "/api/v1/workspaces/{ws}/destinations/{name}",
+            "/api/v1/workspaces/{ws}/destinations/{name}:update-access",
+            "/api/v1/workspaces/{ws}/destinations/{name}:test",
+            "/api/v1/workspaces/{ws}/destinations/{name}/usage",
+            "/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}:cancel",
+            "/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics",
+            "/api/v1/workspaces/{ws}/preflights",
+            "/api/v1/workspaces/{ws}/preflights/{id}",
+            "/api/v1/workspaces/{ws}/preflights/{id}:cancel",
+            "/api/v1/workspaces/{ws}/preflights/{id}/details",
+            "/api/v1/workspaces/{ws}/operations/{kind}/{name}",
             // The stream, the read families and the one write among them.
-            "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
-            "/api/v1/namespaces/{ns}/protection-policies",
-            "/api/v1/namespaces/{ns}/protection-policies/{name}",
-            "/api/v1/namespaces/{ns}/catalogs",
-            "/api/v1/namespaces/{ns}/catalogs/{name}",
-            "/api/v1/namespaces/{ns}/catalogs/{name}/points",
-            "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
-            "/api/v1/namespaces/{ns}/retention-policies",
-            "/api/v1/namespaces/{ns}/retention-policies/{name}",
-            // The one cluster-scoped family: no `{ns}`, because a TrustPolicy
+            "/api/v1/workspaces/{ws}/operations/{kind}/{name}/events",
+            "/api/v1/workspaces/{ws}/protection-policies",
+            "/api/v1/workspaces/{ws}/protection-policies/{name}",
+            "/api/v1/workspaces/{ws}/catalogs",
+            "/api/v1/workspaces/{ws}/catalogs/{name}",
+            "/api/v1/workspaces/{ws}/catalogs/{name}/points",
+            "/api/v1/workspaces/{ws}/catalogs/{name}/signers",
+            "/api/v1/workspaces/{ws}/retention-policies",
+            "/api/v1/workspaces/{ws}/retention-policies/{name}",
+            // The one cluster-scoped family: no `{ws}`, because a TrustPolicy
             // names the namespaces it governs rather than living in one.
             "/api/v1/trust-policies",
             "/api/v1/trust-policies/{name}",
@@ -119,8 +121,9 @@ fn the_document_names_every_route_and_every_route_answers() {
     // getApprovalPolicy, getApprovalRequest, approveInConsole), less the two
     // withdrawn rehearsal-schedule reads and createDestinationFromLegacy; plus
     // PROD-04.2's six switchover operations (list, create, get, approval,
-    // approval request, console approval).
-    assert_eq!(operation_ids.len(), 63);
+    // approval request, console approval); plus PROD-07.2's cancelRestore and
+    // cleanupRestore.
+    assert_eq!(operation_ids.len(), 65);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and
@@ -146,7 +149,7 @@ async fn every_documented_operation_is_routed() {
 
     for (path, item) in document()["paths"].as_object().unwrap() {
         let concrete = path
-            .replace("{ns}", support::NS_A)
+            .replace("{ws}", support::NS_A)
             .replace("{kind}", "backup")
             .replace("{name}", "absent-object")
             .replace("{id}", "absent-object");

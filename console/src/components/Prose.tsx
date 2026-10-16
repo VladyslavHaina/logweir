@@ -1,5 +1,5 @@
 // The product API writes names in its problem details as Markdown code spans
-// ("`primary` is already this namespace's default destination"). Shown verbatim
+// ("`primary` is already this workspace's default destination"). Shown verbatim
 // the backticks read as noise, so each balanced span is a <code> element: text
 // nodes only, never parsed HTML.
 

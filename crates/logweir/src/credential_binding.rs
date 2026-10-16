@@ -63,6 +63,48 @@ pub fn check_side(side: Side) -> Result<(), CredentialBindingRefusal> {
     check_credential_binding(projected_var, expected.as_deref(), projected.as_deref())
 }
 
+/// **PROD-03.1/03.2.** One side's Schema Registry password, when the
+/// controller projected one: `<SIDE>_REGISTRY_PASSWORD`, used only after the
+/// registry Secret's own binding (`<SIDE>_REGISTRY_CREDENTIAL_BINDING`) equals
+/// the side's expected binding. A blank or absent password is `None`, and
+/// nothing is checked: no credential would be presented.
+///
+/// # Errors
+///
+/// [`CredentialBindingRefusal`] for a password whose Secret is bound to
+/// another connection or carries no binding.
+pub fn registry_password(side: Side) -> Result<Option<String>, CredentialBindingRefusal> {
+    registry_password_with(side, &|k| std::env::var(k).ok())
+}
+
+/// [`registry_password`] through a lookup, for tests.
+///
+/// # Errors
+///
+/// As [`registry_password`].
+pub fn registry_password_with(
+    side: Side,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<Option<String>, CredentialBindingRefusal> {
+    use logweir_core::connection as c;
+    let (password, projected) = match side {
+        Side::Source => (
+            c::SOURCE_REGISTRY_PASSWORD_ENV,
+            c::SOURCE_REGISTRY_CREDENTIAL_BINDING_ENV,
+        ),
+        Side::Target => (
+            c::TARGET_REGISTRY_PASSWORD_ENV,
+            c::TARGET_REGISTRY_CREDENTIAL_BINDING_ENV,
+        ),
+    };
+    let Some(value) = get(password).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let expected = get(variables(side).1);
+    check_credential_binding(projected, expected.as_deref(), get(projected).as_deref())?;
+    Ok(Some(value))
+}
+
 /// Check every OBJECT-STORE pair this process carries —
 /// [`logweir_core::credential_binding::STORE_BINDING_PAIRS`]: the
 /// `AWS_*` credential's (a destination's archive grant, an inline archive's
@@ -105,6 +147,7 @@ pub fn check_store_bindings_with(
 pub fn check_projected_bindings() -> Result<(), logweir_core::guard::GuardRefusal> {
     for side in [Side::Source, Side::Target] {
         check_side(side).map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
+        registry_password(side).map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
     }
     check_store_bindings().map_err(|e| logweir_core::guard::GuardRefusal(e.to_string()))?;
     Ok(())

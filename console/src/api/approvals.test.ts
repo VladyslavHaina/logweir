@@ -122,7 +122,7 @@ describe("OD-8's modes", () => {
     expect(noApprovalSentence("twoPerson")).toContain("a restore or a switchover waiting above");
     expect(modeSentence("strict", "p")).toContain("each restore and each switchover");
     expect(modeSentence("confirm", "p")).toContain("or a switchover in its cutover");
-    // The control: an unbound namespace's files are the restore's own (drill approve), and say only that.
+    // The control: an unbound workspace's files are the restore's own (drill approve), and say only that.
     expect(modeSentence("files", "p")).not.toContain("switchover");
   });
 });
@@ -247,7 +247,7 @@ describe("the two-person offer", () => {
       ["a malformed hash", { request: { ...request(pendingFixture), confirmationSha256: "sha256:XYZ" } }],
       ["a link that does not match", { mismatches: [{ field: "plan hash", claimed: "a", actual: "b" }] }],
       ["this console takes no approvals", { policy: { ...TWO_PERSON, consoleApprovalAvailable: false } }],
-      ["a strict namespace", { policy: { ...STRICT, consoleApprovalAvailable: true } }],
+      ["a strict workspace", { policy: { ...STRICT, consoleApprovalAvailable: true } }],
       ["the request was not read", { request: null }],
       ["no Restore", { restoreExists: false }],
       ["an incomplete scope the server offered anyway", { request: { ...request(incompleteFixture), approve: { offered: true, sentence: "go" } } }],
@@ -356,7 +356,7 @@ const created = (status = 201) => json(status, { item: { ...(approvalFixture.ite
 
 describe("the requests", () => {
   it("the click sends the hash that was shown and nothing else, to the Restore's own route", async () => {
-    net.answer = (r, path) => (r.method === "POST" && path === "/namespaces/team-a/restores/restore-x/console-approval" ? created() : null);
+    net.answer = (r, path) => (r.method === "POST" && path === "/workspaces/team-a/restores/restore-x/console-approval" ? created() : null);
     const written = await sendConsoleApproval("team-a", view());
     expect(written.replayed).toBe(false);
     expect(posts()).toHaveLength(1);
@@ -373,8 +373,8 @@ describe("the requests", () => {
   it("a countersignature is the sidecar alone, after the Restore is read again; key material and an empty field send nothing", async () => {
     const subject: Subject = { ...SUBJECT, planHash: await sha256(PLAN) };
     net.answer = async (r, path) => {
-      if (r.method === "GET" && path === "/namespaces/team-a/restores/restore-x") return restoreAnswer();
-      if (r.method === "POST" && path === "/namespaces/team-a/restores/restore-x/approval") return created();
+      if (r.method === "GET" && path === "/workspaces/team-a/restores/restore-x") return restoreAnswer();
+      if (r.method === "POST" && path === "/workspaces/team-a/restores/restore-x/approval") return created();
       return null;
     };
     await sendCountersignature("team-a", subject, { text: '{"payloadType":"x","signatures":[1,2]}', fileName: "" });
@@ -386,12 +386,12 @@ describe("the requests", () => {
     expect(posts()).toHaveLength(1);
   });
 
-  it("an unbound namespace's two files are sent byte for byte, and only for the Restore the page showed", async () => {
+  it("an unbound workspace's two files are sent byte for byte, and only for the Restore the page showed", async () => {
     const subject: Subject = { ...SUBJECT, planHash: await sha256(PLAN) };
     let uid = "uid-x";
     net.answer = async (r, path) => {
-      if (r.method === "GET" && path === "/namespaces/team-a/restores/restore-x") return restoreAnswer({ uid });
-      if (r.method === "POST" && path === "/namespaces/team-a/restores/restore-x/approval") return created(200);
+      if (r.method === "GET" && path === "/workspaces/team-a/restores/restore-x") return restoreAnswer({ uid });
+      if (r.method === "POST" && path === "/workspaces/team-a/restores/restore-x/approval") return created(200);
       return null;
     };
     const files = { approvalBytes: '{"plan_hash":"sha256:ab"}\n  ', sidecarBytes: '{"payloadType":"v1","signatures":[]}\r\n', approvalFileName: "approval.json", sidecarFileName: "approval.sig" };

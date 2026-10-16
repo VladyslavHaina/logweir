@@ -55,7 +55,7 @@ fn app_in(object: Value, name: &str, namespace: &str) -> TestApp {
     TestApp::with(
         fake,
         Options {
-            namespaces: vec![namespace.to_string()],
+            workspaces: vec![namespace.to_string()],
             ..Options::default()
         },
     )
@@ -112,7 +112,7 @@ async fn a_settled_operation_emits_one_snapshot_and_ends() {
     let app = app_in(fixture("backup-succeeded-verified.json"), "b1", "lw-s1");
     let (status, content_type, body) = stream(
         &app,
-        "/api/v1/namespaces/lw-s1/operations/backup/b1/events",
+        "/api/v1/workspaces/lw-s1/operations/backup/b1/events",
         None,
     )
     .await;
@@ -157,7 +157,7 @@ async fn an_unfinished_operation_heartbeats_and_ends_on_the_connection_ceiling()
 
     let (status, _, body) = stream(
         &app,
-        "/api/v1/namespaces/lw-s2/operations/backup/b2/events",
+        "/api/v1/workspaces/lw-s2/operations/backup/b2/events",
         None,
     )
     .await;
@@ -220,7 +220,7 @@ async fn a_status_change_emits_a_new_snapshot_and_a_settled_one_ends_the_stream(
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/namespaces/lw-s3/operations/backup/b3/events")
+                .uri("/api/v1/workspaces/lw-s3/operations/backup/b3/events")
                 .header("host", HOST)
                 .body(Body::empty())
                 .unwrap(),
@@ -284,7 +284,7 @@ async fn a_status_change_emits_a_new_snapshot_and_a_settled_one_ends_the_stream(
 async fn resuming_is_either_silence_or_one_reset_snapshot() {
     brisk();
     let app = app_in(fixture("backup-succeeded-verified.json"), "b4", "lw-s4");
-    let path = "/api/v1/namespaces/lw-s4/operations/backup/b4/events";
+    let path = "/api/v1/workspaces/lw-s4/operations/backup/b4/events";
 
     let (_, _, first) = stream(&app, path, None).await;
     let version = ids(&first)[0].clone();
@@ -308,7 +308,7 @@ async fn resuming_is_either_silence_or_one_reset_snapshot() {
 async fn a_malformed_last_event_id_is_refused_before_any_read() {
     brisk();
     let app = app_in(fixture("backup-succeeded-verified.json"), "b5", "lw-s5");
-    let path = "/api/v1/namespaces/lw-s5/operations/backup/b5/events";
+    let path = "/api/v1/workspaces/lw-s5/operations/backup/b5/events";
     for bad in ["", "abc", "12a", "-1", &"9".repeat(65)] {
         let response = app
             .send(
@@ -347,7 +347,7 @@ async fn the_stream_accepts_no_query_parameter_at_all() {
     ] {
         let response = app
             .get(&format!(
-                "/api/v1/namespaces/lw-s6/operations/backup/b6/events{query}"
+                "/api/v1/workspaces/lw-s6/operations/backup/b6/events{query}"
             ))
             .await;
         response.assert_problem(400, "malformed_request");
@@ -361,7 +361,7 @@ async fn a_missing_object_is_not_found_and_opens_no_stream() {
     brisk();
     let app = app_in(fixture("backup-succeeded-verified.json"), "b7", "lw-s7");
     let response = app
-        .get("/api/v1/namespaces/lw-s7/operations/backup/absent/events")
+        .get("/api/v1/workspaces/lw-s7/operations/backup/absent/events")
         .await;
     response.assert_problem(404, "not_found");
     assert_ne!(
@@ -378,7 +378,7 @@ async fn a_transient_check_and_an_unknown_kind_have_no_stream() {
     for kind in ["discovery", "preflight", "secret", "pod"] {
         let response = app
             .get(&format!(
-                "/api/v1/namespaces/lw-s8/operations/{kind}/b8/events"
+                "/api/v1/workspaces/lw-s8/operations/{kind}/b8/events"
             ))
             .await;
         response.assert_problem(404, "not_found");
@@ -412,7 +412,7 @@ async fn one_principal_may_not_hold_more_streams_than_the_ceiling() {
         .remove("exitReason");
     object["status"].as_object_mut().unwrap().remove("evidence");
     let app = app_in(object, "b9", "lw-s9");
-    let ceiling = logweir_api::auth::ratelimit::STREAMS_PER_ACTOR_NAMESPACE;
+    let ceiling = logweir_api::auth::ratelimit::STREAMS_PER_ACTOR_WORKSPACE;
 
     // Hold the ceiling open by never draining the bodies.
     let mut held = Vec::new();
@@ -423,7 +423,7 @@ async fn one_principal_may_not_hold_more_streams_than_the_ceiling() {
             .oneshot(
                 Request::builder()
                     .method("GET")
-                    .uri("/api/v1/namespaces/lw-s9/operations/backup/b9/events")
+                    .uri("/api/v1/workspaces/lw-s9/operations/backup/b9/events")
                     .header("host", HOST)
                     .body(Body::empty())
                     .unwrap(),
@@ -435,7 +435,7 @@ async fn one_principal_may_not_hold_more_streams_than_the_ceiling() {
     }
 
     let refused = app
-        .get("/api/v1/namespaces/lw-s9/operations/backup/b9/events")
+        .get("/api/v1/workspaces/lw-s9/operations/backup/b9/events")
         .await;
     refused.assert_problem(429, "rate_limited");
     assert!(
@@ -453,7 +453,7 @@ async fn one_principal_may_not_hold_more_streams_than_the_ceiling() {
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(30)).await;
         let retry = app
-            .get("/api/v1/namespaces/lw-s9/operations/backup/b9/events")
+            .get("/api/v1/workspaces/lw-s9/operations/backup/b9/events")
             .await;
         if retry.status.as_u16() == 200 {
             freed = true;
@@ -510,7 +510,7 @@ async fn a_terminal_run_with_an_unsettled_verdict_keeps_the_connection() {
 
     let (status, _, body) = stream(
         &app,
-        "/api/v1/namespaces/lw-s10/operations/backup/b10/events",
+        "/api/v1/workspaces/lw-s10/operations/backup/b10/events",
         None,
     )
     .await;

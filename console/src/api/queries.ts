@@ -1,9 +1,9 @@
 // Every read and write the pages make, as TanStack Query hooks over the typed client.
 //
-// Query keys: [kind, ns] for a list, [kind, ns, name] for one object, and
-// ["operations", ns, kind, name] for a run's operation view, so invalidating
-// [kind, ns] refreshes a list and its items together. A read the session does
-// not grant in `ns` is never sent: its hook stays idle (`fetchStatus: "idle"`,
+// Query keys: [kind, ws] for a list, [kind, ws, name] for one object, and
+// ["operations", ws, kind, name] for a run's operation view, so invalidating
+// [kind, ws] refreshes a list and its items together. A read the session does
+// not grant in `ws` is never sent: its hook stays idle (`fetchStatus: "idle"`,
 // no data), and the page shows what it can.
 //
 // Lists read every page (client.listAll) and hand back newest first. A list
@@ -18,9 +18,9 @@ const LIVE_MS = 1500;
 
 export const keys = {
   session: ["session"] as const,
-  list: (kind: string, ns: string) => [kind, ns] as const,
-  item: (kind: string, ns: string, name: string) => [kind, ns, name] as const,
-  operation: (ns: string, kind: "backup" | "restore", name: string) => ["operations", ns, kind, name] as const,
+  list: (kind: string, ws: string) => [kind, ws] as const,
+  item: (kind: string, ws: string, name: string) => [kind, ws, name] as const,
+  operation: (ws: string, kind: "backup" | "restore", name: string) => ["operations", ws, kind, name] as const,
 };
 
 function moving(items: { operation: { terminal: boolean } }[] | undefined): number | false {
@@ -37,40 +37,40 @@ export function newestFirst<T extends { createdAt?: string | null; name: string 
   return [...items].sort((a, b) => createdMs(b) - createdMs(a) || a.name.localeCompare(b.name));
 }
 
-const path = (ns: string) => ({ path: { ns } });
+const path = (ws: string) => ({ path: { ws } });
 
-export function useBackups(ns: string) {
+export function useBackups(ws: string) {
   return useQuery({
-    queryKey: keys.list("backups", ns),
-    enabled: useCan(ns, "backupsRead"),
+    queryKey: keys.list("backups", ws),
+    enabled: useCan(ws, "backupsRead"),
     queryFn: ({ signal }) =>
       listAll("backups", (cursor) =>
-        call(() => api.GET("/api/v1/namespaces/{ns}/backups", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+        call(() => api.GET("/api/v1/workspaces/{ws}/backups", { params: { ...path(ws), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
     select: newestFirst,
     refetchInterval: (q) => moving(q.state.data),
   });
 }
 
-export function useBackup(ns: string, name: string) {
+export function useBackup(ws: string, name: string) {
   return useQuery({
-    queryKey: keys.item("backups", ns, name),
-    enabled: useCan(ns, "backupsRead"),
+    queryKey: keys.item("backups", ws, name),
+    enabled: useCan(ws, "backupsRead"),
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/backups/{name}", { params: { path: { ns, name } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/backups/{name}", { params: { path: { ws, name } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && !q.state.data.operation.terminal ? LIVE_MS : false),
     retry: (count, error) => !(error instanceof Error && "status" in error && error.status === 404) && count < 2,
   });
 }
 
-export function useRestores(ns: string, enabled = true) {
-  const readable = useCan(ns, "restoresRead");
+export function useRestores(ws: string, enabled = true) {
+  const readable = useCan(ws, "restoresRead");
   return useQuery({
-    queryKey: keys.list("restores", ns),
+    queryKey: keys.list("restores", ws),
     enabled: enabled && readable,
     queryFn: ({ signal }) =>
       listAll("restores", (cursor) =>
-        call(() => api.GET("/api/v1/namespaces/{ns}/restores", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+        call(() => api.GET("/api/v1/workspaces/{ws}/restores", { params: { ...path(ws), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
     select: newestFirst,
     refetchInterval: (q) => moving(q.state.data),
@@ -95,13 +95,13 @@ export function verdictPending(op: { terminal: boolean; verificationState?: stri
  * `follow` keeps reading a terminal restore while its verdict is pending (DUI-38); the
  * page bounds it.
  */
-export function useRestore(ns: string, name: string, { fresh = false, follow = false }: { fresh?: boolean; follow?: boolean } = {}) {
-  const readable = useCan(ns, "restoresRead");
+export function useRestore(ws: string, name: string, { fresh = false, follow = false }: { fresh?: boolean; follow?: boolean } = {}) {
+  const readable = useCan(ws, "restoresRead");
   return useQuery({
-    queryKey: keys.item("restores", ns, name),
+    queryKey: keys.item("restores", ws, name),
     enabled: readable && name.length > 0,
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/restores/{name}", { params: { path: { ns, name } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/restores/{name}", { params: { path: { ws, name } }, signal }))).item,
     refetchInterval: (q) => (q.state.data && (!q.state.data.operation.terminal || (follow && verdictPending(q.state.data.operation))) ? LIVE_MS : false),
     ...(fresh ? { refetchOnMount: "always" as const } : {}),
   });
@@ -113,8 +113,8 @@ export function useRestore(ns: string, name: string, { fresh = false, follow = f
  * mapped and nothing can be switched over. `undefined` while unknown (the list unread, or not
  * readable to this role); `null` when no Backup carries that id any more.
  */
-export function useSourceBackup(ns: string, backupSetRef: string | undefined): Backup | null | undefined {
-  const backups = useBackups(ns);
+export function useSourceBackup(ws: string, backupSetRef: string | undefined): Backup | null | undefined {
+  const backups = useBackups(ws);
   if (!backupSetRef || !backups.data) return undefined;
   return backups.data.find((b) => b.backupId === backupSetRef) ?? null;
 }
@@ -122,14 +122,14 @@ export function useSourceBackup(ns: string, backupSetRef: string | undefined): B
 /** One run's operation view. While `streaming` (stream.ts holds the run's event stream
  *  open) the stream writes this key and the poll stands down. `follow` keeps reading a
  *  terminal run while its verdict is pending (DUI-38). */
-export function useOperation(ns: string, kind: "backup" | "restore", name: string, streaming = false, follow = false) {
+export function useOperation(ws: string, kind: "backup" | "restore", name: string, streaming = false, follow = false) {
   return useQuery({
-    queryKey: keys.operation(ns, kind, name),
-    enabled: useCan(ns, "operationsRead"),
+    queryKey: keys.operation(ws, kind, name),
+    enabled: useCan(ws, "operationsRead"),
     queryFn: async ({ signal }) =>
       (
         await call(() =>
-          api.GET("/api/v1/namespaces/{ns}/operations/{kind}/{name}", { params: { path: { ns, kind, name } }, signal }),
+          api.GET("/api/v1/workspaces/{ws}/operations/{kind}/{name}", { params: { path: { ws, kind, name } }, signal }),
         )
       ).item,
     refetchInterval: (q) => (!streaming && q.state.data && (!q.state.data.terminal || (follow && verdictPending(q.state.data))) ? 1000 : false),
@@ -137,49 +137,49 @@ export function useOperation(ns: string, kind: "backup" | "restore", name: strin
 }
 
 /** `reReadMs` lets a page that watches a probe in flight re-read the list while it runs. */
-export function useConnections(ns: string, reReadMs?: (items: Connection[], reads: number) => number | false) {
+export function useConnections(ws: string, reReadMs?: (items: Connection[], reads: number) => number | false) {
   return useQuery({
-    queryKey: keys.list("connections", ns),
-    enabled: useCan(ns, "connectionsRead"),
+    queryKey: keys.list("connections", ws),
+    enabled: useCan(ws, "connectionsRead"),
     queryFn: ({ signal }) =>
       listAll("connections", (cursor) =>
-        call(() => api.GET("/api/v1/namespaces/{ns}/connections", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+        call(() => api.GET("/api/v1/workspaces/{ws}/connections", { params: { ...path(ws), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
     refetchInterval: (q) => (reReadMs && q.state.data ? reReadMs(q.state.data, q.state.dataUpdateCount) : false),
   });
 }
 
-/** The namespace's saved destinations: the Destinations page, a schedule's and a catalog's pick-lists. */
-export function useDestinations(ns: string) {
+/** The workspace's saved destinations: the Destinations page, a schedule's and a catalog's pick-lists. */
+export function useDestinations(ws: string) {
   return useQuery({
-    queryKey: keys.list("destinations", ns),
-    enabled: useCan(ns, "destinations"),
+    queryKey: keys.list("destinations", ws),
+    enabled: useCan(ws, "destinations"),
     queryFn: ({ signal }) =>
       listAll("destinations", (cursor) =>
-        call(() => api.GET("/api/v1/namespaces/{ns}/destinations", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+        call(() => api.GET("/api/v1/workspaces/{ws}/destinations", { params: { ...path(ws), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
   });
 }
 
-export function useSchedules(ns: string) {
+export function useSchedules(ws: string) {
   return useQuery({
-    queryKey: keys.list("schedules", ns),
-    enabled: useCan(ns, "schedulesRead"),
+    queryKey: keys.list("schedules", ws),
+    enabled: useCan(ws, "schedulesRead"),
     queryFn: ({ signal }) =>
       listAll("schedules", (cursor) =>
-        call(() => api.GET("/api/v1/namespaces/{ns}/schedules", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
+        call(() => api.GET("/api/v1/workspaces/{ws}/schedules", { params: { ...path(ws), query: { limit: LIST_PAGE_SIZE, cursor } }, signal })),
       ),
   });
 }
 
-export function useProtection(ns: string) {
+export function useProtection(ws: string) {
   return useQuery({
-    queryKey: keys.list("protection", ns),
-    enabled: useCan(ns, "protection"),
+    queryKey: keys.list("protection", ws),
+    enabled: useCan(ws, "protection"),
     queryFn: ({ signal }) =>
       listAll("protection policies", (cursor) =>
         call(() =>
-          api.GET("/api/v1/namespaces/{ns}/protection-policies", { params: { ...path(ns), query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
+          api.GET("/api/v1/workspaces/{ws}/protection-policies", { params: { ...path(ws), query: { limit: LIST_PAGE_SIZE, cursor } }, signal }),
         ),
       ),
     refetchInterval: 15_000,
@@ -188,19 +188,19 @@ export function useProtection(ns: string) {
 
 /** Back up now from a schedule. `key` is the Idempotency-Key: the caller keeps it for a
  *  retry after an unknown outcome, so a second click names the same run. */
-export function useBackUpNow(ns: string) {
+export function useBackUpNow(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ schedule, key }: { schedule: string; key: string }): Promise<Backup> =>
       (
         await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/backups", {
-            params: { path: { ns }, header: createHeaders(key) },
+          api.POST("/api/v1/workspaces/{ws}/backups", {
+            params: { path: { ws }, header: createHeaders(key) },
             body: { scheduleRef: { name: schedule } },
           }),
         )
       ).item,
-    onSettled: () => client.invalidateQueries({ queryKey: keys.list("backups", ns) }),
+    onSettled: () => client.invalidateQueries({ queryKey: keys.list("backups", ws) }),
   });
 }
 

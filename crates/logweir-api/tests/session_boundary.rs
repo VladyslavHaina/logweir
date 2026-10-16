@@ -84,7 +84,7 @@ impl Raw {
     }
 }
 
-const SCHEDULE: &str = "/api/v1/namespaces/team-a/schedules";
+const SCHEDULE: &str = "/api/v1/workspaces/team-a/schedules";
 
 fn schedule_body() -> String {
     support::schedule_body().to_string()
@@ -96,9 +96,9 @@ async fn an_api_request_without_a_session_is_unauthenticated() {
     let app = app();
     for path in [
         "/api/v1/session",
-        "/api/v1/namespaces",
-        "/api/v1/namespaces/team-a/schedules",
-        "/api/v1/namespaces/team-a/backups/anything",
+        "/api/v1/workspaces",
+        "/api/v1/workspaces/team-a/schedules",
+        "/api/v1/workspaces/team-a/backups/anything",
     ] {
         let response = Raw::get(path).send(&app).await;
         response.assert_problem(401, "unauthenticated");
@@ -347,9 +347,9 @@ async fn forged_identity_and_impersonation_headers_have_no_effect() {
     assert_eq!(response.status.as_u16(), 200);
     let body = response.json();
     assert_eq!(body["actor"]["id"], format!("{ISSUER}#u-view"));
-    assert_eq!(body["namespaces"][0]["roles"][0], "viewer");
+    assert_eq!(body["workspaces"][0]["roles"][0], "viewer");
     assert_eq!(
-        body["namespaces"][0]["capabilities"]["scheduleCreate"],
+        body["workspaces"][0]["capabilities"]["scheduleCreate"],
         false
     );
     let text = String::from_utf8_lossy(&response.body);
@@ -449,7 +449,7 @@ async fn no_response_enables_credentialed_cors() {
         Raw::get("/healthz").send(&app).await,
         Raw::get("/ui/index.html").send(&app).await,
         {
-            let mut raw = Raw::get("/api/v1/namespaces");
+            let mut raw = Raw::get("/api/v1/workspaces");
             raw.method = "OPTIONS";
             raw.header("origin", "https://evil.test")
                 .header("access-control-request-method", "POST")
@@ -531,7 +531,7 @@ async fn the_event_stream_refuses_an_anonymous_caller_and_every_guessed_spelling
     let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
 
     // The real route: anonymous is refused before anything is opened.
-    let anonymous = Raw::get("/api/v1/namespaces/team-a/operations/backup/x/events")
+    let anonymous = Raw::get("/api/v1/workspaces/team-a/operations/backup/x/events")
         .send(&app)
         .await;
     assert_eq!(anonymous.status.as_u16(), 401);
@@ -543,7 +543,7 @@ async fn the_event_stream_refuses_an_anonymous_caller_and_every_guessed_spelling
 
     // Authenticated, but the object does not exist: 404 problem+json, never an
     // empty stream that a console renders as "connecting…".
-    let missing = Raw::get("/api/v1/namespaces/team-a/operations/backup/x/events")
+    let missing = Raw::get("/api/v1/workspaces/team-a/operations/backup/x/events")
         .header("cookie", &cookie)
         .send(&app)
         .await;
@@ -557,7 +557,7 @@ async fn the_event_stream_refuses_an_anonymous_caller_and_every_guessed_spelling
     // No query parameter is accepted at all, so `?access_token=` is refused as
     // an unknown parameter rather than ignored.
     let token_in_url =
-        Raw::get("/api/v1/namespaces/team-a/operations/backup/x/events?access_token=abc")
+        Raw::get("/api/v1/workspaces/team-a/operations/backup/x/events?access_token=abc")
             .header("cookie", &cookie)
             .send(&app)
             .await;
@@ -566,8 +566,8 @@ async fn the_event_stream_refuses_an_anonymous_caller_and_every_guessed_spelling
     // Everything else a client might guess is still 404, with and without a
     // session.
     for path in [
-        "/api/v1/namespaces/team-a/events",
-        "/api/v1/namespaces/team-a/operations/backup/x?watch=true",
+        "/api/v1/workspaces/team-a/events",
+        "/api/v1/workspaces/team-a/operations/backup/x?watch=true",
         "/api/v1/events",
     ] {
         let anonymous = Raw::get(path).send(&app).await;

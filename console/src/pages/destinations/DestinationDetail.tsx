@@ -163,13 +163,13 @@ function Access({ d }: { d: Destination }) {
   );
 }
 
-function TestAccess({ ns, d, mayTest }: { ns: string; d: Destination; mayTest: boolean }) {
-  const test = useTestDestination(ns, d.name);
+function TestAccess({ ws, d, mayTest }: { ws: string; d: Destination; mayTest: boolean }) {
+  const test = useTestDestination(ws, d.name);
   const intent = useIntentKey("destination-test");
   const [roles, setRoles] = useState<GrantRole[]>([]);
   const [started, setStarted] = useState<string | null>(null);
   const [local, setLocal] = useState<unknown>(null);
-  const { query: check, stopped } = useFollowedPreflight(ns, started);
+  const { query: check, stopped } = useFollowedPreflight(ws, started);
   const run = () => {
     if (test.isPending) return;
     setLocal(null);
@@ -239,8 +239,8 @@ function TestAccess({ ns, d, mayTest }: { ns: string; d: Destination; mayTest: b
   );
 }
 
-function Usage({ ns, name }: { ns: string; name: string }) {
-  const usage = useDestinationUsage(ns, name);
+function Usage({ ws, name }: { ws: string; name: string }) {
+  const usage = useDestinationUsage(ws, name);
   const rows = usage.data ? [...usage.data.schedules, ...usage.data.backups] : [];
   return (
     <Card>
@@ -264,12 +264,12 @@ function Usage({ ns, name }: { ns: string; name: string }) {
                   <li key={`${u.kind}/${u.name}`} className="lw-break">
                     {u.kind === "BackupSchedule" ? (
                       <>
-                        Schedule <a href={`#/${ns}/schedules/${u.name}`}>{u.name}</a>
+                        Schedule <a href={`#/${ws}/schedules/${u.name}`}>{u.name}</a>
                       </>
                     ) : (
                       <>
                         Backup{" "}
-                        <Link to="/$ns/backups/$name" params={{ ns, name: u.name }}>
+                        <Link to="/$ws/backups/$name" params={{ ws, name: u.name }}>
                           {u.name}
                         </Link>
                       </>
@@ -295,20 +295,20 @@ function Usage({ ns, name }: { ns: string; name: string }) {
 }
 
 export function DestinationDetail() {
-  const { ns, name } = useParams({ from: "/$ns/destinations/$name" });
+  const { ws, name } = useParams({ from: "/$ws/destinations/$name" });
   // One page per destination: a test started or a rotation shown here never carries over to another.
-  return <DestinationPage key={`${ns}/${name}`} ns={ns} name={name} />;
+  return <DestinationPage key={`${ws}/${name}`} ws={ws} name={name} />;
 }
 
-function DestinationPage({ ns, name }: { ns: string; name: string }) {
-  const grant = useGrant(ns);
+function DestinationPage({ ws, name }: { ws: string; name: string }) {
+  const grant = useGrant(ws);
   const readable = grant.can?.destinations !== false;
-  const destination = useDestination(ns, name, readable);
+  const destination = useDestination(ws, name, readable);
   const [rotating, setRotating] = useState(false);
   const [rotated, setRotated] = useState<number | null>(null);
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/destinations" params={{ ns }}>Destinations</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/destinations" params={{ ws }}>Destinations</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -318,7 +318,7 @@ function DestinationPage({ ns, name }: { ns: string; name: string }) {
         <PageHeader title={name} breadcrumb={breadcrumb} />
         <PageSection>
           {!readable ? (
-            <Content component="p">Your roles in {ns} do not include reading destinations.</Content>
+            <Content component="p">Your roles in {ws} do not include reading destinations.</Content>
           ) : destination.isPending ? (
             <LoadingRows rows={6} label="Loading the destination" />
           ) : (
@@ -339,7 +339,7 @@ function DestinationPage({ ns, name }: { ns: string; name: string }) {
         status={
           <Flex gap={{ default: "gapXs" }} component="span">
             <DestinationVerdict status={d.status} />
-            {d.default && <StatusLabel tone="info" text="Namespace default" />}
+            {d.default && <StatusLabel tone="info" text="Workspace default" />}
           </Flex>
         }
         description={d.description ?? d.canonicalUrl}
@@ -370,16 +370,16 @@ function DestinationPage({ ns, name }: { ns: string; name: string }) {
             <Access d={d} />
           </GridItem>
           <GridItem>
-            <TestAccess ns={ns} d={d} mayTest={mayManage} />
+            <TestAccess ws={ws} d={d} mayTest={mayManage} />
           </GridItem>
           <GridItem>
-            <Usage ns={ns} name={d.name} />
+            <Usage ws={ws} name={d.name} />
           </GridItem>
         </Grid>
       </PageSection>
       {rotating && (
         <RotateAccess
-          ns={ns}
+          ws={ws}
           destination={d}
           onClose={() => setRotating(false)}
           onReRead={() => void destination.refetch()}

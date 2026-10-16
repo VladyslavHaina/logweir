@@ -68,6 +68,7 @@ fn plan(owners: Option<Vec<DeclaredOwner>>, owner_path: bool) -> DrillSpec {
             default_replication_factor: 1,
             teardown: "delete".into(),
             topic_configuration: None,
+            schema_registry: None,
         },
         sample: SampleSpec {
             window_start: ts("2026-09-07T12:00:00Z"),
@@ -84,6 +85,7 @@ fn plan(owners: Option<Vec<DeclaredOwner>>, owner_path: bool) -> DrillSpec {
             window_start: None,
             partitions: BTreeMap::new(),
             allow_transaction_markers: false,
+            rate_limit_bytes_per_sec: None,
         },
         objectives: ObjectivesSpec {
             rto_seconds: None,

@@ -84,6 +84,7 @@ fn main() {
             original_name: None,
             creation: None,
             topic_configuration: None,
+            schemas: None,
         },
         approval: ApprovalInfo {
             approver: "sre-oncall@example.com".into(),

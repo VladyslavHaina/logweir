@@ -1,8 +1,9 @@
-# deploy/poc/minio-grants.yaml — least-privilege MinIO users for the PoC's one
-# destination, so the demo MinIO's ROOT credential is never handed to Logweir.
+# deploy/poc/minio-grants.yaml — least-privilege MinIO users per WORKSPACE, so
+# the demo MinIO's ROOT credential is never handed to Logweir and no
+# workspace's credential reaches another workspace's archive.
 #
 #   kubectl --context "$CTX" apply -f deploy/poc/minio-grants.yaml
-#   kubectl --context "$CTX" -n logweir-system wait --for=condition=complete \
+#   kubectl --context "$CTX" -n logweir wait --for=condition=complete \
 #     job/logweir-poc-minio-grants --timeout=180s
 #
 # THE PoC REVIEW'S L7. The chart's demo MinIO takes its root credential from
@@ -11,54 +12,35 @@
 # release history — the profile's single exception to "nothing secret in a
 # values file", and one reason the demo MinIO is not production. It can also
 # delete. So it stays inside this Job: the Job reads it from the chart's own
-# `logweir-minio-root` Secret, creates three users with the policies
-# docs/install.md §3.11 measured, and the console is given only those three
-# (README.md step 9). None of them holds `s3:DeleteObject`.
+# `logweir-minio-root` Secret (no workspace label: no Logweir object may name
+# it), and the console is given only the per-workspace users below. None of
+# them holds `s3:DeleteObject`.
 #
-# Bucket `kafka-backups`, archive prefix `poc`, evidence under `logweir/` in the
-# same bucket — the destination README.md step 9 creates.
+# THE BUCKET CREDENTIAL IS THE BOUNDARY BETWEEN WORKSPACES (PROD-19.1 open
+# point 2). Each workspace gets its own bucket `poc-<ws>` (archive prefix
+# `poc`), because a destination's evidence root is the fixed `logweir/` of its
+# own bucket (`logweir/backups/<id>/…`, `logweir/drills/<run>…`): a bucket per
+# workspace is the only layout that also keeps evidence apart. `poc-stg` also
+# holds `legacy/`, where an earlier install's archive is mirrored for import
+# (README.md, *Import an earlier install's archive*).
 #
-#   user                  destination grant(s)           policy
-#   logweir-poc-writer    archiveWrite (+ evidenceWrite) logweir-poc-archive-write
-#   logweir-poc-reader    archiveRead (and catalog sync) logweir-poc-archive-read
-#   logweir-poc-evidence  evidenceRead                   logweir-poc-evidence-read
+#   user                        grant(s) of that workspace's destination
+#   logweir-poc-<ws>-writer     archiveWrite (+ evidenceWrite)
+#   logweir-poc-<ws>-reader     archiveRead (and catalog sync)
+#   logweir-poc-<ws>-evidence   evidenceRead
+#   logweir-poc-evidence        the CONTROLLER's `logweir-evidence-ro`: reads
+#                               kafka-backups/logweir/* (runs with no saved
+#                               destination) and no workspace bucket
 #
-# The three secret keys come from the Secret `logweir-poc-minio-users`
-# (README.md step 5), generated on your machine; nothing secret is in this file.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: logweir-poc-minio-policies
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/part-of: logweir-poc
-data:
-  archive-write.json: |
-    {"Version": "2012-10-17", "Statement": [
-      {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::kafka-backups"],
-       "Condition": {"StringLike": {"s3:prefix": ["poc/*"]}}},
-      {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": ["arn:aws:s3:::kafka-backups/poc/*"]},
-      {"Effect": "Allow", "Action": ["s3:PutObject"], "Resource": ["arn:aws:s3:::kafka-backups/logweir/*"]}
-    ]}
-  archive-read.json: |
-    {"Version": "2012-10-17", "Statement": [
-      {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::kafka-backups"],
-       "Condition": {"StringLike": {"s3:prefix": ["poc/*", "logweir/*"]}}},
-      {"Effect": "Allow", "Action": ["s3:GetObject"],
-       "Resource": ["arn:aws:s3:::kafka-backups/poc/*", "arn:aws:s3:::kafka-backups/logweir/*"]}
-    ]}
-  evidence-read.json: |
-    {"Version": "2012-10-17", "Statement": [
-      {"Effect": "Allow", "Action": ["s3:ListBucket"], "Resource": ["arn:aws:s3:::kafka-backups"],
-       "Condition": {"StringLike": {"s3:prefix": ["logweir/*"]}}},
-      {"Effect": "Allow", "Action": ["s3:GetObject"], "Resource": ["arn:aws:s3:::kafka-backups/logweir/*"]}
-    ]}
----
+# The secret keys come from the Secret `logweir-poc-minio-users` (README.md
+# step 5), keys `<ws>-writer`, `<ws>-reader`, `<ws>-evidence` and `evidence`,
+# generated on your machine; nothing secret is in this file. That Secret is
+# read by this Job alone and carries no workspace label.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: logweir-poc-minio-grants
-  namespace: logweir-system
+  namespace: logweir
   labels:
     app.kubernetes.io/part-of: logweir-poc
 spec:
@@ -88,29 +70,47 @@ spec:
               valueFrom: { secretKeyRef: { name: logweir-minio-root, key: MINIO_ROOT_USER } }
             - name: ROOT_PASSWORD
               valueFrom: { secretKeyRef: { name: logweir-minio-root, key: MINIO_ROOT_PASSWORD } }
-            - name: WRITER_SECRET
-              valueFrom: { secretKeyRef: { name: logweir-poc-minio-users, key: writer } }
-            - name: READER_SECRET
-              valueFrom: { secretKeyRef: { name: logweir-poc-minio-users, key: reader } }
-            - name: EVIDENCE_SECRET
-              valueFrom: { secretKeyRef: { name: logweir-poc-minio-users, key: evidence } }
           command: ["/bin/sh", "-ec"]
           args:
             - |
-              mc alias set poc http://logweir-minio.logweir-system.svc:9000 "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
-              for p in archive-write archive-read evidence-read; do
-                mc admin policy create poc "logweir-poc-$p" "/policies/$p.json"
+              mc alias set poc http://logweir-minio.logweir.svc:9000 "$ROOT_USER" "$ROOT_PASSWORD" >/dev/null
+              add_user() { # user policy secret-file
+                mc admin policy create poc "$2" "/tmp/$2.json"
+                mc admin user add poc "$1" "$(cat "/users/$3")"
+                # Attaching twice is refused by MinIO; a re-run is a no-op here.
+                mc admin policy attach poc "$2" --user "$1" || true
+                mc admin user info poc "$1"
+              }
+              for ws in dev tst stg prd; do
+                b="poc-$ws"
+                mc mb --ignore-existing "poc/$b"
+                printf '%s' "{\"Version\":\"2012-10-17\",\"Statement\":[
+                  {\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::$b\"],
+                   \"Condition\":{\"StringLike\":{\"s3:prefix\":[\"poc/*\"]}}},
+                  {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:PutObject\"],\"Resource\":[\"arn:aws:s3:::$b/poc/*\"]},
+                  {\"Effect\":\"Allow\",\"Action\":[\"s3:PutObject\"],\"Resource\":[\"arn:aws:s3:::$b/logweir/*\"]}]}" \
+                  > "/tmp/logweir-poc-$ws-archive-write.json"
+                printf '%s' "{\"Version\":\"2012-10-17\",\"Statement\":[
+                  {\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::$b\"],
+                   \"Condition\":{\"StringLike\":{\"s3:prefix\":[\"poc/*\",\"logweir/*\",\"legacy/*\"]}}},
+                  {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],
+                   \"Resource\":[\"arn:aws:s3:::$b/poc/*\",\"arn:aws:s3:::$b/logweir/*\",\"arn:aws:s3:::$b/legacy/*\"]}]}" \
+                  > "/tmp/logweir-poc-$ws-archive-read.json"
+                printf '%s' "{\"Version\":\"2012-10-17\",\"Statement\":[
+                  {\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::$b\"],
+                   \"Condition\":{\"StringLike\":{\"s3:prefix\":[\"logweir/*\"]}}},
+                  {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],\"Resource\":[\"arn:aws:s3:::$b/logweir/*\"]}]}" \
+                  > "/tmp/logweir-poc-$ws-evidence-read.json"
+                add_user "logweir-poc-$ws-writer" "logweir-poc-$ws-archive-write" "$ws-writer"
+                add_user "logweir-poc-$ws-reader" "logweir-poc-$ws-archive-read" "$ws-reader"
+                add_user "logweir-poc-$ws-evidence" "logweir-poc-$ws-evidence-read" "$ws-evidence"
               done
-              mc admin user add poc logweir-poc-writer "$WRITER_SECRET"
-              mc admin user add poc logweir-poc-reader "$READER_SECRET"
-              mc admin user add poc logweir-poc-evidence "$EVIDENCE_SECRET"
-              # Attaching twice is refused by MinIO; a re-run is a no-op here.
-              mc admin policy attach poc logweir-poc-archive-write --user logweir-poc-writer || true
-              mc admin policy attach poc logweir-poc-archive-read --user logweir-poc-reader || true
-              mc admin policy attach poc logweir-poc-evidence-read --user logweir-poc-evidence || true
-              for u in logweir-poc-writer logweir-poc-reader logweir-poc-evidence; do
-                mc admin user info poc "$u"
-              done
+              printf '%s' '{"Version":"2012-10-17","Statement":[
+                {"Effect":"Allow","Action":["s3:ListBucket"],"Resource":["arn:aws:s3:::kafka-backups"],
+                 "Condition":{"StringLike":{"s3:prefix":["logweir/*"]}}},
+                {"Effect":"Allow","Action":["s3:GetObject"],"Resource":["arn:aws:s3:::kafka-backups/logweir/*"]}]}' \
+                > /tmp/logweir-poc-evidence-read.json
+              add_user logweir-poc-evidence logweir-poc-evidence-read evidence
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -119,10 +119,10 @@ spec:
             requests: { cpu: 10m, memory: 32Mi }
             limits: { memory: 128Mi }
           volumeMounts:
-            - { name: policies, mountPath: /policies, readOnly: true }
+            - { name: users, mountPath: /users, readOnly: true }
             - { name: tmp, mountPath: /tmp }
       volumes:
-        - name: policies
-          configMap: { name: logweir-poc-minio-policies }
+        - name: users
+          secret: { secretName: logweir-poc-minio-users }
         - name: tmp
-          emptyDir: {}
+          emptyDir: { sizeLimit: 16Mi }

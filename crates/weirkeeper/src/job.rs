@@ -314,6 +314,23 @@ pub struct RunnerOwner {
     pub name: String,
     /// `metadata.uid` of the owning object.
     pub uid: String,
+    /// The owning object's workspace label, which the Job carries
+    /// ([`crate::workspace::LABEL`]) so caps and per-workspace views see it.
+    pub workspace: Option<String>,
+}
+
+impl RunnerOwner {
+    /// The owner of a Job created for `object`.
+    #[must_use]
+    pub fn of<K: kube::Resource<DynamicType = ()>>(object: &K, uid: &str) -> Self {
+        Self {
+            api_version: K::api_version(&()).into_owned(),
+            kind: K::kind(&()).into_owned(),
+            name: object.meta().name.clone().unwrap_or_default(),
+            uid: uid.to_string(),
+            workspace: crate::workspace::label_of(object).map(str::to_string),
+        }
+    }
 }
 
 /// Everything [`build`] needs to produce one runner Job.
@@ -622,6 +639,11 @@ pub fn build(spec: &RunnerJobSpec) -> Job {
                 controller: Some(true),
                 block_owner_deletion: Some(true),
             }]),
+            labels: spec
+                .owner
+                .workspace
+                .as_ref()
+                .map(|workspace| [(crate::workspace::LABEL.to_string(), workspace.clone())].into()),
             ..ObjectMeta::default()
         },
         spec: Some(JobSpec {

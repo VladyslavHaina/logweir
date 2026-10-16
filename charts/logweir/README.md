@@ -12,7 +12,9 @@ Redpanda is a backup source only; anything else is untested.
 ## Copy this directory and install it
 
 `charts/logweir/` is self-contained. Copy the whole directory into your own
-repository, write a short values file, and install:
+repository, write a short values file, and install. **An install is one
+namespace**: everything Logweir creates lives in it, and `workspaces` (for
+example `[dev, tst, stg, prd]`) groups its objects inside it:
 
 ```bash
 helm upgrade --install logweir . -n <namespace> --create-namespace -f my-values.yaml
@@ -40,23 +42,57 @@ and `approval-policy` shapes, `identity-*`, `admission-policy` and `tuned`.
 `author-only.values.yaml` is for images you built and loaded yourself: **an
 author-only install is not evidence of publication.**
 
+## Workspaces
+
+The default is one workspace, `default`, and the console shows no picker. Four
+environments in one install:
+
+```yaml
+workspaces: [dev, tst, stg, prd]
+approvalPolicy:
+  allowOrdinaryConfirmation: true
+  policies:
+    - { name: one-person, mode: confirm, maxAgeSeconds: 900 }
+    - { name: two-person, mode: two-person, maxAgeSeconds: 900 }
+  workspaces: { prd: two-person }   # unbound workspaces use approvalPolicy.default
+api:
+  enabled: true
+  console:
+    enabled: true
+    mode: shared
+    roles:
+      bindings:
+        - { role: operator, workspace: dev, groups: [kafka-devs] }
+        - { role: approver, workspace: prd, groups: [kafka-leads] }
+```
+
+Every Logweir object carries the label `logweir.dev/workspace`; the console
+writes it, and a `kubectl apply` must set it (`kubectl get backups -L
+logweir.dev/workspace`). Object names are unique per install, across
+workspaces. Adding a workspace is a `helm upgrade` with a longer list; one
+leaves the list only when it holds no objects. **Upgrading from 0.4.x** is a
+fresh install, not an upgrade: export trust, keep the bucket, `helm uninstall`
+the old release, install into one namespace with `workspaces`, import trust,
+and in each workspace connect a catalog over the old destination to see the old
+points ([docs/install.md](../../docs/install.md#upgrade-crds-before-upgrading-the-controller)).
+
 ## What it installs
 
 | object | when |
 |---|---|
-| the thirteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always, from `crds/`, once (*Upgrading the CRDs by hand*) |
-| `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always; RoleBindings instead with `controller.watchNamespaces` |
+| the fourteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always, from `crds/`, once (*Upgrading the CRDs by hand*) |
+| `ServiceAccount`, `Role` and `RoleBinding` `weirkeeper`; `ClusterRole` and binding `weirkeeper-cluster-scope` (`trustrosters`, `trustpolicies` only) | always: the controller watches and runs Jobs in the release namespace only |
 | `Deployment` `weirkeeper` | always; probed by `weirkeeper --probe live` / `--probe ready` against `127.0.0.1:8081` (`LOGWEIR_HEALTH_ADDR`), restarted after three misses 20 s apart |
 | `ConfigMap` `weirkeeper-policy` | always: the installation policy |
-| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin`, `logweir-retention-admin` | always, **unbound**: you bind the human roles |
+| `Role` `logweir-viewer` (every workspace, no Secret) and `ClusterRole` `logweir-trust-admin` | always, **unbound**. There is no `kubectl` write role: people use the console ([docs/kubernetes.md](../../docs/kubernetes.md#workspaces)) |
 | retained `Secret` `logweir-signing-key` and `ConfigMap` `logweir-signing-trust`, `ClusterRole` `logweir-identity-singleton`, scoped Roles, hook Jobs | `identity.enabled` |
-| `ServiceAccount` `logweir-runner`, `NetworkPolicy`s `logweir-runner-egress` and `logweir-identity-kubernetes-api-egress` | the release namespace and each `identity.authorizedRunnerNamespaces` entry |
+| `ServiceAccount` `logweir-runner`, `NetworkPolicy`s `logweir-runner-egress` and `logweir-identity-kubernetes-api-egress` | always |
 | `ValidatingAdmissionPolicy` and binding `logweir-console-credentials-only` | `admissionPolicy.enabled` |
 | MinIO with a PVC, `Secret`s `<release>-minio-root` and `logweir-s3`, a seed `Job` | `minio.enabled` |
 | two KRaft brokers, `<release>-kafka-source` and `-target`, a seed `Job` | `demoKafka.enabled` |
 | `KafkaCluster`s `source` (and `target`) | `kafka.enabled` |
 | `ServiceAccount` `logweir-retention`, with no Role or binding | `retention.enabled` |
-| `ServiceAccount`, ClusterRoles and bindings `<release>-api` | `api.enabled` (RBAC only) |
+| `ServiceAccount`, a Role, two ClusterRoles and their bindings `<release>-api` | `api.enabled` (RBAC only) |
 | `ConfigMap` `<release>-api-config-<digest>`, `Deployment` `<release>-api` | `api.console.enabled` |
 | `Service` `<release>-api`, plain HTTP/1.1 (an `h2c` or gRPC backend is refused) | `api.console.mode: shared` |
 | `Ingress`, `NetworkPolicy`, `PodDisruptionBudget` `<release>-api` | `api.console.ingress.enabled`, `.networkPolicy.enabled`, `.replicas` above 1 |
@@ -67,8 +103,12 @@ The demo MinIO, the demo Kafka brokers and their seed `Job`s set no
 `securityContext`, so a namespace enforcing the `restricted` Pod Security
 Standard refuses them; install a demo only into a namespace that admits them.
 
-Nothing optional is on by default. `manifest_lint.rs` holds the controller's
-role to its calls: no verb on `secrets`, no `update`, and `delete` only on
+Nothing optional is on by default, and nothing is rendered outside the release
+namespace but the two opt-in Roles (`strimzi.namespaces`,
+`api.console.trustedProxyService`). `manifest_lint.rs` holds the controller's
+role to its calls: `get` on `secrets` for their workspace label only (the
+source scan allows a metadata read and nothing else; RBAC cannot grant metadata
+alone, so the grant itself could read data), no `update`, and `delete` only on
 `topicdiscoveries` and `preflights`. `patch` on `restores` (PROD-11.1a) adds
 and removes a TTL clone's finalizer `logweir.dev/clone-cleanup`; a rollback to
 a controller without it leaves the finalizer on clone `Restore`s, which an
@@ -87,8 +127,7 @@ carrying a `metadata.resourceVersion` precondition.
 | `runnerImagePullPolicy` | `Always` | runner Jobs (`LOGWEIR_RUNNER_PULL_POLICY`; unset, the controller uses `Never`); another value stops the controller |
 | `imagePullSecrets` | `[]` | `[{name: regcred}]` on both ServiceAccounts and every pod |
 | `environment` | `""` | the label `logweir.dev/environment` on every object but the CRDs; switches nothing |
-| `kubernetes.namespace` | `""` | the name `api.namespaces` defaults to; `-n` decides the install |
-| `kubernetes.connectionsNamespace` | `""` (release) | where `kafka.enabled`'s objects and MinIO's `logweir-s3` go; must be watched |
+| `workspaces` | `[default]` | 1 to 256 unique DNS labels: `LOGWEIR_WORKSPACES` and the console's list. The first labels `kafka.enabled`'s objects and MinIO's `logweir-s3`. A workspace leaves the list only when it holds no objects; it cannot be renamed |
 | `kubernetes.nodeSelector`, `.tolerations`, `.affinity` | empty | every chart pod; a component's own block replaces them |
 | `identity.enabled` | `true` | the managed signer; `false` only for an external lifecycle |
 | `identity.bootstrapImage` | a reviewed runner digest (rev `d4e32956`, linux/amd64 and linux/arm64) | must be `@sha256`; an emptied value refuses to render |
@@ -97,7 +136,6 @@ carrying a `metadata.resourceVersion` precondition.
 | `identity.renderedOffline` | `null` | `true` for Argo CD and `helm template \| kubectl apply`: no placeholders, no trust grant (*The identity lifecycle*); `false` only for a preview; unset, such a render is refused |
 | `identity.bootstrapFeatures.consoleKey` | `true` | `false` only with a bootstrap image older than the console-key flags |
 | `identity.publicConfigMapName` | `logweir-signing-trust` | public key, key id, algorithm, trust reference |
-| `identity.authorizedRunnerNamespaces` | `[]` | existing namespaces given the same signer and runner prerequisites |
 | `identity.kubernetesApiCIDRs` | `[]` | exact API `/32` or `/128` endpoints, TCP 443 or 6443 |
 | `identity.externalSecret.name`, `.key` | `""`, `signing.pem` | adopt a P-256 or Ed25519 PKCS#8 Secret; never marked fresh |
 | `identity.installationTrust.enabled`, `.policyName` | `true`, `logweir-installation` | the fresh install's `TrustPolicy` (*`approvalPolicy`*) |
@@ -111,31 +149,30 @@ carrying a `metadata.resourceVersion` precondition.
 | `controller.logLevel` | `info` | `RUST_LOG`; below `info` the per-object lines are lost |
 | `controller.failFastSeconds` | `""` (300 s) | patience for a stuck run; `0` is never (for a Secret materialised late); under 60 is clamped up; unparseable is the default |
 | `controller.jobTtlSeconds` | `""` (604800 s) | how long a finished Job stays; under 3600 is clamped up |
-| `controller.watchNamespaces` | `[]` (all) | the execution namespaces (below) |
 | `strimzi.readKafkaTopics`, `strimzi.namespaces` | `false`, `[]` | let the controller read (`get`, `list`) Strimzi `KafkaTopic`s in the listed namespaces, through a Role in each, for a `KafkaCluster` with `spec.strimzi` ([kubernetes.md](../../docs/kubernetes.md#strimzi-owners-of-a-backups-topics)); any other namespace is refused `OwnerDetectionFailed` |
 | `controller.resources` | 50m / 128Mi, limit 512Mi | also `nodeSelector`, `tolerations`, `affinity` |
-| `checks.maxActivePerNamespace`, `.maxActiveTotal` | `4`, `20` | check Jobs at once; the total must be at least the per-namespace value |
+| `checks.maxActivePerWorkspace`, `.maxActiveTotal` | `4`, `20` | check Jobs at once; the total must be at least the per-workspace value |
 | `checks.maxActiveDiscoveriesPerConnection` | `1` | |
-| `checks.maxEvidenceFetchActivePerNamespace` | `4` | its own pool, so verification is never starved |
+| `checks.maxEvidenceFetchActivePerWorkspace` | `4` | its own pool, so verification is never starved |
 | `checks.discovery.freshSeconds` | `900` | after this an inventory reads stale |
 | `checks.discovery.retentionSeconds`, `.keepPerConnection` | `86400`, `5` | when, and beyond how many, terminal discoveries are collected |
 | `checks.discovery.hardMaxTopics` | `50000` | every request's `maxTopics` (1 to 50 000) is clamped to it |
 | `checks.discovery.visibilityAttestations` | `[]` | the only route to `attestedComplete` |
 | `checks.preflight.retentionSeconds` | `3600` | a terminal `Preflight` is collected after this |
-| `runs.maxManualBackupsActivePerNamespace`, `runs.maxManualRestoresActivePerNamespace` | `4`, `2` | manual runs at once per namespace; the rest wait `Queued` with nothing created |
+| `runs.maxManualBackupsActivePerWorkspace`, `runs.maxManualRestoresActivePerWorkspace` | `4`, `2` | manual runs at once per workspace; the rest wait `Queued` with nothing created |
 | `engine.allowUnverifiedCustomCa` | `false` | a destination CA the engine cannot verify |
 | `evidence.controllerIdentityLocations` | `[]` | `[{endpoint, region, bucket}]` the controller may read evidence from; others are `ControllerIdentityNotAllowlisted` |
 
 `weirkeeper-policy` is the one place an operator cannot reach. **The chart
 refuses what the controller would refuse** (the schema pins every bound;
-`templates/_validate.tpl` refuses a total below the per-namespace ceiling),
+`templates/_validate.tpl` refuses a total below the per-workspace ceiling),
 because a refused document fails closed almost silently: attestations and
 evidence locations are dropped and the ceilings revert, with one advisory
 `Preflight` row and one `WARN` line. The `runs` block renders only when a value
 differs from its default; an install that set it rolls the controller back with
 the chart. `legacyArchiveAddressing` is rendered from `archive.s3.*`, and empty
 without an endpoint; its `allowHttp` and `virtualHostedStyle` are published
-for older readers and read by nothing (FX-15). An attestation has nine required fields: `id`, `namespace`,
+for older readers and read by nothing (FX-15). An attestation has nine required fields: `id`, `namespace` (the release namespace),
 `kafkaCluster`, `clusterId`, `principal`, `attestedBy`, `attestedAt`,
 `expiresAt`, `statement`. It applies on an exact match of the four identifiers,
 before `expiresAt`, to an untruncated listing, and **Logweir never verifies the
@@ -153,7 +190,7 @@ statement**.
 | `kafka.security.protocol`, `.mechanism` | `PLAINTEXT`, `""` | the mapping in *`kafka:`* |
 | `kafka.secretRef`, `.secretKey` | `""`, `password` | the only accepted key |
 | `kafka.target.*` | `name: target`, same keys | the optional restore target; `markerTopic: logweir.scratch` proves it scratch |
-| `minio.enabled` | `false` | a demo archive (`kafka-backups`, `logweir-evidence`); its root user also mints `logweir-s3` |
+| `minio.enabled` | `false` | a demo archive (`kafka-backups`, `logweir-evidence`); its root user also mints `logweir-s3`, labelled with the first workspace. Never bind it to a location when `workspaces` lists more than one: every operator of the first workspace could then use the root pair through an inline archive |
 | `minio.image`, `.mcImage` | mirror digests | *Third-party images* |
 | `minio.rootUser`, `.rootPassword` | `minioadmin` | |
 | `minio.persistence.enabled`, `.size`, `.storageClassName` | `true`, `5Gi`, `""` | `false` is an emptyDir: the archive dies with the pod |
@@ -171,10 +208,10 @@ statement**.
 | `admissionPolicy.enabled` | `false` | fence the console's `create secrets`; Kubernetes 1.30+ |
 | `admissionPolicy.consoleServiceAccountName` | `logweir-api` | must be `<release>-api` with `api.enabled`; the render refuses another or empty |
 | `admissionPolicy.extraPrincipals` | `[]` | more `system:serviceaccount:<ns>:<name>` subjects |
-| `approvalPolicy.default` | `""` | unbound namespaces: `""` (confirm on a fresh install with a console, else `legacy-governed-v1`), `confirm` or `strict` |
+| `approvalPolicy.default` | `""` | unbound workspaces: `""` (confirm on a fresh install with a console, else `legacy-governed-v1`), `confirm` or `strict` |
 | `approvalPolicy.allowOrdinaryConfirmation` | `false` | needed by a `confirm` policy and `default: confirm` |
 | `approvalPolicy.policies` | `[]` | `[{name, mode: confirm\|two-person\|strict, maxAgeSeconds, requireDistinctPrincipal}]` |
-| `approvalPolicy.namespaces` | `{}` | `{<namespace>: <policy>}`; a binding wins over the default |
+| `approvalPolicy.workspaces` | `{}` | `{<workspace>: <policy>}`, each key in `workspaces`; a binding wins over the default |
 | `approvalPolicy.confirmationKeySecret` | `""` | the hook's managed key; or your Secret with key `confirmation.key` |
 
 ### The console (`api.*`)
@@ -182,7 +219,6 @@ statement**.
 | key | default | meaning |
 |---|---|---|
 | `api.enabled` | `false` | the console's principal, RBAC only |
-| `api.namespaces` | `[]` | where it is bound; defaults to `kubernetes.namespace` |
 | `api.console.enabled` | `false` | run the console; needs `api.enabled` |
 | `api.console.image`, `.imagePullPolicy` | `…/logweir-console:latest`, `Always` | `Never` for a loaded image |
 | `api.console.mode` | `""`, required | `localAdmin` or `shared` |
@@ -194,13 +230,13 @@ statement**.
 | `api.console.trustedProxyCidrs`, `.trustedProxyService` | `[]`, empty | shared: the ingress pods, or its Service |
 | `api.console.requireTrustedProxy` | `false` | shared: `421` for a request not from a trusted proxy over HTTPS |
 | `api.console.trustedProxy` | `""` | `none` opts out of naming a proxy behind the chart's Ingress |
-| `api.console.rateLimits.manualBackupsPerMinute`, `.manualRestoresPerMinute` | `10`, `5` | runs one person may start per namespace per minute |
+| `api.console.rateLimits.manualBackupsPerMinute`, `.manualRestoresPerMinute` | `10`, `5` | runs one person may start per workspace per minute |
 | `api.console.hostAliases` | `[]` | `[{ip, hostnames}]` pod `/etc/hosts` entries |
 | `api.console.oidc.issuer`, `.clientId` | `""` | exact |
 | `api.console.oidc.clientSecret` | `""` | the name of a Secret with key `clientSecret` |
 | `api.console.oidc.caBundle`, `.systemRoots` | `{configMap, secret, key: ca.crt}`, `true` | a private issuer CA added to the system roots |
 | `api.console.oidc.scopes`, `.displayNameClaim` | `[]`, `""` | empty: the API's `[openid, profile, email, groups]` and no name; a list must hold `openid`, a claim is a plain name such as `name` |
-| `api.console.roles.revision`, `.bindings` | `""`, `[]` | `[{role, namespace, groups, subjects}]`, exact strings |
+| `api.console.roles.revision`, `.bindings` | `""`, `[]` | `[{role, workspace, groups, subjects}]`, exact strings; the workspace must be in `workspaces` |
 | `api.console.ingress.*` | off | shared only: `className`, `host`, `tlsSecretName` (required), `annotations` (HSTS) |
 | `api.console.networkPolicy.*` | off | `ingressNamespace` and `ingressPodLabels` (both required), `oidcCIDRs`, `oidcPeers` |
 | `api.console.resources` | 25m / 64Mi, limit 256Mi | also placement |
@@ -213,6 +249,8 @@ statement**.
 | `notify`, `notify.allowInsecureSinks` | v1, release-notes item 74 | refused at render: remove the block, or `--set notify=null` with `--reuse-values` |
 | `ui.*` and the `logweir-ui` image | v1, release-notes item 75 | refused at render: use `api.console.*`; the legacy page is gone |
 | `kafka.markerTopic` (the source's) | v1, after v0.2.0-rc.2 | refused at render: rc.2 accepted and ignored it; set `kafka.target.markerTopic`, which marks a scratch target, and remove it |
+| `kubernetes.namespace`, `kubernetes.connectionsNamespace`, `controller.watchNamespaces`, `identity.authorizedRunnerNamespaces`, `api.namespaces` | 0.5.0, OD-23 | refused at render: an install is one namespace (`helm -n`). Name the workspaces in `workspaces` |
+| `approvalPolicy.namespaces`, `api.console.roles.bindings[].namespace`, `checks.maxActivePerNamespace`, `checks.maxEvidenceFetchActivePerNamespace`, `runs.maxManualBackupsActivePerNamespace`, `runs.maxManualRestoresActivePerNamespace` | 0.5.0, OD-23 | refused at render, naming the new key: `approvalPolicy.workspaces`, `.workspace`, and `…PerWorkspace` |
 
 The two FX-10 keys are accepted and ignored, and `NOTES.txt` prints `WITHDRAWN
 VALUES ARE SET AND IGNORED`. The CRDs default `maxTopics` (20 000) and
@@ -228,54 +266,19 @@ you had set either to another value, the digest changes once and retained
 ## `retention.enabled`
 
 It renders `ServiceAccount` `logweir-retention` (no token automount, no Role,
-no binding) in the release namespace and each
-`identity.authorizedRunnerNamespaces` entry, where enforcement Jobs run; for
-another namespace apply `config/samples/retention-serviceaccount.yaml`. **It
-deletes nothing.** A deletion needs all four:
+no binding) in the release namespace, where enforcement Jobs run. **It deletes
+nothing.** A deletion needs all four:
 
-1. `mode: Enforce` on a `RetentionPolicy`, which only `logweir-retention-admin`
-   may write;
-2. this ServiceAccount in that namespace;
+1. `mode: Enforce` on a `RetentionPolicy`, which the console cannot write: only
+   whoever holds `kubectl` write access to the namespace may;
+2. this ServiceAccount;
 3. an object-store credential scoped to the policy's prefix and never
    `logweir/`: the hard boundary;
 4. an administrator's `approve-plan` with the current `planSha256`, per run.
 
 [`docs/stability.md`](../../docs/stability.md) states the residual: enforcement
 turns the controller's Job-create authority into a deletion capability in the
-namespace that holds the credential.
-
-## `controller.watchNamespaces`
-
-`[]` binds the controller cluster-wide, and Job-create authority in a namespace
-is every Secret there (residual O1). A list renders one `RoleBinding` per
-namespace to the unchanged `weirkeeper` ClusterRole,
-`ClusterRole/weirkeeper-cluster-scope` (only `trustrosters` and
-`trustpolicies`), `Role/weirkeeper-installation-policy` (`get` on
-`weirkeeper-policy`), and `LOGWEIR_WATCH_NAMESPACES`, so every watch and read
-covers those namespaces. A non-DNS-label name is refused by the schema, the
-template and the controller. `auth can-i` as the `weirkeeper` ServiceAccount
-with `team-a` listed:
-
-| question | answer |
-|---|---|
-| `create jobs`, `list pods`, `get pods/log`, `create configmaps`, `watch backups` in `team-a` | yes |
-| `create jobs` or `list jobs` in the release namespace; anything in an unlisted namespace; `watch backups --all-namespaces` | **no** |
-| `get configmaps/weirkeeper-policy` in the release namespace | yes; any other ConfigMap there, or `get secrets` anywhere: **no** |
-| `list trustpolicies`, `get trustrosters`, `patch trustpolicies` (the compromise-revocation finalizer, `docs/keys.md`) | yes |
-
-**Shared mode requires it**, and the release namespace may not be in it.
-
-**Migration.** Without a shared console nothing changes. A shared release stops
-rendering until scoped: `helm upgrade` refuses, naming the field, and the
-running console keeps serving. It meets, in order: no list; the release
-namespace listed; any `ui.*`; a binding namespace outside the list; with
-`requireTrustedProxy`, a range wider than `/16`. List every namespace with
-Logweir objects (`kubectl get backups,restores,backupschedules,kafkaclusters
--A`), give each the runner ServiceAccount and the signer
-(`identity.authorizedRunnerNamespaces`), move runs out of the release
-namespace, set the list and upgrade. Unlisted namespaces are not reconciled
-until added. Rollback is `watchNamespaces: []`. Each change restarts the
-controller. install.md 5e has the table of fixes.
+namespace, which holds the credential.
 
 ## `approvalPolicy`
 
@@ -284,7 +287,7 @@ controller. install.md 5e has the table of fixes.
 key (internal `Governed` with `approverSignature: Console`). **strict**: an
 approver's personal key (`Governed`, or `legacy-governed-v1`). A **fresh install
 with a console** (first `helm install` on Helm 3.19+ or 4.x, `api.console.enabled`,
-the managed identity, `consoleKey`) starts unbound namespaces in **confirm**:
+the managed identity, `consoleKey`) starts unbound workspaces in **confirm**:
 the hook creates the console key, a default `TrustPolicy` for it and the signer
 when the cluster has no trust of its own, and marks the install. An upgraded
 install keeps `legacy-governed-v1` until you opt in (install.md 5f). The
@@ -308,7 +311,7 @@ hook Helm deletes when the hooks finish. After a failed first install, run
 - Editing a policy rolls both Deployments; a confirmed, unadmitted Restore is
   refused `ApprovalPolicyMismatch` and is submitted again.
 - **two-person** needs `api.console.mode: shared` and cannot be the default.
-  The namespace's `TrustPolicy` needs the console key under
+  The release namespace's `TrustPolicy` needs the console key under
   `ConsoleConfirmation` and no approver key. The mode is in the policy's
   snapshot digest, so a request made under it is never approved with a personal
   key, nor a strict request in the console. Roll the controller, runner and
@@ -354,7 +357,7 @@ $ open http://127.0.0.1:8484/ui/
 
 The local port must be `8484`, because `publicOrigin` carries it. **`create
 pods/portforward` in the namespace is full console administrator authority**
-over every bound namespace. There are no probes (a kubelet cannot reach
+over every workspace. There are no probes (a kubelet cannot reach
 loopback), so a refused configuration shows as `CrashLoopBackOff`, exit code 2,
 and one line in `kubectl logs` naming the field.
 
@@ -381,10 +384,9 @@ naming the field:
 | `publicBaseUrl` not `https://`, or with a path, trailing slash or userinfo | the redirect URI is this plus `/auth/callback`; the schema refuses it for `--set` too |
 | `ingress.enabled` without `tlsSecretName`, or in localAdmin mode | a secure cookie never crosses plain HTTP; localAdmin authenticates nobody |
 | `ingress.host` not `publicBaseUrl`'s authority | every browser would get `421` |
-| a binding namespace outside the bound set or outside `controller.watchNamespaces`; `*` or `?` in a binding | |
+| a binding without a `workspace`, with one not in `workspaces`, or still naming a `namespace`; `*` or `?` in a binding | |
 | `networkPolicy.enabled` without both ingress selectors | |
 | `api.console.enabled` without `api.enabled` or without `mode` | |
-| shared without `controller.watchNamespaces`, or with the release namespace in it | O1 |
 | any `ui.*` | withdrawn, release-notes item 75 |
 | `requireTrustedProxy` with no proxy, in localAdmin, or with a range wider than `/16` (IPv4) or `/48` (IPv6) | |
 | `trustedProxyService` with one of `namespace`/`name`, or in localAdmin | |
@@ -446,7 +448,7 @@ checks; a release tags the same digests and publishes a chart pinned by digest
 
 **`identity.bootstrapImage` is always a digest**, because its container can read
 and patch the retained signer. Check it, and re-pin only to a reviewed runner
-whose `identity bootstrap` and `identity distribute` match the templates, then
+whose `identity bootstrap` matches the templates, then
 run `just chart-check`:
 
 ```bash
@@ -493,7 +495,7 @@ kubectl apply` set `identity.renderedOffline: true`, which renders no placeholde
 and no fresh-install trust grant, and create the empty retained objects once
 first ([install.md, *Argo CD and other offline renders*](../../docs/install.md#argo-cd-and-other-offline-renders)).
 `identity.renderedOffline: false` renders what `helm install` would, for a
-preview that is never applied. The bootstrap and distribution Jobs are
+preview that is never applied. The bootstrap Job is
 `post-install,post-upgrade,post-rollback` hooks, so a rollback validates only
 when its target has them. The retained Secret, ConfigMap and singleton are
 creation-only `pre-install,pre-upgrade` hooks: no rollback overwrites a live
@@ -515,9 +517,8 @@ policy on the production CNI.
 | anything else | | refused at render, naming the supported set |
 
 The Secret is yours and Logweir never reads it; the password reaches the probe
-pod, which runs as `logweir-runner`, as a `secretKeyRef`. The objects go in `kubernetes.connectionsNamespace`,
-which must exist and, with `controller.watchNamespaces`, be watched. Changing it
-moves them, so move the Backups that name them too. A password key other than
+pod, which runs as `logweir-runner`, as a `secretKeyRef`. The objects go in the
+release namespace, labelled with the first workspace. A password key other than
 `password`, or a private broker CA, needs a `KafkaCluster` you write yourself
 ([docs/kubernetes.md](../../docs/kubernetes.md)) with `kafka.enabled: false`.
 
@@ -579,7 +580,7 @@ and keeps its old schema while an `Established` wait still passes.
 
 ## Uninstall
 
-`helm uninstall logweir -n logweir-system` leaves the thirteen CRDs (`kubectl
+`helm uninstall logweir -n logweir-system` leaves the fourteen CRDs (`kubectl
 delete crd <name>` removes each with every object under it), the namespace,
 `TrustRoster`, the retained signing Secrets, `logweir-signing-trust`,
 `logweir-identity-singleton` and your RoleBindings. Keep the identity objects

@@ -117,6 +117,7 @@ fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
         CheckId::TargetEngineProtocol,
         CheckId::ConnectionGroupTypes,
     ];
+    const REGISTRY: &[CheckId] = &[CheckId::RegistryReachable, CheckId::TargetSchemas];
     let newer: &[(CheckCode, ForAPlanWithoutCapabilityChecks)] = &[
         (CheckCode::EngineProtocolSupported, NotAsked(ENGINE)),
         (CheckCode::EngineProtocolUnsupported, NotAsked(ENGINE)),
@@ -153,6 +154,14 @@ fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
         (CheckCode::RestoreEvidenceRefused, switchover()),
         (CheckCode::TargetNotTheRestores, switchover()),
         (CheckCode::GroupNotAdmissible, switchover()),
+        // PROD-03.1/03.2: answered only on the two registry rows, which a
+        // controller lists only beside a `schemaRegistry`.
+        (CheckCode::RegistryAnswered, NotAsked(REGISTRY)),
+        (CheckCode::RegistryUnauthorized, NotAsked(REGISTRY)),
+        (CheckCode::RegistryUnreachable, NotAsked(REGISTRY)),
+        (CheckCode::SchemasImportable, NotAsked(REGISTRY)),
+        (CheckCode::SchemaConflict, NotAsked(REGISTRY)),
+        (CheckCode::SchemaSnapshotInvalid, NotAsked(REGISTRY)),
     ];
     let listed: std::collections::BTreeSet<CheckCode> = newer.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed.len(), newer.len(), "a code is listed twice");
@@ -259,6 +268,7 @@ fn connection() -> ConnectionPlan {
         client_cert_file: None,
         client_key_file: None,
         principal: "User:backup".into(),
+        schema_registry: None,
     }
 }
 
@@ -583,6 +593,7 @@ fn an_evidence_write_grant_rides_only_on_a_plan_that_writes_the_marker() {
                 client_cert_file: None,
                 client_key_file: None,
                 principal: "User:ANONYMOUS".into(),
+                schema_registry: None,
             },
             destination: Some(destination()),
             roles: vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
@@ -849,7 +860,7 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
         CAPABILITY_CHECKS.into_iter().collect(),
         "every capability row belongs to an operation, and no other row is one"
     );
-    assert_eq!(CAPABILITY_CHECKS.len(), 4);
+    assert_eq!(CAPABILITY_CHECKS.len(), 6);
     for id in CheckId::ALL {
         assert_eq!(id.is_capability(), CAPABILITY_CHECKS.contains(id), "{id}");
     }
@@ -860,6 +871,8 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
             "connection.topicConfigsReadable",
             "connection.groupTypes",
             "target.engineProtocol",
+            "registry.reachable",
+            "target.schemas",
         ]
     );
     assert_eq!(
@@ -867,8 +880,13 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
         [
             CheckId::ConnectionEngineProtocol,
             CheckId::TargetEngineProtocol,
-            CheckId::ConnectionGroupTypes
+            CheckId::ConnectionGroupTypes,
+            CheckId::RegistryReachable,
         ]
+    );
+    assert_eq!(
+        capability_checks_for(CheckOperation::Restore),
+        [CheckId::TargetEngineProtocol, CheckId::TargetSchemas]
     );
     assert!(capability_checks_for(CheckOperation::DestinationAccess).is_empty());
 
@@ -905,7 +923,7 @@ fn capability_checks_are_their_operations_own_rows_listed_once_and_never_skipped
     let bytes = String::from_utf8(plan_bytes(&all)).expect("utf-8");
     assert!(
         bytes.contains(
-            r#""capabilityChecks":["connection.engineProtocol","connection.topicConfigsReadable","connection.groupTypes"]"#
+            r#""capabilityChecks":["connection.engineProtocol","connection.topicConfigsReadable","connection.groupTypes","registry.reachable"]"#
         ),
         "{bytes}"
     );

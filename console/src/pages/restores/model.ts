@@ -29,6 +29,7 @@ import {
   type Destination,
   type RecoveryPoint,
 } from "./points";
+import { rateLimitBytes } from "./words";
 
 
 type S = components["schemas"];
@@ -49,6 +50,8 @@ export interface WizardValues {
   timeBasis: boolean;
   coverage: "complete" | "sampled";
   completeMaxRecords: string;
+  /** The byte-rate limit as typed, in MB/s; empty is no limit (PROD-00.3h). */
+  rateLimit: string;
   target: string;
   naming: "prefix" | "original";
   /** As typed; empty means the default for the point in time. */
@@ -401,16 +404,22 @@ export function planFields(ctx: WizardContext, v: WizardValues): PlanFields {
   const bound = complete ? boundOf(v.completeMaxRecords) : undefined;
   const choice = replicationChoice(ctx, v);
   const binding = pointBindingOf(p);
+  const rate = rateLimitBytes(v.rateLimit);
   return {
     backupSetRef: p.backupSetRef,
     topics: selectedTopics(p, v),
     ...(binding ? { point: binding } : {}),
     pointInTime: pit,
     timeBasis: v.timeBasis ? TIME_BASIS_PRODUCER_TIME : "",
+    ...(typeof rate === "number" ? { rateLimitBytesPerSec: rate } : {}),
     source: store,
     target: {
       bootstrapServers: ctx.connection?.bootstrapServers.slice() ?? [],
       auth: targetAuth(ctx.connection),
+      // PROD-03.2: the target connection's registry, which the controller holds the plan to.
+      ...(ctx.connection?.schemaRegistry
+        ? { schemaRegistry: { url: ctx.connection.schemaRegistry.url, ...(ctx.connection.schemaRegistry.username ? { username: ctx.connection.schemaRegistry.username } : {}) } }
+        : {}),
       mode: v.scratch ? "scratch" : "newTopic",
       // Both keys the same string unless restoring under the original names, where the
       // naming prefix is "" and the scratch prefix keeps a real value.
@@ -479,6 +488,7 @@ export function validate(ctx: WizardContext, v: WizardValues, f: PlanFields, des
   const rf = replicationProblem(replicationChoice(ctx, v), ctx.brokers);
   if (rf) out.replication = rf;
   if (!ctx.connection) out.target = "choose the target connection this restore writes to";
+  if (rateLimitBytes(v.rateLimit) === "invalid") out.rateLimit = "a number of megabytes per second greater than zero, such as 50 or 0.5, or empty for no limit";
   const ttl = v.scratch ? cloneTtlError(v.cloneTtl) : null;
   if (ttl) out.cloneTtl = ttl;
   if (originalNameChosen(v) && !v.noOwner) out.noOwner = "state that no declarative owner manages these names, or restore under a prefix";
@@ -546,15 +556,15 @@ export function restoreBody(
 
 /** The Idempotency-Key: the old console's own, from the name minted from the bytes, so
  *  a second click, a lost answer or a reload of the same plan never makes a second Restore. */
-export function restoreIdempotencyKey(ns: string, prepared: PreparedPlan): string {
-  return `logweir-ui.restores.${ns}.${prepared.restoreName}`;
+export function restoreIdempotencyKey(ws: string, prepared: PreparedPlan): string {
+  return `logweir-ui.restores.${ws}.${prepared.restoreName}`;
 }
 
 // ---------------------------------------------------------- approval routing
 
 export type ApprovalPolicy = S["ApprovalPolicyView"];
 
-/** The mode a submission meets, in the operator's words, from the namespace's EFFECTIVE
+/** The mode a submission meets, in the operator's words, from the workspace's EFFECTIVE
  *  policy. An unknown word never reads as "no key needed": it is strict. */
 export type ApprovalRoute =
   | "confirm"
@@ -577,15 +587,15 @@ export function approvalRoute(p: ApprovalPolicy | null): ApprovalRoute {
 export function policyRefusal(p: ApprovalPolicy | null): string | null {
   const route = approvalRoute(p);
   if (route === "confirm-unavailable") {
-    return `Namespace policy ${p!.name} is confirm, and this console cannot sign a confirmation yet: its confirmation key is not there. Try again in a minute.`;
+    return `Workspace policy ${p!.name} is confirm, and this console cannot sign a confirmation yet: its confirmation key is not there. Try again in a minute.`;
   }
   if (route === "two-person-unavailable") {
-    return `Namespace policy ${p!.name} is two-person, and this console cannot take part in it: request and approve this restore in the shared console.`;
+    return `Workspace policy ${p!.name} is two-person, and this console cannot take part in it: request and approve this restore in the shared console.`;
   }
   return null;
 }
 
-/** The ticket sent: only under an explicit (non-legacy) binding; an unbound namespace signs nothing. */
+/** The ticket sent: only under an explicit (non-legacy) binding; an unbound workspace signs nothing. */
 export function ticketFor(p: ApprovalPolicy | null, ticket: string): string | undefined {
   const t = ticket.trim();
   return p !== null && !p.legacy && t ? t : undefined;

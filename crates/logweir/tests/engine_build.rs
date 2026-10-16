@@ -361,18 +361,20 @@ fn text(o: &std::process::Output) -> String {
     String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)
 }
 
-/// A patch that applies to the vendored 0.23.3 source: it changes one comment
-/// of `crates/kafka-backup-core/src/kafka/fetch.rs` (lines 50-56).
+/// A patch that applies to the vendored 0.23.3 source after the shipped
+/// patches: it changes one comment of
+/// `crates/kafka-backup-core/src/kafka/fetch.rs` (lines 54-60, as patch 0004
+/// leaves them).
 const GOOD_DIFF: &str = "\
 diff --git a/crates/kafka-backup-core/src/kafka/fetch.rs b/crates/kafka-backup-core/src/kafka/fetch.rs
 --- a/crates/kafka-backup-core/src/kafka/fetch.rs
 +++ b/crates/kafka-backup-core/src/kafka/fetch.rs
-@@ -50,7 +50,7 @@ pub async fn fetch(
-         .with_max_wait_ms(500)
-         .with_min_bytes(1)
-         .with_max_bytes(max_bytes)
--        .with_isolation_level(0) // READ_UNCOMMITTED
-+        .with_isolation_level(0) // READ_UNCOMMITTED (planted by engine_build.rs)
+@@ -54,7 +54,7 @@ pub async fn fetch(
+         // lists the aborted transactions in the range, which
+         // `decode_fetch_data` drops with the control batches, so a backup
+         // holds committed records only.
+-        .with_isolation_level(1)
++        .with_isolation_level(1) // READ_COMMITTED (planted by engine_build.rs)
          .with_topics(vec![fetch_topic]);
 
      let response: KafkaFetchResponse = client.send_request(ApiKey::Fetch, request).await?;
@@ -434,6 +436,10 @@ fn the_shipped_patch_folder_follows_its_policy() {
             "0001-lockfile-rustls-h2-spin.patch",
             "0002-manifest-replication-factor.patch",
             "0003-restore-checkpoint-interval-and-hash.patch",
+            "0004-committed-only-capture.patch",
+            "0005-idempotent-produce.patch",
+            "0006-header-list.patch",
+            "0007-byte-rate-limit.patch",
         ],
         "{names:?}"
     );
@@ -709,9 +715,10 @@ fn prepare_refuses_a_stale_digest_before_it_extracts() {
 #[test]
 fn a_patch_that_does_not_apply_stops_prepare() {
     let stale = good_patch().replace(
-        "-        .with_isolation_level(0) // READ_UNCOMMITTED\n",
+        "-        .with_isolation_level(1)\n",
         "-        .with_isolation_level(7) // A LINE THE SOURCE DOES NOT HAVE\n",
     );
+    assert_ne!(stale, good_patch(), "the planted patch was made stale");
     let inputs = Inputs::real()
         .with_patch("0901-stale.patch", &stale)
         .with_new_build();

@@ -96,6 +96,7 @@ fn a_valid_block_reaches_the_container_verbatim_and_in_the_right_places() {
             kind: "Restore".to_string(),
             name: "r".to_string(),
             uid: "u".to_string(),
+            workspace: None,
         },
         args: Vec::new(),
         deadline_seconds: 60,

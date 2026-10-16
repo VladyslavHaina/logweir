@@ -543,6 +543,7 @@ pub fn runner_job_spec(cluster: &KafkaCluster) -> Result<RunnerJobSpec, KafkaClu
             kind: KafkaCluster::kind(&()).to_string(),
             name,
             uid,
+            workspace: crate::workspace::label_of(cluster).map(str::to_string),
         },
         args: runner_argv(cluster, &connection),
         deadline_seconds: PROBE_DEADLINE_SECONDS,
@@ -882,7 +883,13 @@ pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime
 #[must_use]
 pub fn credential_binding_of(cluster: &KafkaCluster) -> Option<String> {
     let resolved = connection::resolve(cluster, ConnectionUse::Probe).ok()?;
-    resolved.credential_secret()?;
+    let registry_secret = resolved
+        .schema_registry
+        .as_ref()
+        .is_some_and(|r| r.password.is_some());
+    if resolved.credential_secret().is_none() && !registry_secret {
+        return None;
+    }
     resolved.credential_binding()
 }
 
@@ -1996,6 +2003,11 @@ async fn reconcile(
     cluster: Arc<KafkaCluster>,
     ctx: Arc<Context>,
 ) -> Result<Action, KafkaClusterError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, cluster.as_ref()).await? {
+        return Ok(action);
+    }
     let outcome =
         reconcile_cluster_with_runner_image(&cluster, &ctx.client, Utc::now(), &ctx.runner_image)
             .await?;
@@ -2033,23 +2045,16 @@ pub fn controller(
     client: kube::Client,
     runner_image: job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // One watch per watched namespace: the whole cluster unless
-    // `LOGWEIR_WATCH_NAMESPACES` names namespaces, and then an `Api::namespaced`
-    // watch each, the only shape the scoped chart's RoleBindings permit.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(client.clone(), runner_image.clone(), namespace)
-    })
+    controller_in(client.clone(), runner_image.clone())
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     runner_image: job::RunnerImage,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<KafkaCluster> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<KafkaCluster> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let ctx = Arc::new(Context {
         client,
         archive: None,

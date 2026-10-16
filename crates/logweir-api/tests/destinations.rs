@@ -6,7 +6,7 @@ mod support;
 
 use serde_json::{json, Value};
 use support::{
-    seed_destination, TestApp, ACCESS_KEY_ID, ACTOR_ANNOTATION, NS_A, SECRET_ACCESS_KEY,
+    seed_destination, TestApp, ACCESS_KEY_ID, ACTOR_ANNOTATION, INSTALL_NS, NS_A, SECRET_ACCESS_KEY,
 };
 
 fn body(name: &str) -> String {
@@ -52,7 +52,7 @@ async fn a_destination_is_created_under_its_own_name_with_references_only() {
     let app = TestApp::new();
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             Some("destination-create-01"),
             &body("primary"),
         )
@@ -101,7 +101,7 @@ async fn a_destination_is_created_under_its_own_name_with_references_only() {
 #[tokio::test]
 async fn the_same_key_and_the_same_request_replays_and_a_different_one_conflicts() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     let first = app
         .post(&path, Some("destination-create-02"), &body("primary"))
         .await;
@@ -129,7 +129,7 @@ async fn a_name_another_scope_created_is_never_adopted() {
     seed_destination(&app.fake, NS_A, "primary");
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             Some("destination-create-03"),
             &body("primary"),
         )
@@ -141,7 +141,7 @@ async fn a_name_another_scope_created_is_never_adopted() {
 #[tokio::test]
 async fn the_rules_are_evaluated_before_the_object_exists() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
 
     // R3, in the direction the CRD spells `insecureHttp`.
     let mut insecure = support::destination_body("d1");
@@ -260,7 +260,7 @@ async fn the_rules_are_evaluated_before_the_object_exists() {
 #[tokio::test]
 async fn addressing_never_decides_transport() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     let mut request = support::destination_body("path-style-tls");
     request["storage"]["addressing"] = json!("pathStyle");
     let response = app
@@ -287,7 +287,7 @@ async fn a_credential_value_is_created_once_and_never_comes_back() {
     let request = support::destination_body_with_new_credential("primary");
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             Some("destination-cred-001"),
             &request.to_string(),
         )
@@ -351,7 +351,7 @@ async fn a_credential_value_is_created_once_and_never_comes_back() {
     assert!(
         secret_calls
             .iter()
-            .all(|c| c == &format!("POST /api/v1/namespaces/{NS_A}/secrets")),
+            .all(|c| c == &format!("POST /api/v1/namespaces/{INSTALL_NS}/secrets")),
         "a Secret verb other than create was used: {secret_calls:?}"
     );
     // Two calls: the dry-run probe, then the real write.
@@ -385,7 +385,7 @@ async fn the_credential_echo_is_dropped_before_any_route_sees_it() {
     let app = TestApp::new();
     let request = support::destination_body_with_new_credential("primary");
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/destinations"),
+        &format!("/api/v1/workspaces/{NS_A}/destinations"),
         Some("destination-cred-002"),
         &request.to_string(),
     )
@@ -424,11 +424,11 @@ async fn the_credential_echo_is_dropped_before_any_route_sees_it() {
 
     // Nothing that left this service carries it.
     let read = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/destinations/primary"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/destinations/primary"))
         .await;
     assert!(!read.text().contains(SECRET_ACCESS_KEY));
     let list = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/destinations"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/destinations"))
         .await;
     assert!(!list.text().contains(SECRET_ACCESS_KEY));
 }
@@ -443,7 +443,7 @@ async fn a_malformed_credential_is_refused_by_class_and_never_by_value() {
     });
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             Some("destination-cred-003"),
             &request.to_string(),
         )
@@ -466,7 +466,7 @@ async fn an_unknown_field_in_a_destination_request_is_refused() {
     request["storage"]["pathStyle"] = json!(true);
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             Some("destination-strict-01"),
             &request.to_string(),
         )
@@ -483,7 +483,7 @@ async fn an_unknown_field_in_a_destination_request_is_refused() {
 async fn update_access_rotates_the_grants_under_a_generation_precondition() {
     let app = TestApp::new();
     seed_destination(&app.fake, NS_A, "primary");
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations/primary:update-access");
     // A rotation may re-arrange the Secrets this destination already
     // names (here the two roles swap), and names no other existing Secret.
     let rotation = json!({
@@ -528,7 +528,7 @@ async fn update_access_rotates_the_grants_under_a_generation_precondition() {
 async fn update_access_refuses_an_idempotency_key_and_a_ca_bundle_on_plaintext() {
     let app = TestApp::new();
     seed_destination(&app.fake, NS_A, "primary");
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations/primary:update-access");
     let rotation = json!({
         "expectedGeneration": 3,
         "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "s"}}}}
@@ -555,7 +555,7 @@ async fn update_access_refuses_an_idempotency_key_and_a_ca_bundle_on_plaintext()
     with_ca["expectedGeneration"] = json!(1);
     with_ca["transport"] = json!({"caBundle": {"configMapName": "ca"}});
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/destinations/plain:update-access"),
+        &format!("/api/v1/workspaces/{NS_A}/destinations/plain:update-access"),
         None,
         &with_ca.to_string(),
     )
@@ -567,7 +567,7 @@ async fn update_access_refuses_an_idempotency_key_and_a_ca_bundle_on_plaintext()
 #[tokio::test]
 async fn at_most_one_destination_is_the_namespace_default() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     let mut first = support::destination_body("primary");
     first["default"] = json!(true);
     let response = app
@@ -606,7 +606,7 @@ async fn the_list_is_a_bounded_page_of_rows_and_a_tampered_cursor_is_refused() {
         );
     }
     let first = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/destinations?limit=2"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/destinations?limit=2"))
         .await;
     let v = first.json();
     assert_eq!(v["items"].as_array().unwrap().len(), 2);
@@ -615,7 +615,7 @@ async fn the_list_is_a_bounded_page_of_rows_and_a_tampered_cursor_is_refused() {
 
     let next = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/destinations?limit=2&cursor={cursor}"
+            "/api/v1/workspaces/{NS_A}/destinations?limit=2&cursor={cursor}"
         ))
         .await;
     assert_eq!(next.json()["items"][0]["name"], "d2");
@@ -623,7 +623,7 @@ async fn the_list_is_a_bounded_page_of_rows_and_a_tampered_cursor_is_refused() {
     // A cursor from another list is not this list's cursor.
     let other = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_B}/destinations?limit=2&cursor={cursor}",
+            "/api/v1/workspaces/{NS_B}/destinations?limit=2&cursor={cursor}",
             NS_B = support::NS_B
         ))
         .await;
@@ -634,7 +634,7 @@ async fn the_list_is_a_bounded_page_of_rows_and_a_tampered_cursor_is_refused() {
     bytes[2] = if bytes[2] == b'A' { b'B' } else { b'A' };
     let tampered = String::from_utf8(bytes).unwrap();
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/destinations?limit=2&cursor={tampered}"
+        "/api/v1/workspaces/{NS_A}/destinations?limit=2&cursor={tampered}"
     ))
     .await
     .assert_problem(400, "cursor_invalid");
@@ -700,7 +700,7 @@ async fn usage_lists_what_names_the_destination_by_its_reference_and_states_its_
         .seed("backups", NS_A, backup("cold-20261012-031500", "cold"));
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/destinations/primary/usage"
+            "/api/v1/workspaces/{NS_A}/destinations/primary/usage"
         ))
         .await;
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
@@ -734,7 +734,7 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
     seed_destination(&app.fake, NS_A, "primary");
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:test"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations/primary:test"),
             Some("destination-test-0001"),
             "{}",
         )
@@ -769,7 +769,7 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
 
     // And the destination read now reports it as the last test.
     let read = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/destinations/primary"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/destinations/primary"))
         .await;
     assert_eq!(read.json()["item"]["lastTest"]["preflightId"], id);
     app.fake.assert_strict();
@@ -800,7 +800,7 @@ async fn dui1_a_default_test_exercises_the_roles_that_fall_back_to_the_archive_w
             }
         }),
     );
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations/only-write:test");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations/only-write:test");
     let roles_of = |id: &str| {
         app.fake.object("preflights", NS_A, id).unwrap()["spec"]["request"]["destinationAccess"]
             ["roles"]
@@ -851,7 +851,7 @@ async fn dui2_a_stale_rotation_is_412_before_any_field_rule() {
         .fake
         .object("backupdestinations", NS_A, "primary")
         .unwrap();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations/primary:update-access");
     let keep = |generation: i64| {
         json!({
             "expectedGeneration": generation,
@@ -918,7 +918,7 @@ async fn a_rotation_that_cannot_write_the_value_changes_nothing() {
     let app = TestApp::new();
     let request = support::destination_body_with_new_credential("primary");
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/destinations"),
+        &format!("/api/v1/workspaces/{NS_A}/destinations"),
         Some("rotate-closed-0001"),
         &request.to_string(),
     )
@@ -950,7 +950,7 @@ async fn a_rotation_that_cannot_write_the_value_changes_nothing() {
     });
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations/primary:update-access"),
             None,
             &rotation.to_string(),
         )
@@ -994,7 +994,7 @@ async fn a_rotation_into_a_role_with_no_secret_yet_is_written_and_lands() {
     });
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations/primary:update-access"),
             None,
             &rotation.to_string(),
         )
@@ -1053,7 +1053,7 @@ async fn a_planted_credential_secret_is_refused_on_the_first_attempt_and_on_the_
         }),
     );
     let request = support::destination_body_with_new_credential("primary");
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
 
     // Attempt 1.
     let first = app
@@ -1113,7 +1113,7 @@ async fn a_taken_name_for_a_later_role_leaves_the_earlier_role_unwritten() {
     request["access"]["archiveRead"] = json!({"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIASECOND", "secretAccessKey": "the-later-role-value"}}});
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             Some("taken-later-role-01"),
             &request.to_string(),
         )
@@ -1153,7 +1153,7 @@ async fn the_refusal_names_every_credential_name_that_is_already_taken() {
     request["access"]["archiveRead"] = json!({"mode": "secretKeys", "secret": {"new": {"accessKeyId": "A2", "secretAccessKey": "v2"}}});
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            &format!("/api/v1/workspaces/{NS_A}/destinations"),
             Some("taken-every-name-1"),
             &request.to_string(),
         )
@@ -1172,7 +1172,7 @@ async fn the_refusal_names_every_credential_name_that_is_already_taken() {
 async fn a_genuine_replay_finishes_the_credential_writes_it_started() {
     let app = TestApp::new();
     let request = support::destination_body_with_new_credential("primary");
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     let first = app
         .post(&path, Some("genuine-replay-0001"), &request.to_string())
         .await;
@@ -1202,7 +1202,7 @@ async fn a_genuine_replay_finishes_the_credential_writes_it_started() {
 async fn the_audit_line_separates_written_credentials_from_replayed_ones() {
     let app = TestApp::new();
     let request = support::destination_body_with_new_credential("primary");
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     app.post(&path, Some("audit-split-00001"), &request.to_string())
         .await;
     app.post(&path, Some("audit-split-00001"), &request.to_string())
@@ -1269,7 +1269,7 @@ async fn last_test_pages_past_the_backup_preflights_that_share_the_other_label()
         }),
     );
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/destinations/primary"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/destinations/primary"))
         .await;
     let last = &response.json()["item"]["lastTest"];
     assert_eq!(last["preflightId"], "pf-zzzz0001");
@@ -1301,7 +1301,7 @@ async fn last_test_pages_past_the_backup_preflights_that_share_the_other_label()
 #[tokio::test]
 async fn the_default_check_selects_on_a_label_rather_than_scanning() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     let mut first = support::destination_body("primary");
     first["default"] = json!(true);
     let response = app
@@ -1390,7 +1390,7 @@ async fn the_default_check_selects_on_a_label_rather_than_scanning() {
 #[tokio::test]
 async fn fx20_a_new_destination_naming_an_existing_secret_is_refused_and_writes_nothing() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     let mut thief = support::destination_body("thief");
     thief["storage"]["endpoint"] = json!("https://attacker.example:9000");
     thief["access"]["archiveWrite"] =
@@ -1460,7 +1460,7 @@ async fn fx20_a_new_destination_naming_an_existing_secret_is_refused_and_writes_
 async fn fx20_a_rotation_refuses_a_secret_the_destination_does_not_already_name() {
     let app = TestApp::new();
     seed_destination(&app.fake, NS_A, "primary");
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations/primary:update-access");
     let before = app
         .fake
         .object("backupdestinations", NS_A, "primary")
@@ -1525,7 +1525,7 @@ async fn fx20_a_rotation_refuses_a_secret_the_destination_does_not_already_name(
 #[tokio::test]
 async fn fx20_a_destination_region_that_is_not_a_region_name_is_refused() {
     let app = TestApp::new();
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     for (i, region) in [
         "x@attacker.example/",
         "us-east-1.attacker.example#",
@@ -1627,7 +1627,7 @@ async fn fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant() {
     );
     let read = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/preflights/{}",
+            "/api/v1/workspaces/{NS_A}/preflights/{}",
             item["id"].as_str().expect("id")
         ))
         .await;
@@ -1658,7 +1658,7 @@ async fn fx20c_a_destination_test_refused_on_a_binding_is_answered_by_grant() {
 
     let destination = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/destinations/fx20-thief"
+            "/api/v1/workspaces/{NS_A}/destinations/fx20-thief"
         ))
         .await;
     assert_eq!(destination.status.as_u16(), 200, "{}", destination.text());

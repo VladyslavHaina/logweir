@@ -300,8 +300,7 @@ fn plan_orders_to_drill_orders() -> RestorePlan {
         window_floor_source: WindowFloorSource::ArchiveManifest,
         source_partitions: Default::default(),
         default_replication_factor: 1,
-        checkpoint_state: "/tmp/logweir/checkpoint.json".into(),
-        checkpoint_interval_secs: 30,
+        rate_limit_bytes_per_sec: None,
         offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     }
 }

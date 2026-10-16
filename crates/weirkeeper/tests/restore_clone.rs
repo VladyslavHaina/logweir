@@ -13,6 +13,8 @@ use weirkeeper::crds::restore::Restore;
 use weirkeeper::testing::{mock_client_recording_bodies, BodyRecorder, Route};
 
 const NS: &str = "logweir-t20";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const NAME: &str = "clone-orders";
 const UID: &str = "5c2e7b91-0000-4000-8000-0000000000a2";
 const RUN_JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b2";
@@ -35,7 +37,7 @@ fn plan(teardown: &str, mode: &str) -> String {
 fn restore_value(plan: &str, finalizers: &[&str], status: Value) -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-        "metadata": {"name": NAME, "namespace": NS, "uid": UID, "generation": 1,
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": NAME, "namespace": NS, "uid": UID, "generation": 1,
                      "resourceVersion": "100", "finalizers": finalizers},
         "spec": {
             "planBytes": plan, "approvalRef": {"name": "a1"},

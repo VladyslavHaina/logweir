@@ -122,6 +122,10 @@ pub struct RdKafkaReader {
     /// under `topic_mapping_prefix: drill-`), and teardown must never delete
     /// an original-name topic.
     protected_names: std::collections::BTreeSet<String>,
+    /// PROD-07.2: when set, `delete_topics` deletes only these exact names
+    /// (a cleanup's mapped target names) instead of the scratch prefix's
+    /// namespace. [`RdKafkaReader::with_deletable_names`].
+    deletable_names: Option<std::collections::BTreeSet<String>>,
 }
 
 /// The two TLS controls every TLS arm of [`RdKafkaReader::client_config`] sets.
@@ -322,6 +326,7 @@ impl RdKafkaReader {
             admin_bound: crate::groups::DEFAULT_ADMIN_BOUND,
             scratch_prefix: None,
             protected_names: std::collections::BTreeSet::new(),
+            deletable_names: None,
         })
     }
 
@@ -332,6 +337,18 @@ impl RdKafkaReader {
     #[must_use]
     pub fn with_protected_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
         self.protected_names.extend(names);
+        self
+    }
+
+    /// **PROD-07.2: scope `delete_topics` to exactly `names`**, a restore
+    /// plan's mapped target names, in place of the scratch prefix: what
+    /// `logweir restore cleanup` deletes from, so an interrupted restore under
+    /// any prefix can be cleaned (protected names still win). The cleanup
+    /// still deletes only topics its signed record names, while each one's ID
+    /// is the recorded one.
+    #[must_use]
+    pub fn with_deletable_names(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.deletable_names = Some(names.into_iter().collect());
         self
     }
 
@@ -1391,7 +1408,15 @@ impl TopicDeleter for RdKafkaReader {
         if names.is_empty() {
             return Ok(Vec::new());
         }
-        let Some(prefix) = self.scratch_prefix.as_deref() else {
+        let in_scope = |n: &str| -> bool {
+            match (&self.deletable_names, self.scratch_prefix.as_deref()) {
+                (Some(set), _) => set.contains(n),
+                (None, Some(prefix)) => n.starts_with(prefix),
+                (None, None) => false,
+            }
+        };
+        let prefix = self.scratch_prefix.as_deref().unwrap_or_default();
+        if self.deletable_names.is_none() && self.scratch_prefix.is_none() {
             return Ok(names
                 .iter()
                 .map(|n| {
@@ -1405,7 +1430,7 @@ impl TopicDeleter for RdKafkaReader {
                     )
                 })
                 .collect());
-        };
+        }
         // Names outside the configured namespace are reported as refused and
         // never reach the broker call; only in-namespace names are sent to
         // `AdminClient::delete_topics`. Refused entries are reported first,
@@ -1421,8 +1446,16 @@ impl TopicDeleter for RdKafkaReader {
                          never deletes a topic under its original name"
                     )),
                 ));
-            } else if n.starts_with(prefix) {
+            } else if in_scope(n) {
                 allowed.push(n.as_str());
+            } else if self.deletable_names.is_some() {
+                out.push((
+                    n.clone(),
+                    Err(format!(
+                        "delete_topics refused: {n:?} is not one of the plan's mapped target \
+                         names"
+                    )),
+                ));
             } else {
                 out.push((
                     n.clone(),

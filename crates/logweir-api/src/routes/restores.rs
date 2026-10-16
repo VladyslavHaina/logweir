@@ -44,11 +44,11 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/restores";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/restores";
 /// The create route identifier.
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/restores";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/restores";
 /// The governed approval submission route identifier.
-pub const ROUTE_SUBMIT_APPROVAL: &str = "POST /api/v1/namespaces/{ns}/restores/{name}/approval";
+pub const ROUTE_SUBMIT_APPROVAL: &str = "POST /api/v1/workspaces/{ws}/restores/{name}/approval";
 /// The largest submitted sidecar, 64 KiB.
 pub const MAX_SIDECAR_BYTES: usize = 64 * 1024;
 /// The deterministic name prefix (30 characters in all).
@@ -427,7 +427,6 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
 /// Build the stored object. `plan_bytes` is moved in unchanged.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     annotations: BTreeMap<String, String>,
     request: &CreateRestoreRequest,
@@ -436,7 +435,6 @@ pub fn build(
     Restore {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             ..ObjectMeta::default()
         },
@@ -503,12 +501,12 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadRestores)?;
+    authorize(&state, &actor, &ws, Action::ReadRestores)?;
     let query = list_query(uri.query())?;
-    let (items, page) = list_page::<Restore>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+    let (items, page) = list_page::<Restore>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &RestoreList {
@@ -527,12 +525,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadRestores)?;
+    authorize(&state, &actor, &ws, Action::ReadRestores)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Restore>(&state, &actor, &ns, &name).await?;
+    let object = get_object::<Restore>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &RestoreResponse {
@@ -544,21 +542,217 @@ pub async fn get_one(
     ))
 }
 
+/// The connection, destinations and Approval a restore names must be in the
+/// path's workspace (PROD-19.1 §4.1).
+async fn refuse_references_elsewhere(
+    state: &AppState,
+    ws: &str,
+    request: &CreateRestoreRequest,
+) -> Result<(), ApiError> {
+    use weirkeeper::crds::backup_destination::BackupDestination;
+    use weirkeeper::crds::kafka_cluster::KafkaCluster;
+    super::refuse_reference_elsewhere::<KafkaCluster>(
+        state,
+        ws,
+        "target.clusterRef.name",
+        "connection",
+        &request.target.cluster_ref.name,
+    )
+    .await?;
+    super::refuse_reference_elsewhere::<Approval>(
+        state,
+        ws,
+        "approvalRef.name",
+        "approval",
+        &request.approval_ref.name,
+    )
+    .await?;
+    for (field, reference) in [
+        ("sourceDestinationRef.name", &request.source_destination_ref),
+        (
+            "evidenceDestinationRef.name",
+            &request.evidence_destination_ref,
+        ),
+    ] {
+        if let Some(reference) = reference {
+            super::refuse_reference_elsewhere::<BackupDestination>(
+                state,
+                ws,
+                field,
+                "destination",
+                &reference.name,
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+/// `POST .../restores/{name}/cancel` (PROD-07.2).
+pub const ROUTE_CANCEL: &str = "POST /api/v1/workspaces/{ws}/restores/{name}/cancel";
+/// `POST .../restores/{name}/cleanup` (PROD-07.2).
+pub const ROUTE_CLEANUP: &str = "POST /api/v1/workspaces/{ws}/restores/{name}/cleanup";
+
+/// What one request asks the controller for (PROD-07.2).
+#[derive(Clone, Copy)]
+enum Request {
+    Cancel,
+    Cleanup,
+}
+
+impl Request {
+    fn annotation(self) -> &'static str {
+        use weirkeeper::controllers::restore::restore_interruption as ri;
+        match self {
+            Request::Cancel => ri::CANCEL_ANNOTATION,
+            Request::Cleanup => ri::CLEANUP_ANNOTATION,
+        }
+    }
+
+    /// Why the object's state refuses the request, if it does.
+    fn refusal(self, object: &Restore) -> Option<&'static str> {
+        use weirkeeper::controllers::restore::restore_interruption as ri;
+        let status = object.status.as_ref();
+        let phase = status.and_then(|s| s.phase.as_deref());
+        match self {
+            Request::Cancel => match phase {
+                None | Some("Pending" | "Queued" | "Running") => None,
+                _ => Some("The restore has already ended; there is nothing to cancel."),
+            },
+            Request::Cleanup => {
+                let signed = status
+                    .and_then(|s| s.interruption.as_ref())
+                    .is_some_and(|i| {
+                        i.verification.as_deref() == Some(ri::VERIFICATION_DONE)
+                            && i.reconcile_run_id.is_some()
+                    });
+                if phase == Some(ri::PHASE_INTERRUPTED) && signed {
+                    None
+                } else {
+                    Some(
+                        "Clean up is offered only for an Interrupted restore whose partial \
+                         topics a reconcile has listed in a signed scorecard.",
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// `POST .../restores/{name}/cancel` and `.../cleanup`: one annotation, set
+/// once. Whoever may create restores in the workspace may ask (OD-23 open
+/// point 3); a repeated request writes nothing.
+async fn request(
+    state: &AppState,
+    actor: &Actor,
+    ws: &str,
+    name: &str,
+    what: Request,
+) -> Result<Restore, ApiError> {
+    for _ in 0..2 {
+        let object = get_object::<Restore>(state, actor, ws, name).await?;
+        if object
+            .metadata
+            .annotations
+            .as_ref()
+            .is_some_and(|a| a.contains_key(what.annotation()))
+        {
+            return Ok(object);
+        }
+        if let Some(why) = what.refusal(&object) {
+            actor.audit.set_failure("state_conflict");
+            return Err(ApiError::new(ProblemCode::StateConflict, why));
+        }
+        let version = object.metadata.resource_version.clone().unwrap_or_default();
+        match state
+            .kube()
+            .request_restore(ws, name, &version, what.annotation(), &actor.id())
+            .await
+        {
+            Ok(updated) => {
+                actor.audit.note(what.annotation(), "true");
+                return Ok(updated);
+            }
+            Err(KubeFailure::Conflict) => continue,
+            Err(other) => return Err(other.into_api_error()),
+        }
+    }
+    Err(ApiError::new(
+        ProblemCode::StateConflict,
+        "The restore changed concurrently; read it again and retry.",
+    ))
+}
+
+/// `POST .../restores/{name}/cancel` (PROD-07.2): stop the run. Before its
+/// Job exists the restore fails `Cancelled` and nothing ran; while it runs
+/// the controller stops the runner and its engine, and a run that created its
+/// target topics becomes `Interrupted`. 409 once it has ended.
+pub async fn cancel(
+    State(state): State<AppState>,
+    RequestId(request_id): RequestId,
+    actor: Actor,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &actor, &ws, Action::CreateRestore)?;
+    crate::http::parse_query(uri.query(), &[])?;
+    IdempotencyKey::refuse_on(&headers, ROUTE_CANCEL, None)?;
+    let object = request(&state, &actor, &ws, &name, Request::Cancel).await?;
+    Ok(json(
+        StatusCode::OK,
+        &RestoreResponse {
+            request_id,
+            replayed: None,
+            item: projection::restore(&object, false),
+            authorization: None,
+        },
+    ))
+}
+
+/// `POST .../restores/{name}/cleanup` (PROD-07.2): remove the topics an
+/// interrupted run created and left, as its reconcile's signed scorecard
+/// lists them, each only while its ID is the recorded one. 409 unless the
+/// restore is `Interrupted` with a signed reconcile.
+pub async fn cleanup(
+    State(state): State<AppState>,
+    RequestId(request_id): RequestId,
+    actor: Actor,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
+    uri: Uri,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    authorize(&state, &actor, &ws, Action::CreateRestore)?;
+    crate::http::parse_query(uri.query(), &[])?;
+    IdempotencyKey::refuse_on(&headers, ROUTE_CLEANUP, None)?;
+    let object = request(&state, &actor, &ws, &name, Request::Cleanup).await?;
+    Ok(json(
+        StatusCode::OK,
+        &RestoreResponse {
+            request_id,
+            replayed: None,
+            item: projection::restore(&object, false),
+            authorization: None,
+        },
+    ))
+}
+
 /// `POST .../restores`.
 pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CreateRestore)?;
+    authorize(&state, &actor, &ws, Action::CreateRestore)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let mut request: CreateRestoreRequest = read_json(body, MAX_JSON_BODY).await?;
     let point_in_time = validate_create(&request)?;
+    refuse_references_elsewhere(&state, &ws, &request).await?;
     // A governed request's confirmation lives beside the Approval under
     // `<approvalRef>-confirmation`, and that name must still be a name. The
     // policies as this request sees them, the fresh-install marker applied, are
@@ -566,12 +760,12 @@ pub async fn create(
     let policies = approval::effective_policies(state.approval(), state.kube())
         .await
         .map_err(KubeFailure::into_api_error)?;
-    let effective = policies.resolve(&ns);
+    let effective = policies.resolve(&ws);
     refuse_typed_confirmation(&effective, &request)?;
     refuse_before_create(
         &state,
         &actor,
-        &ns,
+        &ws,
         &effective,
         &CreateGate {
             ticket: request.ticket.as_deref(),
@@ -581,10 +775,10 @@ pub async fn create(
     )?;
     refuse_taken_approval::<Restore>(
         &state,
-        &ns,
+        &ws,
         &effective,
         &request.approval_ref.name,
-        &super::deterministic_name(&actor, &ns, ROUTE_CREATE, NAME_PREFIX, &key),
+        &super::deterministic_name(&actor, &ws, ROUTE_CREATE, NAME_PREFIX, &key),
         "Restore",
     )
     .await?;
@@ -595,17 +789,17 @@ pub async fn create(
     // request itself (a malformed restore does not spend the window) and
     // before the object exists. The ceiling on how many restores RUN at once
     // is the controller's manual-restore pool.
-    super::run_create_rate(&state, &actor, &ns, super::ManualRun::Restore)?;
+    super::run_create_rate(&state, &actor, &ws, super::ManualRun::Restore)?;
     let created = create_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         NAME_PREFIX,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request, point_in_time),
+        |name, annotations| build(name, annotations, &request, point_in_time),
     )
     .await?;
     // ROUTE BY THE FROZEN POLICY. The Restore exists (and has a
@@ -614,8 +808,8 @@ pub async fn create(
     let authorization = authorize_submission(
         &state,
         &actor,
-        &ns,
-        &Subject::of_restore(&ns, &created.object),
+        &ws,
+        &Subject::of_restore(&ws, &created.object),
         &effective,
         SignedBesideThePlan {
             ticket: request.ticket.as_deref(),
@@ -635,19 +829,19 @@ pub async fn create(
 }
 
 /// **Typed confirmation of an original-name restore.** On a
-/// one-person-confirmation namespace (`confirm`, internal `Ordinary`) the
+/// one-person-confirmation workspace (`confirm`, internal `Ordinary`) the
 /// requester may confirm a restore under the ORIGINAL topic names alone, but
 /// only by RE-TYPING every original topic name, exactly; the console signs
 /// what was typed into the authorization document. Refused BEFORE the
 /// Restore exists, each by name:
 ///
 /// * `originalNameConfirmation.typedTopics` / `typed_topics_required` — an
-///   original-name request in such a namespace without the typed names;
+///   original-name request in such a workspace without the typed names;
 /// * `originalNameConfirmation.typedTopics` / `typed_topics_mismatch` — names
 ///   that are not exactly the plan's `source.topics` (the message names what
 ///   is missing, extra or repeated);
 /// * `originalNameConfirmation` / `not_accepted` — typed names on any other
-///   request: an ordinary restore, or a namespace where a second person
+///   request: an ordinary restore, or a workspace where a second person
 ///   approves (`strict`) or nothing is signed (unbound), which typed names
 ///   never replace.
 ///
@@ -670,7 +864,7 @@ fn refuse_typed_confirmation(
         (true, None) => Err(ApiError::validation(vec![FieldError::new(
             "originalNameConfirmation.typedTopics",
             "typed_topics_required",
-            "this namespace is confirmed by one person (confirm): a restore under the ORIGINAL \
+            "this workspace is confirmed by one person (confirm): a restore under the ORIGINAL \
              topic names is confirmed only with every original topic name re-typed, exactly \
              (the owner's decision OD-10); nothing was created",
         )])),
@@ -703,8 +897,8 @@ fn refuse_typed_confirmation(
             "originalNameConfirmation",
             "not_accepted",
             "typed topic names confirm only a restore under the original topic names in a \
-             namespace confirmed by one person; here they would replace nothing (an ordinary \
-             restore, or a namespace where a second person approves or nothing is signed)",
+             workspace confirmed by one person; here they would replace nothing (an ordinary \
+             restore, or a workspace where a second person approves or nothing is signed)",
         )])),
         (false, None) => Ok(()),
     }
@@ -754,7 +948,7 @@ fn typed_confirmation(
 ///   the managed key is written by the identity hook after this pod starts.
 ///   Until it is there, nothing is created.
 /// * **The ticket** (D0: "required in Governed, optional in Ordinary"), and
-///   none in an unbound namespace, which signs nothing.
+///   none in an unbound workspace, which signs nothing.
 /// * **No `approvalRef.name` ending in `-confirmation` under Governed**: it
 ///   would collide with another Restore's confirmation object.
 /// * **A requester a two-person approval can compare**: under a policy whose
@@ -772,7 +966,7 @@ fn typed_confirmation(
 pub(crate) fn refuse_before_create(
     state: &AppState,
     actor: &Actor,
-    ns: &str,
+    ws: &str,
     effective: &EffectivePolicy,
     gate: &CreateGate<'_>,
 ) -> Result<(), ApiError> {
@@ -782,7 +976,7 @@ pub(crate) fn refuse_before_create(
                 "ticket",
                 "not_accepted",
                 format!(
-                    "namespace {ns} is bound to no approval policy ({}), so the console signs \
+                    "workspace {ws} is bound to no approval policy ({}), so the console signs \
                      nothing here; the approver records the ticket with `logweir drill approve \
                      --ticket`",
                     logweir_core::approval_policy::LEGACY_GOVERNED_POLICY_NAME
@@ -799,7 +993,7 @@ pub(crate) fn refuse_before_create(
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
-                "Namespace {ns} is bound to approval policy {} ({route}), and this console \
+                "Workspace {ws} is bound to approval policy {} ({route}), and this console \
                  runs in localAdmin mode, whose one identity cannot be two people. Submit through \
                  the shared console. Nothing was created.",
                 policy.name
@@ -812,7 +1006,7 @@ pub(crate) fn refuse_before_create(
             return Err(ApiError::new(
                 ProblemCode::PolicyMismatch,
                 format!(
-                    "Namespace {ns} is under approval policy {} ({route}), which the \
+                    "Workspace {ws} is under approval policy {} ({route}), which the \
                      console signs, and this console's confirmation key is not there yet: the \
                      installation's identity hook writes it once, at install. Try again in a \
                      minute; if it persists, the hook did not finish (`helm status`). Nothing was \
@@ -837,7 +1031,7 @@ pub(crate) fn refuse_before_create(
             return Err(ApiError::new(
                 ProblemCode::PolicyMismatch,
                 format!(
-                    "Namespace {ns} is bound to approval policy {} (two-person), and {reason}. \
+                    "Workspace {ws} is bound to approval policy {} (two-person), and {reason}. \
                      Nothing was created.",
                     policy.name
                 ),
@@ -860,7 +1054,7 @@ pub(crate) fn refuse_before_create(
                     "ticket",
                     "not_showable",
                     format!(
-                        "Namespace {ns} is bound to approval policy {} (two-person), and the \
+                        "Workspace {ws} is bound to approval policy {} (two-person), and the \
                          approver is shown the change ticket: it must be printable ASCII (no \
                          character outside ASCII, no control character) of at most {} \
                          characters. Nothing was created.",
@@ -879,7 +1073,7 @@ pub(crate) fn refuse_before_create(
                 "planBytes",
                 "scope_incomplete",
                 format!(
-                    "Namespace {ns} is bound to approval policy {} (two-person). {}. Nothing was \
+                    "Workspace {ws} is bound to approval policy {} (two-person). {}. Nothing was \
                      created.",
                     policy.name,
                     incomplete.sentence_for(gate.plan.scope_of())
@@ -905,7 +1099,7 @@ pub(crate) fn refuse_before_create(
             "approvalRef.name",
             "reserved_suffix",
             format!(
-                "in a namespace bound to a Governed policy an Approval name may not end in `{}`: \
+                "in a workspace bound to a Governed policy an Approval name may not end in `{}`: \
                  that is where another Restore's console confirmation lives",
                 approval::CONFIRMATION_SUFFIX
             ),
@@ -918,7 +1112,7 @@ pub(crate) fn refuse_before_create(
             "approvalRef.name",
             "too_long",
             format!(
-                "at most {} characters in a namespace bound to a Governed policy, so that its \
+                "at most {} characters in a workspace bound to a Governed policy, so that its \
                  confirmation `<name>{}` is still an object name",
                 approval::MAX_GOVERNED_APPROVAL_NAME,
                 approval::CONFIRMATION_SUFFIX
@@ -965,7 +1159,7 @@ fn approval_target(
 /// `state_conflict`, `policy_mismatch`, or the adapter's failure.
 pub(crate) async fn refuse_taken_approval<K: crate::kube::ProductResource>(
     state: &AppState,
-    ns: &str,
+    ws: &str,
     effective: &EffectivePolicy,
     approval_name: &str,
     subject_name: &str,
@@ -975,17 +1169,17 @@ pub(crate) async fn refuse_taken_approval<K: crate::kube::ProductResource>(
         return Ok(());
     };
     let target = approval_target(policy, approval_name)?;
-    match state.kube().get::<Approval>(ns, &target).await {
+    match state.kube().get::<Approval>(ws, &target).await {
         Err(KubeFailure::NotFound) => return Ok(()),
         Err(other) => return Err(other.into_api_error()),
         Ok(_) => {}
     }
-    match state.kube().get::<K>(ns, subject_name).await {
+    match state.kube().get::<K>(ws, subject_name).await {
         Ok(_) => Ok(()),
         Err(KubeFailure::NotFound) => Err(ApiError::new(
             ProblemCode::StateConflict,
             format!(
-                "An Approval named {target} already exists in {ns} and was not made for this \
+                "An Approval named {target} already exists in {ws} and was not made for this \
                  request: it binds another object, and it is never adopted. Nothing was \
                  created. Submit this {title} with another approval name."
             ),
@@ -1010,6 +1204,7 @@ fn existing_is_ours(
         && doc.subject.kind == subject.wire()
         && doc.subject.uid == subject.uid
         && doc.subject.namespace == subject.namespace
+        && doc.subject.workspace == subject.workspace
         && doc.plan_hash == subject.plan_hash()
         && doc.policy.name == policy.name
         && doc.policy.digest == policy.digest()
@@ -1047,7 +1242,7 @@ fn policy_identity(effective: &EffectivePolicy) -> String {
     }
 }
 
-/// **The console's half of policy routing**: sign what the namespace's
+/// **The console's half of policy routing**: sign what the workspace's
 /// frozen policy requires, store it, and say where the submission goes next.
 ///
 /// * unbound — nothing is signed; today's governed flow (`awaitingApproval`);
@@ -1066,7 +1261,7 @@ fn policy_identity(effective: &EffectivePolicy) -> String {
 pub(crate) async fn authorize_submission(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     subject: &Subject,
     effective: &EffectivePolicy,
     signed: SignedBesideThePlan<'_>,
@@ -1100,7 +1295,7 @@ pub(crate) async fn authorize_submission(
         Ok(None) => {
             return Err(ApiError::new(
                 ProblemCode::InternalError,
-                "This console holds no confirmation key for a namespace bound to an approval \
+                "This console holds no confirmation key for a workspace bound to an approval \
                  policy.",
             ))
         }
@@ -1133,7 +1328,7 @@ pub(crate) async fn authorize_submission(
             // existed; reaching this means the subject is an earlier attempt's,
             // or the name was taken between the two reads.
             format!(
-                "An Approval named {target} already exists in {namespace} and is not this \
+                "An Approval named {target} already exists in {workspace} and is not this \
                  {}'s console confirmation under policy {}; it is never adopted. {} {} existed \
                  before this answer (an earlier attempt of this request, or the name was taken \
                  concurrently) and will wait for an approval: submit again with another approval \
@@ -1145,7 +1340,7 @@ pub(crate) async fn authorize_submission(
             ),
         )
     };
-    match state.kube().get::<Approval>(namespace, &target).await {
+    match state.kube().get::<Approval>(workspace, &target).await {
         Ok(existing) => {
             let doc = existing_is_ours(
                 &existing,
@@ -1164,7 +1359,8 @@ pub(crate) async fn authorize_submission(
 
     let mut doc = approval::document(
         policy,
-        namespace,
+        &subject.namespace,
+        &subject.workspace,
         &subject.name,
         &subject.uid,
         &subject.plan_hash(),
@@ -1214,7 +1410,6 @@ pub(crate) async fn authorize_submission(
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(target.clone()),
-            namespace: Some(namespace.to_string()),
             annotations: Some(
                 [
                     (
@@ -1254,12 +1449,12 @@ pub(crate) async fn authorize_submission(
         },
         status: None,
     };
-    match state.kube().create(namespace, &object).await {
+    match state.kube().create(workspace, &object).await {
         Ok(created) => {
             actor.audit.note("requester", &doc.requester.principal_id());
             actor.audit.note(
                 "confirmation",
-                &format!("{}/{}", namespace, created.name_any()),
+                &format!("{}/{}", workspace, created.name_any()),
             );
             Ok(view(&doc))
         }
@@ -1267,7 +1462,7 @@ pub(crate) async fn authorize_submission(
         Err(KubeFailure::AlreadyExists) => {
             let existing = state
                 .kube()
-                .get::<Approval>(namespace, &target)
+                .get::<Approval>(workspace, &target)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
             let doc = existing_is_ours(
@@ -1286,14 +1481,14 @@ pub(crate) async fn authorize_submission(
 
 /// `POST .../restores/{name}/approval` — **a governed approver submits the
 /// countersignature** (D0 "Governed approval submission"), or, in
-/// an UNBOUND namespace, records today's v1 approval files
-/// ([`record_legacy_approval`]). An Ordinary namespace has nothing to approve
+/// an UNBOUND workspace, records today's v1 approval files
+/// ([`record_legacy_approval`]). An Ordinary workspace has nothing to approve
 /// and answers `policy_mismatch`.
 ///
 /// # What it checks, and what it leaves to the controller
 ///
 /// The route binds the submission to the ONE governed request it is about:
-/// the namespace must be bound to a Governed policy, the console's
+/// the workspace must be bound to a Governed policy, the console's
 /// confirmation for this Restore must exist and still name this Restore's
 /// UID, plan hash and the CURRENT policy digest, and it must not have
 /// expired. Then separation of duties AT THE API (D0: an approver "cannot
@@ -1313,21 +1508,21 @@ pub async fn submit_approval(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::SubmitApproval)?;
+    authorize(&state, &actor, &ws, Action::SubmitApproval)?;
     crate::http::parse_query(uri.query(), &[])?;
     let request: SubmitApprovalRequest = read_json(body, MAX_JSON_BODY).await?;
     let submitted = submitted_files(&actor, &request)?;
-    let restore = get_object::<Restore>(&state, &actor, &ns, &name).await?;
+    let restore = get_object::<Restore>(&state, &actor, &ws, &name).await?;
     submit_for(
         &state,
         &actor,
         request_id,
-        &ns,
-        &Subject::of_restore(&ns, &restore),
+        &ws,
+        &Subject::of_restore(&ws, &restore),
         request,
         submitted,
     )
@@ -1398,7 +1593,7 @@ pub(crate) fn submitted_files(
 }
 
 /// The submission, once its files passed [`submitted_files`] and the subject
-/// was read: by the namespace's policy, a v1 record (unbound) or a strict
+/// was read: by the workspace's policy, a v1 record (unbound) or a strict
 /// countersignature over the console's request. A `Switchover`'s submission
 /// is this same function (PROD-04.2).
 ///
@@ -1410,7 +1605,7 @@ pub(crate) async fn submit_for(
     state: &AppState,
     actor: &Actor,
     request_id: String,
-    ns: &str,
+    ws: &str,
     subject: &Subject,
     request: SubmitApprovalRequest,
     submitted: logweir_evidence::Sidecar,
@@ -1419,12 +1614,12 @@ pub(crate) async fn submit_for(
     let effective = approval::effective_policies(state.approval(), state.kube())
         .await
         .map_err(KubeFailure::into_api_error)?
-        .resolve(ns);
+        .resolve(ws);
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     actor.audit.set_policy_digest(&policy_identity(&effective));
     if matches!(effective, EffectivePolicy::Legacy) {
-        return record_legacy_approval(state, actor, request_id, ns, subject, request, &submitted)
+        return record_legacy_approval(state, actor, request_id, ws, subject, request, &submitted)
             .await;
     }
     if request.approval_bytes.is_some() {
@@ -1439,7 +1634,7 @@ pub(crate) async fn submit_for(
         ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
-                "Namespace {ns} is bound to {} ({}), not an explicit Governed policy, so there is \
+                "Workspace {ws} is bound to {} ({}), not an explicit Governed policy, so there is \
                  no governed approval to submit here.",
                 effective.name(),
                 effective.mode()
@@ -1456,7 +1651,7 @@ pub(crate) async fn submit_for(
         logweir_core::approval_policy::ApprovalRoute::RequesterConfirms => {
             return Err(not_governed())
         }
-        // A TWO-PERSON NAMESPACE TAKES NO PERSONAL-KEY COUNTERSIGNATURE. Its
+        // A TWO-PERSON WORKSPACE TAKES NO PERSONAL-KEY COUNTERSIGNATURE. Its
         // policy snapshot says the console signs the approval, and a request
         // made under one setting is not approved under the other: accepting a
         // countersignature here would keep the personal-key roster as a
@@ -1467,7 +1662,7 @@ pub(crate) async fn submit_for(
             return Err(ApiError::new(
                 ProblemCode::PolicyMismatch,
                 format!(
-                    "Namespace {ns} is bound to {} (two-person): a second person approves in \
+                    "Workspace {ws} is bound to {} (two-person): a second person approves in \
                      the console, and a personal-key countersignature is not accepted here. \
                      Nothing was stored.",
                     policy.name
@@ -1477,7 +1672,7 @@ pub(crate) async fn submit_for(
     }
     let approval_name = subject.approval_name.clone();
     let confirmation_name = approval::confirmation_name(&approval_name);
-    let confirmation = match state.kube().get::<Approval>(ns, &confirmation_name).await {
+    let confirmation = match state.kube().get::<Approval>(ws, &confirmation_name).await {
         Ok(object) => object,
         Err(KubeFailure::NotFound) => {
             return Err(ApiError::new(
@@ -1553,7 +1748,6 @@ pub(crate) async fn submit_for(
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(approval_name.clone()),
-            namespace: Some(ns.to_string()),
             annotations: Some(
                 [
                     (
@@ -1589,12 +1783,12 @@ pub(crate) async fn submit_for(
         },
         status: None,
     };
-    let (stored, replayed) = match state.kube().create(ns, &object).await {
+    let (stored, replayed) = match state.kube().create(ws, &object).await {
         Ok(created) => (created, false),
         Err(KubeFailure::AlreadyExists) => {
             let existing = state
                 .kube()
-                .get::<Approval>(ns, &approval_name)
+                .get::<Approval>(ws, &approval_name)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
             if existing.spec.approval_bytes != object.spec.approval_bytes
@@ -1631,12 +1825,12 @@ pub(crate) async fn submit_for(
 const PAYLOAD_TYPE_APPROVAL_V1: &str = "application/vnd.logweir.drill-approval+json;version=1.0.0";
 
 /// **Recording today's approval through the console** -- an UNBOUND
-/// namespace (`legacy-governed-v1`), so an approver need not use kubectl.
+/// workspace (`legacy-governed-v1`), so an approver need not use kubectl.
 ///
 /// The route records the two files `logweir drill approve` wrote, EXACTLY as
 /// they arrived, as the Approval the Restore's `spec.approvalRef` names. It
 /// verifies no signature — the Approval controller does, against the
-/// namespace's `GovernedApproval` keys, and the runner again — but it refuses
+/// workspace's `GovernedApproval` keys, and the runner again — but it refuses
 /// early what could never verify for THIS Restore: a sidecar that is not the
 /// v1 payload type, and a document whose `plan_hash` is not this Restore's.
 /// A v1 document names no requester, so there is no principal to separate
@@ -1646,7 +1840,7 @@ async fn record_legacy_approval(
     state: &AppState,
     actor: &Actor,
     request_id: String,
-    ns: &str,
+    ws: &str,
     subject: &Subject,
     request: SubmitApprovalRequest,
     submitted: &logweir_evidence::Sidecar,
@@ -1655,7 +1849,7 @@ async fn record_legacy_approval(
         return Err(ApiError::validation(vec![FieldError::new(
             "approvalBytes",
             "required",
-            "an unbound namespace records the approval.json `logweir drill approve` wrote, \
+            "an unbound workspace records the approval.json `logweir drill approve` wrote, \
              beside its sidecar",
         )]));
     };
@@ -1664,7 +1858,7 @@ async fn record_legacy_approval(
         return Err(ApiError::new(
             ProblemCode::PolicyMismatch,
             format!(
-                "Namespace {ns} is bound to no approval policy ({}), which records the approval \
+                "Workspace {ws} is bound to no approval policy ({}), which records the approval \
                  `logweir drill approve` signs; this sidecar's payload type is {}.",
                 logweir_core::approval_policy::LEGACY_GOVERNED_POLICY_NAME,
                 submitted.payload_type
@@ -1738,11 +1932,10 @@ async fn record_legacy_approval(
     actor.audit.note("approverPrincipal", &actor.id());
     actor
         .audit
-        .note("approval", &format!("{ns}/{approval_name}"));
+        .note("approval", &format!("{ws}/{approval_name}"));
     let object = Approval {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(approval_name.clone()),
-            namespace: Some(ns.to_string()),
             annotations: Some(
                 [
                     (
@@ -1768,12 +1961,12 @@ async fn record_legacy_approval(
         },
         status: None,
     };
-    let (stored, replayed) = match state.kube().create(ns, &object).await {
+    let (stored, replayed) = match state.kube().create(ws, &object).await {
         Ok(created) => (created, false),
         Err(KubeFailure::AlreadyExists) => {
             let existing = state
                 .kube()
-                .get::<Approval>(ns, &approval_name)
+                .get::<Approval>(ws, &approval_name)
                 .await
                 .map_err(KubeFailure::into_api_error)?;
             if existing.spec.approval_bytes != object.spec.approval_bytes

@@ -88,7 +88,7 @@ Why required and not defaulted to the first workspace: a label selector cannot m
 
 | Where | What | Reason |
 | --- | --- | --- |
-| API, create | A body naming a connection, destination, schedule, catalog, approval or point that is not in the path's workspace | `422 validation_failed` with the field, "no `<kind>` named `<x>` in workspace `<ws>`". It reads exactly like a missing object |
+| API, create | A body naming a connection, destination, schedule, catalog, approval or point that another workspace holds | `422 validation_failed` with the field, "no `<kind>` named `<x>` in workspace `<ws>`". A referent that exists nowhere is admitted, as before, and refused by the controller (as built, PR #73) |
 | API, read | `GET /workspaces/dev/backups/<a prd backup>` | `404 not_found` (the adapter's label check) |
 | API, path | A workspace the person holds no role in | `403 workspace_forbidden` (renamed from `namespace_forbidden`), or `404` where unbound workspaces are hidden today |
 | Controller | Every spec reference: Backup (`sourceRef`, `destinationRef`, `retryOf`), BackupSchedule (`sourceRef`, `destinationRef`), Restore (`clusterRef`, `approvalRef`, `sourceDestinationRef`, `evidenceDestinationRef`), RecoveryCatalog, RetentionPolicy, ProtectionPolicy, Preflight, Switchover and TopicDiscovery refs (`crds/*.rs`, every `LocalRef` in a spec) | condition `WorkspaceMismatch`, terminal for that object, no Job: "connection `x` is in workspace `dev`; this Restore is in `prd`" |
@@ -112,7 +112,7 @@ This is one MINOR step of the authorization document. An older reader refuses th
 
 ### 4.3 Object names are unique per install
 
-Kubernetes enforces this, and it costs nothing. API-derived names (Backups, Restores, checks) hash `(issuer, subject, workspace, route, key)` (`idempotency.rs:153-162`; the cursor binds the workspace the same way, `cursor.rs:58-61`), so they never collide. A name a person types that is already taken anywhere in the install is refused `409 state_conflict`: "the name `source` is in use in this installation; names are shared by every workspace". The create forms suggest `<workspace>-` as a prefix.
+Kubernetes enforces this, and it costs nothing. API-derived names (Backups, Restores, checks) hash `(issuer, subject, workspace, route, key)` (`idempotency.rs:153-162`; the cursor binds the workspace the same way, `cursor.rs:58-61`), so they never collide. A name a person types that is already taken anywhere in the install is refused `409 state_conflict`: "the name `source` is in use in this installation; names are shared by every workspace".
 
 **Not doing:** per-workspace names through a mangled `<ws>-<name>`, which every reference, `kubectl` user and log would then have to translate.
 
@@ -236,11 +236,11 @@ So an archive made under the old layout (any namespace, any version) stays reada
 | # | Pass predicate | Negative control |
 | --- | --- | --- |
 | P1 | `kubectl get all,secrets,jobs,roles,rolebindings,serviceaccounts -A -l app.kubernetes.io/instance=logweir` shows the `logweir` namespace only, plus the trusted-proxy Role in `traefik`. The controller logs one watched namespace, `logweir` | `kubectl auth can-i create jobs -n default --as system:serviceaccount:logweir:weirkeeper` returns `no` |
-| P2 | `admin` sees a picker with four workspaces. In each one, by clicks: add the source and target connections (`<ws>-source`, `<ws>-target`) and a destination, check, discover, create a schedule, Back up now → Verified | Adding `dev-source` again in `prd`: the "name in use in this installation" message, and nothing created |
+| P2 | `admin` sees a picker with four workspaces. In each one, by clicks: add the source and target connections and a destination, check, discover, create a schedule, Back up now → Verified | In `prd`, adding a destination with the name of an existing `dev` destination: the "in use in this installation" message, and nothing created (connections cannot be used here: the API names them) |
 | P3 | `operator` sees no picker, only `dev`; a `dev` restore runs after the one-person confirmation and ends Restored and verified | Typing `#/prd/backups` into the address bar shows the no-access page; `norole` sees the no-role page |
 | P4 | In `prd`, `alice` requests a restore and sees no Approve button on it; `bob` sees every topic and the workspace `prd`, approves, and the restore ends verified; both verifiers print `console approval:` naming `alice` and `bob` | `approver` (approver in `stg` only) sees no `prd` workspace and no `prd` request |
 | P5 | A `stg` restore by `bob` runs after one person (stg is one-person) | — |
-| P6 | Cross-workspace: `kubectl apply` a Restore labelled `prd` whose `clusterRef` is `dev-target`: condition `WorkspaceMismatch`, no Job. The `prd` wizard lists only `prd` targets and points | The same Restore with `prd-target`: Pending, waiting for approval |
+| P6 | Cross-workspace: `kubectl apply` a Restore labelled `prd` whose `clusterRef` is the generated name of a `dev` target connection (`kubectl get kafkaclusters -l logweir.dev/workspace=dev`): condition `WorkspaceMismatch`, no Job. The `prd` wizard lists only `prd` targets and points | The same Restore naming a `prd` target connection: Pending, waiting for approval |
 | P7 | Approval reuse: the approved `dev` Approval's document, copied into an Approval labelled `prd` and named by a `prd` Restore, is refused `AuthorizationSubjectMismatch` | — |
 | P8 | Import: a `stg` destination over the previous install's archive (copied to the new MinIO under `legacy/` with `mc mirror` before the old release is removed), with the old signer imported as historical, lists the old points in a catalog; a restore of one ends verified | A catalog in `dev` over a `stg`-only destination name: 422 |
 | P9 | `logweir-viewer` bound to a test user through a RoleBinding lists Backups of all four workspaces with `-L logweir.dev/workspace` | `kubectl get secrets` as that user is forbidden |

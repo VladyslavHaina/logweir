@@ -3,4 +3,4 @@ approvalPolicy:
   allowOrdinaryConfirmation: true
   policies:
     - {name: default-confirm-v1, mode: confirm}
-  namespaces: {}
+  workspaces: {}

@@ -45,7 +45,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The actor, its roles and explicit namespace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method. */
+        /** The actor, its roles and explicit workspace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method. */
         get: operations["getSession"];
         put?: never;
         post?: never;
@@ -106,15 +106,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces": {
+    "/api/v1/workspaces": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** The configured namespace grants. Core Namespace objects are never listed. */
-        get: operations["listNamespaces"];
+        /** The actor's workspace grants. Core Namespace objects are never listed. */
+        get: operations["listWorkspaces"];
         put?: never;
         post?: never;
         delete?: never;
@@ -123,7 +123,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/connections": {
+    "/api/v1/workspaces/{ws}/connections": {
         parameters: {
             query?: never;
             header?: never;
@@ -141,7 +141,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/connections/{name}": {
+    "/api/v1/workspaces/{ws}/connections/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -165,7 +165,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no namespace, so it needs permission to read schedules in at least one granted namespace. */
+        /** What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no workspace, so it needs permission to read schedules in at least one workspace. */
         get: operations["previewCadence"];
         put?: never;
         post?: never;
@@ -175,7 +175,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/schedules": {
+    "/api/v1/workspaces/{ws}/schedules": {
         parameters: {
             query?: never;
             header?: never;
@@ -193,7 +193,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/schedules/{name}": {
+    "/api/v1/workspaces/{ws}/schedules/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -211,7 +211,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension": {
+    "/api/v1/workspaces/{ws}/schedules/{name}:set-suspension": {
         parameters: {
             query?: never;
             header?: never;
@@ -228,7 +228,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/backups": {
+    "/api/v1/workspaces/{ws}/backups": {
         parameters: {
             query?: never;
             header?: never;
@@ -246,7 +246,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/backups/{name}": {
+    "/api/v1/workspaces/{ws}/backups/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -263,7 +263,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/restores": {
+    "/api/v1/workspaces/{ws}/restores": {
         parameters: {
             query?: never;
             header?: never;
@@ -281,7 +281,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/restores/{name}": {
+    "/api/v1/workspaces/{ws}/restores/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -298,7 +298,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/restores/{name}/approval": {
+    "/api/v1/workspaces/{ws}/restores/{name}/cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -307,7 +307,41 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a namespace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef. */
+        /** PROD-07.2: stop a restore. Sets `logweir.dev/cancel-requested-by` (metadata; the sealed spec is untouched). Before the run's Job exists the restore fails `Cancelled` and nothing ran; while it runs the controller suspends the Job, the runner stops its engine (SIGTERM, SIGKILL after ten seconds) and signs nothing, and a run that created its target topics becomes `Interrupted`. A run that already signed keeps its outcome. A repeated request writes nothing. Requires the role that may create restores in the workspace. 409 once the restore has ended. Idempotency-Key is refused. */
+        post: operations["cancelRestore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/restores/{name}/cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** PROD-07.2: remove the topics an interrupted restore created and left. Sets `logweir.dev/cleanup-requested-by`; the controller runs `logweir restore cleanup` over the reconcile's signed scorecard, which deletes only the topics it lists, each only while its topic ID is the one recorded at creation, and lists what it left. The recovery point is released once it succeeded. A repeated request writes nothing. Requires the role that may create restores in the workspace; no second approval. 409 unless the restore is `Interrupted` with a signed reconcile. Idempotency-Key is refused. */
+        post: operations["cleanupRestore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/restores/{name}/approval": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a workspace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef. */
         post: operations["submitGovernedApproval"];
         delete?: never;
         options?: never;
@@ -315,14 +349,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/restores/{name}/approval-request": {
+    "/api/v1/workspaces/{ws}/restores/{name}/approval-request": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** PROD-16.2: a two-person request as the second person is shown it before approving. Only in a namespace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing. */
+        /** PROD-16.2: a two-person request as the second person is shown it before approving. Only in a workspace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing. */
         get: operations["getApprovalRequest"];
         put?: never;
         post?: never;
@@ -332,7 +366,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/restores/{name}/console-approval": {
+    "/api/v1/workspaces/{ws}/restores/{name}/console-approval": {
         parameters: {
             query?: never;
             header?: never;
@@ -341,7 +375,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a namespace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef. */
+        /** PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a workspace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef. */
         post: operations["approveInConsole"];
         delete?: never;
         options?: never;
@@ -349,7 +383,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/switchovers": {
+    "/api/v1/workspaces/{ws}/switchovers": {
         parameters: {
             query?: never;
             header?: never;
@@ -359,7 +393,7 @@ export interface paths {
         /** PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted. */
         get: operations["listSwitchovers"];
         put?: never;
-        /** PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound namespace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict. */
+        /** PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound workspace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict. */
         post: operations["createSwitchover"];
         delete?: never;
         options?: never;
@@ -367,7 +401,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/switchovers/{name}": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -384,7 +418,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/switchovers/{name}/approval": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}/approval": {
         parameters: {
             query?: never;
             header?: never;
@@ -393,7 +427,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job. */
+        /** PROD-04.2: the restore route's submission, by the same functions. In an unbound workspace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job. */
         post: operations["submitSwitchoverApproval"];
         delete?: never;
         options?: never;
@@ -401,7 +435,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}/approval-request": {
         parameters: {
             query?: never;
             header?: never;
@@ -418,7 +452,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}/console-approval": {
         parameters: {
             query?: never;
             header?: never;
@@ -427,7 +461,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200. */
+        /** PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person workspace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200. */
         post: operations["approveSwitchoverInConsole"];
         delete?: never;
         options?: never;
@@ -435,14 +469,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/approval-policy": {
+    "/api/v1/workspaces/{ws}/approval-policy": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** PLAT-19.2: the namespace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the namespace's TrustPolicy. */
+        /** PLAT-19.2: the workspace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the install's TrustPolicy. */
         get: operations["getApprovalPolicy"];
         put?: never;
         post?: never;
@@ -452,7 +486,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/approvals": {
+    "/api/v1/workspaces/{ws}/approvals": {
         parameters: {
             query?: never;
             header?: never;
@@ -469,7 +503,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/approvals/{name}": {
+    "/api/v1/workspaces/{ws}/approvals/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -486,7 +520,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/approvals/{name}/packet": {
+    "/api/v1/workspaces/{ws}/approvals/{name}/packet": {
         parameters: {
             query?: never;
             header?: never;
@@ -503,7 +537,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/destinations": {
+    "/api/v1/workspaces/{ws}/destinations": {
         parameters: {
             query?: never;
             header?: never;
@@ -521,7 +555,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/destinations/{name}": {
+    "/api/v1/workspaces/{ws}/destinations/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -538,7 +572,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/destinations/{name}:update-access": {
+    "/api/v1/workspaces/{ws}/destinations/{name}:update-access": {
         parameters: {
             query?: never;
             header?: never;
@@ -555,7 +589,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/destinations/{name}:test": {
+    "/api/v1/workspaces/{ws}/destinations/{name}:test": {
         parameters: {
             query?: never;
             header?: never;
@@ -572,7 +606,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/destinations/{name}/usage": {
+    "/api/v1/workspaces/{ws}/destinations/{name}/usage": {
         parameters: {
             query?: never;
             header?: never;
@@ -589,7 +623,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries": {
+    "/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries": {
         parameters: {
             query?: never;
             header?: never;
@@ -599,7 +633,7 @@ export interface paths {
         /** Discoveries for one connection. With latest=true it answers the two slots instead of a page: a failed attempt never hides the last successful inventory, and a successful inventory never hides that the newest attempt failed. */
         get: operations["listConnectionTopicDiscoveries"];
         put?: never;
-        /** Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and namespace. */
+        /** Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and workspace. */
         post: operations["createTopicDiscovery"];
         delete?: never;
         options?: never;
@@ -607,7 +641,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/topic-discoveries/{id}": {
+    "/api/v1/workspaces/{ws}/topic-discoveries/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -624,7 +658,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel": {
+    "/api/v1/workspaces/{ws}/topic-discoveries/{id}:cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -633,7 +667,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the namespace may cancel any. Nothing is deleted. Idempotency-Key is refused. */
+        /** Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the workspace may cancel any. Nothing is deleted. Idempotency-Key is refused. */
         post: operations["cancelTopicDiscovery"];
         delete?: never;
         options?: never;
@@ -641,7 +675,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics": {
+    "/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics": {
         parameters: {
             query?: never;
             header?: never;
@@ -658,7 +692,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/preflights": {
+    "/api/v1/workspaces/{ws}/preflights": {
         parameters: {
             query?: never;
             header?: never;
@@ -675,7 +709,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/preflights/{id}": {
+    "/api/v1/workspaces/{ws}/preflights/{id}": {
         parameters: {
             query?: never;
             header?: never;
@@ -692,7 +726,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/preflights/{id}:cancel": {
+    "/api/v1/workspaces/{ws}/preflights/{id}:cancel": {
         parameters: {
             query?: never;
             header?: never;
@@ -709,7 +743,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/preflights/{id}/details": {
+    "/api/v1/workspaces/{ws}/preflights/{id}/details": {
         parameters: {
             query?: never;
             header?: never;
@@ -726,7 +760,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/operations/{kind}/{name}": {
+    "/api/v1/workspaces/{ws}/operations/{kind}/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -743,14 +777,14 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events": {
+    "/api/v1/workspaces/{ws}/operations/{kind}/{name}/events": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        /** A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per namespace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream. */
+        /** A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per workspace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream. */
         get: operations["streamOperationEvents"];
         put?: never;
         post?: never;
@@ -760,7 +794,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/protection-policies": {
+    "/api/v1/workspaces/{ws}/protection-policies": {
         parameters: {
             query?: never;
             header?: never;
@@ -777,7 +811,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/protection-policies/{name}": {
+    "/api/v1/workspaces/{ws}/protection-policies/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -794,7 +828,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/catalogs": {
+    "/api/v1/workspaces/{ws}/catalogs": {
         parameters: {
             query?: never;
             header?: never;
@@ -812,7 +846,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/catalogs/{name}": {
+    "/api/v1/workspaces/{ws}/catalogs/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -829,7 +863,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/catalogs/{name}/points": {
+    "/api/v1/workspaces/{ws}/catalogs/{name}/points": {
         parameters: {
             query?: never;
             header?: never;
@@ -846,7 +880,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/catalogs/{name}/signers": {
+    "/api/v1/workspaces/{ws}/catalogs/{name}/signers": {
         parameters: {
             query?: never;
             header?: never;
@@ -863,7 +897,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/retention-policies": {
+    "/api/v1/workspaces/{ws}/retention-policies": {
         parameters: {
             query?: never;
             header?: never;
@@ -880,7 +914,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/namespaces/{ns}/retention-policies/{name}": {
+    "/api/v1/workspaces/{ws}/retention-policies/{name}": {
         parameters: {
             query?: never;
             header?: never;
@@ -904,7 +938,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no namespace and requires the administrator role in at least one bound namespace. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route. */
+        /** The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no workspace and requires the administrator role in at least one workspace; it serves the policies that govern the install's namespace and the installation default. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route. */
         get: operations["listTrustPolicies"];
         put?: never;
         post?: never;
@@ -1083,7 +1117,7 @@ export interface components {
             matchedKeyId?: string | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The plan hash the create form supplied. */
             planHash: string;
@@ -1123,7 +1157,7 @@ export interface components {
             approvalBytes: string;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The plan hash the create form supplied. */
             planHash: string;
@@ -1148,11 +1182,11 @@ export interface components {
             /** @description The request ID. */
             requestId: string;
         };
-        /** @description PLAT-19.2: a namespace's effective approval policy. */
+        /** @description PLAT-19.2: a workspace's effective approval policy. */
         ApprovalPolicyView: {
-            /** @description PROD-16.1: why the namespace resolves to this policy. */
+            /** @description PROD-16.1: why the workspace resolves to this policy. */
             basis: components["schemas"]["PolicyBasisView"];
-            /** @description The console's `ConsoleConfirmation` key id, when configured — the id an administrator must put on this namespace's `TrustPolicy`. */
+            /** @description The console's `ConsoleConfirmation` key id, when configured — the id an administrator must put on the install's `TrustPolicy`. */
             confirmationKeyId?: string | null;
             /** @description PROD-16.2: whether THIS console will take a second person's approval here: `true` for a `two-person` policy when the console runs in shared mode and holds its confirmation key. `false` under `two-person` means this is the in-cluster administrator console, whose one identity cannot be two people (nothing can be requested or approved through it), or the key is not there yet. Always `false` for `confirm` and `strict`. */
             consoleApprovalAvailable: boolean;
@@ -1160,7 +1194,7 @@ export interface components {
             digest?: string | null;
             /** @description The digest of the whole installation document, which the controller logs at startup too: equal values mean both run the same policies. */
             installationDigest: string;
-            /** @description `true` when the namespace resolves to `legacy-governed-v1`. */
+            /** @description `true` when the workspace resolves to `legacy-governed-v1`. */
             legacy: boolean;
             /**
              * Format: int64
@@ -1169,10 +1203,8 @@ export interface components {
             maxAgeSeconds?: number | null;
             /** @description Its mode. */
             mode: components["schemas"]["ApprovalModeView"];
-            /** @description The policy name — `legacy-governed-v1` for an unbound namespace on an unmarked install, `default-confirm-v1` for one under a `confirm` unbound default (PROD-16.1). */
+            /** @description The policy name — `legacy-governed-v1` for an unbound workspace on an unmarked install, `default-confirm-v1` for one under a `confirm` unbound default (PROD-16.1). */
             name: string;
-            /** @description The namespace asked about. */
-            namespace: string;
             /** @description PROD-16.1: the same mode in the operator's words: `confirm`, `two-person` or `strict`. */
             operatorMode: components["schemas"]["OperatorModeView"];
             /** @description Whether THIS console will sign an ordinary confirmation here: `true` for an Ordinary policy (`confirm`) when the console holds its confirmation key. PROD-16.1: in either console mode — `localAdmin` confirms as `urn:logweir:local-admin#admin`. `false` under `confirm` means the key is not there yet (the identity hook writes it once, at install), and a submission is refused `policy_mismatch` with nothing created. */
@@ -1181,6 +1213,8 @@ export interface components {
             requireDistinctPrincipal: boolean;
             /** @description Whether a submission here must carry a change ticket (an explicit Governed binding; D0). */
             ticketRequired: boolean;
+            /** @description The workspace asked about. */
+            workspace: string;
         };
         /** @description PLAT-19.2: `Approval.status.authorization`, as the console renders it. */
         ApprovalProvenanceView: {
@@ -1233,11 +1267,9 @@ export interface components {
              * @description When the console signed the request.
              */
             issuedAt?: string | null;
-            /** @description The namespace. */
-            namespace: string;
             /** @description The plan hash the request names — the Restore's own, recomputed. */
             planHash?: string | null;
-            /** @description The namespace's current policy. */
+            /** @description The workspace's current policy. */
             policy: string;
             /** @description Its snapshot digest. */
             policyDigest: string;
@@ -1267,6 +1299,8 @@ export interface components {
             stateSentence: string;
             /** @description The change ticket the requester gave. */
             ticket?: string | null;
+            /** @description The workspace. */
+            workspace: string;
         };
         ApprovalResponse: {
             /** @description The item. */
@@ -1316,7 +1350,7 @@ export interface components {
         /** @description An archive location in a request. */
         ArchiveRequest: {
             /**
-             * @description An existing Secret in this namespace carrying the object-store credential.
+             * @description An existing Secret in this workspace carrying the object-store credential.
              * @default null
              */
             credentialRef?: components["schemas"]["NameRef"];
@@ -1381,7 +1415,7 @@ export interface components {
              */
             deadlineSeconds: number;
             /**
-             * @description The saved `BackupDestination` this run was written to, in this namespace.
+             * @description The saved `BackupDestination` this run was written to, in this workspace.
              *
              *     ABSENT means the run carries its archive location INLINE in `archive`, exactly as every run did before saved destinations existed. It is a legacy inline-archive run, not a degraded one.
              */
@@ -1396,13 +1430,13 @@ export interface components {
             manifestKey?: string | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The identity the run presented: mode and username, never a password. */
             observedAuth?: components["schemas"]["ObservedAuthView"];
             /** @description The normalized status summary. */
             operation: components["schemas"]["OperationSummary"];
-            /** @description P10: present while this MANUAL run waits for a slot in its namespace's manual-run pool (`operation.state: queued`, reason `ConcurrencyLimited`) — the ceiling it is queued behind. Absent on every other run, and on anything an older controller wrote. */
+            /** @description P10: present while this MANUAL run waits for a slot in its workspace's manual-run pool (`operation.state: queued`, reason `ConcurrencyLimited`) — the ceiling it is queued behind. Absent on every other run, and on anything an older controller wrote. */
             queue?: components["schemas"]["RunQueueView"];
             /**
              * Format: int64
@@ -1436,7 +1470,7 @@ export interface components {
          *     TWO HALVES FROM TWO PLACES, AND THE DIFFERENCE IS THE POINT. `name` is what the run ASKED for — `Backup.spec.destinationRef`, immutable with the rest of the spec. `uid` is what the controller RESOLVED at the freeze — `Backup.status.destination.uid` — and it is ABSENT until the freeze wrote one, and on every run frozen by a controller that predates the block. A destination deleted and recreated under the same name is a different object, and the uid is what says so; nothing here reads a live `BackupDestination` to fill it in.
          */
         BackupDestinationRefView: {
-            /** @description The destination's name, in this namespace. */
+            /** @description The destination's name, in this workspace. */
             name: string;
             /** @description Its `metadata.uid` as the freeze recorded it. */
             uid?: string | null;
@@ -1452,7 +1486,7 @@ export interface components {
         /** @description The backup half of a preflight request. */
         BackupPreflightRequest: {
             /**
-             * @description The destination, in this namespace.
+             * @description The destination, in this workspace.
              * @default null
              */
             destination?: string | null;
@@ -1466,7 +1500,7 @@ export interface components {
              * @default null
              */
             schedule?: string | null;
-            /** @description The source connection, in this namespace. */
+            /** @description The source connection, in this workspace. */
             sourceConnection: string;
             /** @description Named topics, 1 to 1000. */
             topics: string[];
@@ -1487,14 +1521,14 @@ export interface components {
              * @default null
              */
             expectedGeneration?: number | null;
-            /** @description The `BackupSchedule` name, in this namespace. */
+            /** @description The `BackupSchedule` name, in this workspace. */
             name: string;
         };
         /** @description Why the `Backup` verdict join of one point page is incomplete. */
         BackupVerdictsIncomplete: "Truncated" | "Unavailable";
-        /** @description A CA bundle in a `ConfigMap` in this namespace. A `ConfigMap` and never a Secret: a CA certificate is public material. */
+        /** @description A CA bundle in a `ConfigMap` in the installation's namespace (ConfigMaps are not held to a workspace). A `ConfigMap` and never a Secret: a CA certificate is public material. */
         CaBundleRequest: {
-            /** @description The `ConfigMap` name, in this namespace. */
+            /** @description The `ConfigMap` name. */
             configMapName: string;
             /**
              * @description The data key holding the PEM bundle. Absent means `ca.crt`.
@@ -1655,7 +1689,7 @@ export interface components {
             recoveryPointAt?: string | null;
         };
         /**
-         * @description The capability flags of one namespace grant.
+         * @description The capability flags of one workspace grant.
          *
          *     Every flag is `implemented && allowed`. The eight domains that have no route in this build are always `false`.
          */
@@ -1703,7 +1737,7 @@ export interface components {
             /**
              * @description `POST .../schedules` — AND `PUT .../schedules/{name}`.
              *
-             *     ONE FLAG FOR TWO ROUTES, BECAUSE IT IS ONE AUTHORITY. D1 §5.1 makes a schedule's future policy editable, and this crate's decision (recorded in `docs/api.md`) is that an operator who may WRITE a policy into a bound namespace may write a new one over it: the edit reaches exactly the fields `POST` already sets, never `spec.sourceRef`, and never a created run. `Action::EditSchedulePolicy` is a separate action so the AUDIT record says `schedule.editPolicy` rather than `schedule.create`, but it has the same role allowance — pinned by `tests/role_matrix.rs::editing_a_policy_is_exactly_the_authority_to_create_one` — so a console reads this one flag for both buttons. D2 §8's rule stands: `ui/contract.js`'s `CAPABILITY_FLAGS` is a frozen 19-entry list, and splitting a flag is a contract change that lands on both sides at once.
+             *     ONE FLAG FOR TWO ROUTES, BECAUSE IT IS ONE AUTHORITY. D1 §5.1 makes a schedule's future policy editable, and this crate's decision (recorded in `docs/api.md`) is that an operator who may WRITE a policy into a bound workspace may write a new one over it: the edit reaches exactly the fields `POST` already sets, never `spec.sourceRef`, and never a created run. `Action::EditSchedulePolicy` is a separate action so the AUDIT record says `schedule.editPolicy` rather than `schedule.create`, but it has the same role allowance — pinned by `tests/role_matrix.rs::editing_a_policy_is_exactly_the_authority_to_create_one` — so a console reads this one flag for both buttons. D2 §8's rule stands: `ui/contract.js`'s `CAPABILITY_FLAGS` is a frozen 19-entry list, and splitting a flag is a contract change that lands on both sides at once.
              */
             scheduleCreate: boolean;
             /** @description `POST .../schedules/{name}:set-suspension`. */
@@ -1805,7 +1839,7 @@ export interface components {
         };
         /** @description A recovery point in a `RecoveryCatalog`'s view (PLAT-15.2). The controller re-reads that row when the check runs: availability, verification, any reached `Backup` verdict on the same receipt, and whether the plan's `source.point` is the row's binding. */
         CatalogPointRequest: {
-            /** @description The catalog, in this namespace. */
+            /** @description The catalog, in this workspace. */
             catalog: string;
             /** @description The content-derived point id: `lwp1-` plus 32 lowercase hex. */
             pointId: string;
@@ -1856,7 +1890,7 @@ export interface components {
             mode: string;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /**
              * Format: int64
@@ -1957,7 +1991,7 @@ export interface components {
             message?: string | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /**
              * Format: date-time
@@ -2182,7 +2216,7 @@ export interface components {
             markerTopic?: string | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The controller's reachability observation. */
             reachability: components["schemas"]["ReachabilityView"];
@@ -2190,6 +2224,8 @@ export interface components {
             resourceVersion: string;
             /** @description The role label. */
             role: string;
+            /** @description The connection's Schema Registry (PROD-03.1), when it names one. */
+            schemaRegistry?: components["schemas"]["SchemaRegistryView"];
             /** @description The Kubernetes UID. */
             uid: string;
         };
@@ -2261,7 +2297,7 @@ export interface components {
             confirmationSha256: string;
         };
         /**
-         * @description `POST /api/v1/namespaces/{ns}/backups` — "Back up now" and "Run first backup now" (D1 §8.2).
+         * @description `POST /api/v1/workspaces/{ws}/backups` — "Back up now" and "Run first backup now" (D1 §8.2).
          *
          *     TWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's current revision — selection, archive, deadline — and records `{uid, generation, runPolicySha256}`; a policy field in the body beside it is `422`, because a "manual run of this schedule" that quietly ran a different policy would be the wrong thing recorded in the receipt. Without it the body IS the policy, for a cluster with no schedule yet.
          */
@@ -2293,7 +2329,7 @@ export interface components {
              */
             scheduleRef?: components["schemas"]["BackupScheduleRefRequest"];
             /**
-             * @description Body B: the source connection, in this namespace.
+             * @description Body B: the source connection, in this workspace.
              * @default null
              */
             sourceRef?: components["schemas"]["NameRef"];
@@ -2303,7 +2339,7 @@ export interface components {
              */
             topicSelection?: components["schemas"]["TopicSelectionRequest"];
         };
-        /** @description `POST /api/v1/namespaces/{ns}/connections`. */
+        /** @description `POST /api/v1/workspaces/{ws}/connections`. */
         CreateConnectionRequest: {
             /** @description How Logweir authenticates. */
             auth: components["schemas"]["ConnectionAuthRequest"];
@@ -2316,13 +2352,15 @@ export interface components {
             markerTopic?: string | null;
             /** @description `source` or `target`. */
             role: components["schemas"]["ConnectionRole"];
+            /** @description **PROD-03.1.** The cluster's Schema Registry: captured by a backup of this connection, written by a restore into it. The password, when given, goes into the connection's own Secret under `registry-password`. */
+            schemaRegistry?: components["schemas"]["SchemaRegistryRequest"];
         };
-        /** @description `POST /api/v1/namespaces/{ns}/destinations`. */
+        /** @description `POST /api/v1/workspaces/{ws}/destinations`. */
         CreateDestinationRequest: {
             /** @description The four credential grants. */
             access: components["schemas"]["AccessRequest"];
             /**
-             * @description Whether this becomes the namespace's default destination. At most one destination per namespace may hold it, and a second request naming another default is a conflict rather than a silent takeover.
+             * @description Whether this becomes the workspace's default destination. At most one destination per workspace may hold it, and a second request naming another default is a conflict rather than a silent takeover.
              * @default null
              */
             default?: boolean | null;
@@ -2382,12 +2420,12 @@ export interface components {
             timeoutSeconds?: number | null;
         };
         /**
-         * @description `POST /api/v1/namespaces/{ns}/restores`.
+         * @description `POST /api/v1/workspaces/{ws}/restores`.
          *
          *     `planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of exactly these bytes and stores them unchanged. It never parses or re-emits the plan document.
          */
         CreateRestoreRequest: {
-            /** @description The Approval that will authorise this restore, in this namespace. It need not exist yet: the controller holds the restore until it verifies. */
+            /** @description The Approval that will authorise this restore, in this workspace. It need not exist yet: the controller holds the restore until it verifies. */
             approvalRef: components["schemas"]["NameRef"];
             /** @description The backup set ID inside the archive. */
             backupSetRef: string;
@@ -2405,7 +2443,7 @@ export interface components {
             deadlineSeconds: number;
             /** @description The saved destination evidence is written to. Set together with `sourceDestinationRef`. */
             evidenceDestinationRef?: components["schemas"]["NameRef"];
-            /** @description **OD-10 (PROD-15.1 review M1).** The original topic names the requester RE-TYPED to confirm a restore under the ORIGINAL topic names alone. REQUIRED for a request declaring `target.topicNaming.originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`), where it must be exactly the plan's `source.topics` (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere else (`not_accepted`). The console signs it into the authorization document, and the controller and the runner hold it to the plan again. Absent keeps the idempotency hash unchanged. */
+            /** @description **OD-10 (PROD-15.1 review M1).** The original topic names the requester RE-TYPED to confirm a restore under the ORIGINAL topic names alone. REQUIRED for a request declaring `target.topicNaming.originalName` in a workspace confirmed by one person (`confirm`, internal `Ordinary`), where it must be exactly the plan's `source.topics` (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere else (`not_accepted`). The console signs it into the authorization document, and the controller and the runner hold it to the plan again. Absent keeps the idempotency hash unchanged. */
             originalNameConfirmation?: components["schemas"]["OriginalNameConfirmationRequest"];
             /** @description The exact plan document bytes the approval will bind, at most 256 KiB. */
             planBytes: string;
@@ -2419,7 +2457,7 @@ export interface components {
             sourceDestinationRef?: components["schemas"]["NameRef"];
             /** @description Where the restore writes. */
             target: components["schemas"]["RestoreTargetRequest"];
-            /** @description PLAT-19.2: the change ticket the console signs into the authorization document. REQUIRED in a namespace bound to a Governed policy (D0), optional under Ordinary, refused in an unbound namespace (which signs nothing; `logweir drill approve --ticket` carries it there). At most 128 printable characters. Absent keeps the idempotency hash unchanged. */
+            /** @description PLAT-19.2: the change ticket the console signs into the authorization document. REQUIRED in a workspace bound to a Governed policy (D0), optional under Ordinary, refused in an unbound workspace (which signs nothing; `logweir drill approve --ticket` carries it there). At most 128 printable characters. Absent keeps the idempotency hash unchanged. */
             ticket?: string | null;
             /**
              * @description The exact source→target mapping the caller previewed, checked against `target.topicNaming.prefix` and refused row by row.
@@ -2429,7 +2467,7 @@ export interface components {
             topicMapping?: components["schemas"]["TopicMappingRow"][] | null;
         };
         /**
-         * @description `POST /api/v1/namespaces/{ns}/schedules`.
+         * @description `POST /api/v1/workspaces/{ws}/schedules`.
          *
          *     # It creates what the edit route can edit (PLAT-10.1)
          *
@@ -2470,7 +2508,7 @@ export interface components {
              *     Optional and additive: ABSENT (or empty) selects no group and the schedule is the one this route always created, its request hash included. A blank, repeated or control-character id, one over 255 bytes, more than 100 ids, or a selection whose receipt summary could be over its cap is refused here by the rule the runner applies (`consumer_positions::refuse_selection`), before any write. The edit route leaves the stored selection as it is.
              */
             consumerGroups?: string[] | null;
-            /** @description A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built by the route and is never accepted from a body. */
+            /** @description A saved `BackupDestination` in this workspace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built by the route and is never accepted from a body. */
             destinationRef?: components["schemas"]["NameRef"];
             /**
              * @description Withdrawn; see [`RetentionRequest`].
@@ -2481,7 +2519,7 @@ export interface components {
             retry?: components["schemas"]["RetryPolicy"];
             /** @description A five-field cron expression or `@hourly`/`@daily`/`@weekly`, parsed by the controller's own parser in `timeZone`. */
             schedule: string;
-            /** @description The source connection, in this namespace. */
+            /** @description The source connection, in this workspace. */
             sourceRef: components["schemas"]["NameRef"];
             /**
              * Format: int64
@@ -2513,7 +2551,7 @@ export interface components {
             planHash: string;
             /** @description The restore the plan names; it must be the plan's own `restore` block. */
             restoreRef: components["schemas"]["SwitchoverRestoreRef"];
-            /** @description The change ticket, signed beside the plan in a bound namespace. */
+            /** @description The change ticket, signed beside the plan in a bound workspace. */
             ticket?: string | null;
         };
         /** @description `POST .../connections/{name}/topic-discoveries`. */
@@ -2597,7 +2635,7 @@ export interface components {
              * @description When the object was created.
              */
             createdAt?: string | null;
-            /** @description Whether this is the namespace's default destination. */
+            /** @description Whether this is the workspace's default destination. */
             default: boolean;
             /** @description What this destination is. */
             description?: string | null;
@@ -2612,7 +2650,7 @@ export interface components {
             locationDigest?: string | null;
             /** @description The object name, which is how everything else references it. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The resourceVersion this projection was read at. */
             resourceVersion: string;
@@ -2679,7 +2717,7 @@ export interface components {
             addressing: components["schemas"]["AddressingDto"];
             /** @description The archive root as one URL. */
             canonicalUrl: string;
-            /** @description Whether this is the namespace's default destination. */
+            /** @description Whether this is the workspace's default destination. */
             default: boolean;
             /** @description What this destination is. */
             description?: string | null;
@@ -2912,7 +2950,7 @@ export interface components {
             /** @description Why it is only knowable at execution time. */
             note: string;
         };
-        /** @description An existing Secret in this namespace, and the keys inside it. */
+        /** @description An existing Secret in this workspace, and the keys inside it. */
         ExistingSecretRequest: {
             /**
              * @description The data key holding the access key id. Absent means `access-key-id`.
@@ -3048,7 +3086,7 @@ export interface components {
              * @description Which attempt of the slot this disposition is about.
              */
             attempt: number;
-            /** @description The `Backup` the disposition is about, when there is one — a name in this namespace, which every reader of the schedule may already list. */
+            /** @description The `Backup` the disposition is about, when there is one — a name in this workspace, which every reader of the schedule may already list. */
             backupRef?: components["schemas"]["NameRef"];
             /**
              * Format: date-time
@@ -3103,7 +3141,7 @@ export interface components {
             /** @description Whether the search for the newest test hit its page bound, so this may not be the newest one. A "last test" that might not be last is worse than none, so the caller is told rather than reassured. */
             truncated: boolean;
         };
-        /** @description `POST /api/v1/namespaces/{ns}/backups`: the created run, and the schedule it came from. */
+        /** @description `POST /api/v1/workspaces/{ws}/backups`: the created run, and the schedule it came from. */
         ManualBackupResponse: {
             /** @description The created run. */
             item: components["schemas"]["Backup"];
@@ -3140,9 +3178,9 @@ export interface components {
             /** @description The most recent skips, newest first, at most ten as the controller keeps them. */
             recent?: components["schemas"]["MissedSlotView"][] | null;
         };
-        /** @description A same-namespace reference by name. */
+        /** @description A same-workspace reference by name. */
         NameRef: {
-            /** @description The referenced object's name, in the same namespace. */
+            /** @description The referenced object's name, in the same workspace. */
             name: string;
         };
         /** @description A namespace two policies both claim. It resolves to NOTHING, and every approval and verification in it is refused. */
@@ -3152,26 +3190,10 @@ export interface components {
             /** @description The policies claiming it. */
             policies: string[];
         };
-        /** @description One explicitly granted namespace. */
-        NamespaceGrant: {
-            /** @description What the actor may do there. Domains without a route are `false`. */
-            capabilities: components["schemas"]["Capabilities"];
-            /** @description The namespace name. */
-            name: string;
-            /** @description The product roles the actor holds here, sorted and unioned across every binding that matched. Empty in localAdmin mode, which has no roles. */
-            roles: components["schemas"]["Role"][];
-        };
-        /** @description `GET /api/v1/namespaces`. */
-        NamespaceListResponse: {
-            /** @description The configured grants. Core `Namespace` objects are never listed. */
-            items: components["schemas"]["NamespaceGrant"][];
-            /** @description The request ID. */
-            requestId: string;
-        };
         /**
          * @description **PROD-01.3 security follow-up: the credential, typed ONCE.**
          *
-         *     WRITE-ONLY. The value becomes a Secret this service creates — owned by the connection, bound to it (`logweir-binding`) — and is never echoed in any response, log line, status, annotation or audit record; the only thing that comes out of it is the Secret's NAME. This replaces naming an existing Secret: a connection that could name any Secret in the namespace could make Logweir present another team's credential to a broker of its author's choosing.
+         *     WRITE-ONLY. The value becomes a Secret this service creates — owned by the connection, bound to it (`logweir-binding`) — and is never echoed in any response, log line, status, annotation or audit record; the only thing that comes out of it is the Secret's NAME. This replaces naming an existing Secret: a connection that could name any Secret in the workspace could make Logweir present another team's credential to a broker of its author's choosing.
          *
          *     **IT SERIALIZES WITHOUT ITS VALUES.** `Serialize` is hand-written: every present field becomes [`WRITE_ONLY_PLACEHOLDER`]. The request DTO is serialized to compute the idempotency digests this service publishes on the object (`api.logweir.dev/request-sha256`) and writes into the audit record, and a digest over a password is an offline confirmation oracle for anyone who can read the object. With the placeholder, no serialization of this type — a digest, an audit field, a future debug dump — can carry a value.
          */
@@ -3222,11 +3244,11 @@ export interface components {
             /** @description The same instant in the schedule's zone, offset included — `2026-10-25T02:30:00+02:00`. The offset is what distinguishes the two occurrences of a repeated hour. */
             localTime: string;
         };
-        /** @description One key of a ConfigMap in this namespace. */
+        /** @description One key of a ConfigMap in the installation's namespace. ConfigMaps are not held to a workspace: name only a public CA bundle. */
         ObjectKeyRefRequest: {
             /** @description The data key. */
             key: string;
-            /** @description The object's name, in the same namespace. */
+            /** @description The ConfigMap's name. */
             name: string;
         };
         /** @description What "protected" means here. */
@@ -3280,7 +3302,7 @@ export interface components {
             message?: string | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The resourceVersion this status was read at. */
             resourceVersion: string;
@@ -3343,7 +3365,7 @@ export interface components {
         /** @description D3 §2.5's stage vocabulary, exactly six values. */
         OperationStage: "admission" | "queued" | "preparing" | "running" | "verifying" | "finished";
         /** @description The product lifecycle state. */
-        OperationState: "pending" | "queued" | "preparing" | "running" | "verifying" | "succeeded" | "failed" | "refused" | "cancelled" | "unknown";
+        OperationState: "pending" | "queued" | "preparing" | "running" | "verifying" | "succeeded" | "failed" | "refused" | "cancelled" | "interrupted" | "unknown";
         /** @description The status summary carried by list items. */
         OperationSummary: {
             /**
@@ -3434,7 +3456,7 @@ export interface components {
             message?: string | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The progress channel. Absent on anything an older controller wrote, and its absence is why `queued` and `preparing` are never inferred. */
             progress?: components["schemas"]["ProgressView"];
@@ -3482,7 +3504,7 @@ export interface components {
         };
         /** @description The approval mode in the operator's words — the one mapping is `logweir_core::approval_policy::ApprovalRoute`. */
         OperatorModeView: "confirm" | "two-person" | "strict";
-        /** @description **OD-10.** The typed confirmation of a restore under the original topic names on a one-person-confirmation namespace. */
+        /** @description **OD-10.** The typed confirmation of a restore under the original topic names on a one-person-confirmation workspace. */
         OriginalNameConfirmationRequest: {
             /** @description Every original topic name, as the requester re-typed it: exactly the plan's `source.topics`, each once, nothing else, byte for byte. */
             typedTopics: string[];
@@ -3494,7 +3516,7 @@ export interface components {
              * @description The page size that was applied.
              */
             limit: number;
-            /** @description An opaque cursor for the next page, valid for fifteen minutes for the same actor, route, namespace and filters; absent on the last page. */
+            /** @description An opaque cursor for the next page, valid for fifteen minutes for the same actor, route, workspace and filters; absent on the last page. */
             nextCursor?: string | null;
             /** @description The Kubernetes list resourceVersion this page was read at. */
             snapshot?: string | null;
@@ -3566,7 +3588,7 @@ export interface components {
         };
         /** @description One page of the materialised point view. */
         PointPageResponse: {
-            /** @description Present when the controller's `Backup` verdicts could not ALL be read, so `selectable` and `backupVerdict` reflect only the ones that were — for the rest, the catalog row alone. `Truncated`: the namespace holds more `Backup`s than one request reads (2 000). `Unavailable`: the `Backup` list failed (transport, RBAC, a missing CRD), or a refusal named no receipt digest and no set id and so could be tied to no row. Absent means every `Backup` was read. The page is served either way: the point list is what an operator reads to choose a point, and the Restore reconciler and the runner re-verify before any data-plane work. */
+            /** @description Present when the controller's `Backup` verdicts could not ALL be read, so `selectable` and `backupVerdict` reflect only the ones that were — for the rest, the catalog row alone. `Truncated`: the workspace holds more `Backup`s than one request reads (2 000). `Unavailable`: the `Backup` list failed (transport, RBAC, a missing CRD), or a refusal named no receipt digest and no set id and so could be tied to no row. Absent means every `Backup` was read. The page is served either way: the point list is what an operator reads to choose a point, and the Restore reconciler and the runner re-verify before any data-plane work. */
             backupVerdictsIncomplete?: components["schemas"]["BackupVerdictsIncomplete"];
             /** @description Whether a ConfigMap page named by this view disappeared while it was being read, or a line on a page could not be read as a view entry (FX-38): the list is then partial. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent. */
             incomplete?: boolean | null;
@@ -3633,6 +3655,23 @@ export interface components {
             sides?: string[];
             /** @description `schemaDependent` (a key or value side is framed: registry not captured), `notDetected` (neither side over the records judged), or `notAssessed` (nothing could be judged; `reason` says why). */
             verdict: string;
+        };
+        /** @description A point's Schema Registry capture (PROD-03.1). */
+        PointSchemaRegistryView: {
+            /** @description Whether the snapshot was taken. */
+            captured: boolean;
+            /** @description Why the capture is incomplete (`registryUnreachable`, `registryUnauthorized`, `snapshotTooLarge`, `snapshotIncomplete`, `unresolvedReferences`, `idsNotInSnapshot`); absent when complete. */
+            incompleteReason?: string | null;
+            /**
+             * Format: uint64
+             * @description Distinct subjects captured.
+             */
+            subjects: number;
+            /**
+             * Format: uint64
+             * @description Subject-versions captured.
+             */
+            versions: number;
         };
         /** @description **PROD-05.1.** One topic of a recovery point, as the catalog's view lists it: what the archive records of its layout and how its configuration is held. Never a configuration value — the settings themselves are in the signed receipt and the point record, not in a listing. */
         PointTopicView: {
@@ -3710,6 +3749,8 @@ export interface components {
             remedy?: string | null;
             /** @description The run that produced it. */
             runId: string;
+            /** @description **PROD-03.1.** Whether the backup captured its source Schema Registry, its counts, and why the capture is incomplete. ABSENT: the source connection names no registry, the point predates it, or not published. */
+            schemaRegistry?: components["schemas"]["PointSchemaRegistryView"];
             /** @description The conjunction of the two, materialised by the controller so no surface writes D3 §5.4's selection rule a second time — and `false` whenever `backupVerdict` is present, because a verdict the controller reached outranks a view row that may predate it. */
             selectable: boolean;
             /** @description The key that signed it, when one was identified. */
@@ -3724,7 +3765,7 @@ export interface components {
             /** @description `Verified`, `VerifiedHistorical`, `UntrustedSigner`, `Revoked`, `Invalid`, `NoEvidence` or `NotAttempted` — the WORST of its locations. */
             verification: string;
         };
-        /** @description PROD-16.1: why a namespace resolves to its policy. */
+        /** @description PROD-16.1: why a workspace resolves to its policy. */
         PolicyBasisView: "binding" | "configured" | "freshInstall" | "legacy";
         /**
          * @description What a schedule's policy is NOW, on `policy_changed` (D1 §8.2).
@@ -3794,7 +3835,7 @@ export interface components {
             expiresAt?: string | null;
             /** @description The object name, which is the id every other route uses. */
             id: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /**
              * Format: date-time
@@ -3875,9 +3916,9 @@ export interface components {
         /**
          * @description The stable problem codes. Clients branch on `code`, never on `detail`.
          *
-         *     The decision's baseline set is here verbatim (`unauthenticated`, `session_expired`, `forbidden`, `namespace_forbidden`, `not_found`, `idempotency_conflict`, `state_conflict`, `approval_required`, `policy_mismatch`, `precondition_failed`, `validation_failed`, `rate_limited`, `kubernetes_unavailable`, `upstream_timeout`, plus the cursor pair). The remainder name transport-level refusals the baseline did not enumerate; each is documented in the OpenAPI document.
+         *     The decision's baseline set is here verbatim (`unauthenticated`, `session_expired`, `forbidden`, `workspace_forbidden`, `not_found`, `idempotency_conflict`, `state_conflict`, `approval_required`, `policy_mismatch`, `precondition_failed`, `validation_failed`, `rate_limited`, `kubernetes_unavailable`, `upstream_timeout`, plus the cursor pair). The remainder name transport-level refusals the baseline did not enumerate; each is documented in the OpenAPI document.
          */
-        ProblemCode: "malformed_request" | "header_not_allowed" | "idempotency_key_required" | "idempotency_key_invalid" | "cursor_invalid" | "unauthenticated" | "session_expired" | "forbidden" | "namespace_forbidden" | "origin_mismatch" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "state_conflict" | "approval_required" | "destination_location_immutable" | "transport_downgrade_forbidden" | "result_integrity_failed" | "policy_mismatch" | "policy_changed" | "cursor_expired" | "precondition_failed" | "payload_too_large" | "unsupported_media_type" | "misdirected_request" | "validation_failed" | "destination_invalid" | "rate_limited" | "internal_error" | "kubernetes_unavailable" | "upstream_timeout";
+        ProblemCode: "malformed_request" | "header_not_allowed" | "idempotency_key_required" | "idempotency_key_invalid" | "cursor_invalid" | "unauthenticated" | "session_expired" | "forbidden" | "workspace_forbidden" | "origin_mismatch" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "state_conflict" | "approval_required" | "destination_location_immutable" | "transport_downgrade_forbidden" | "result_integrity_failed" | "policy_mismatch" | "policy_changed" | "cursor_expired" | "precondition_failed" | "payload_too_large" | "unsupported_media_type" | "misdirected_request" | "validation_failed" | "destination_invalid" | "rate_limited" | "internal_error" | "kubernetes_unavailable" | "upstream_timeout";
         /** @description The progress channel, absent on anything an older controller reconciled. */
         ProgressView: {
             /**
@@ -3984,7 +4025,7 @@ export interface components {
             lastMissedSlot?: string | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description What "protected" means. */
             objectives: components["schemas"]["ObjectivesView"];
@@ -4048,7 +4089,7 @@ export interface components {
          *     THE API AND THE CONTROLLER NEVER GATE ON READINESS. Execution-time guards stay authoritative and the direct `kubectl create -f` path exists regardless; this records that a person was shown a `notReady` or `unknown` verdict and went ahead. It is an annotation on the run, not a permission.
          */
         ReadinessAcknowledgementRequest: {
-            /** @description The `Preflight` whose verdict was shown, in this namespace. */
+            /** @description The `Preflight` whose verdict was shown, in this workspace. */
             preflight: string;
             /** @description What it said. */
             state: components["schemas"]["AcknowledgedReadiness"];
@@ -4161,9 +4202,11 @@ export interface components {
             integrityPartialReason?: string | null;
             /** @description The signed scorecard's `integrity.result` (`pass`, `partial` or `fail`) as the controller copied it onto `status.integrity`. A CLAIM until the evidence verifies. ABSENT means not recorded. */
             integrityResult?: string | null;
+            /** @description PROD-07.2: a run that ended without a signed scorecard after it created its target topics. ABSENT on every other run. */
+            interruption?: components["schemas"]["RestoreInterruptionView"];
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The target topic names of this run (`status.newTopics`). For a run that reached its restore, the topics it created. After a stopped creation step (`targetTopicsAppeared`), exactly `targetTopicsAppeared.left`: what the run's own `CreateTopics` answers say it created, never a name someone else created or one it cannot account for (empty when its lists could not be read). For a run that was refused or failed before the creation step, the names its plan maps, none of which it created. */
             newTopics: string[];
@@ -4185,7 +4228,7 @@ export interface components {
              * @description The point in time.
              */
             pointInTime: string;
-            /** @description P10: present while this admitted MANUAL restore waits for a slot in its namespace's manual-restore pool (`operation.state: queued`). */
+            /** @description P10: present while this admitted MANUAL restore waits for a slot in its workspace's manual-restore pool (`operation.state: queued`). */
             queue?: components["schemas"]["RunQueueView"];
             /** @description The resourceVersion. */
             resourceVersion: string;
@@ -4227,6 +4270,25 @@ export interface components {
             recorded?: components["schemas"]["RestoreCoverage"];
             /** @description What the Restore asks for: `spec.coverage`, absent read as `sampled`. The controller has held it to the plan's own `sample.coverage`. */
             requested: components["schemas"]["RestoreCoverage"];
+            /** @description **PROD-03.2.** The schemas the run imported into the target registry keeping their IDs, how many were there already, or why none were: copied from `status.integrity.schemas`. ABSENT: no registry on either side, or not recorded. */
+            schemas?: components["schemas"]["RestoreSchemasView"];
+        };
+        /** @description `Restore.interruption` (PROD-07.2), from `status.interruption`. */
+        RestoreInterruptionView: {
+            /** @description `Cancelled`, `RunnerStopped` or `RunFailed`. */
+            cause?: string | null;
+            /** @description The cleanup: `Removing`, `Removed` or `RemovalFailed`. */
+            cleanup?: string | null;
+            /** @description Whether `cleanup` may be requested now. */
+            cleanupOffered: boolean;
+            /** @description Why the cleanup failed, when it did. */
+            cleanupReason?: string | null;
+            /** @description Who asked for the cancel. */
+            requestedBy?: string | null;
+            /** @description `Running`, `Done` or `Failed`: the reconcile of the partial targets. Its signed scorecard's counts are this restore's `integrity` and `coverage`. */
+            verification?: string | null;
+            /** @description Why the reconcile failed, or what it found when nothing was left. */
+            verificationReason?: string | null;
         };
         /** @description A page of `Restore` items. */
         RestoreList: {
@@ -4290,7 +4352,7 @@ export interface components {
         /**
          * @description One `Restore`.
          *
-         *     `authorization` is PLAT-19.2's routing answer and is present exactly on a create (and its replay): what the Restore needs next under the namespace's frozen approval policy. A single read carries none — the operation view and the Approval are the durable state, and this is the answer to one request.
+         *     `authorization` is PLAT-19.2's routing answer and is present exactly on a create (and its replay): what the Restore needs next under the workspace's frozen approval policy. A single read carries none — the operation view and the Approval are the durable state, and this is the answer to one request.
          */
         RestoreResponse: {
             /** @description PLAT-19.2: on a create, where the submission goes next. */
@@ -4313,13 +4375,13 @@ export interface components {
              * @description When the signed document stops authorising anything new.
              */
             expiresAt?: string | null;
-            /** @description `true` for an unbound namespace (today's governed behaviour). */
+            /** @description `true` for an unbound workspace (today's governed behaviour). */
             legacy: boolean;
-            /** @description The mode the namespace's binding requires. */
+            /** @description The mode the workspace's binding requires. */
             mode: components["schemas"]["ApprovalModeView"];
             /** @description PROD-16.1: the same mode in the operator's words. */
             operatorMode: components["schemas"]["OperatorModeView"];
-            /** @description The policy name — `legacy-governed-v1` for an unbound namespace. */
+            /** @description The policy name — `legacy-governed-v1` for an unbound workspace. */
             policy: string;
             /** @description The policy snapshot digest the console signed; absent for the legacy synthesis, which accepts only today's v1 approval document. */
             policyDigest?: string | null;
@@ -4327,6 +4389,21 @@ export interface components {
             requester?: string | null;
             /** @description Where the submission goes next. */
             state: components["schemas"]["AuthorizationState"];
+        };
+        /** @description `Restore.coverage.schemas` (PROD-03.2). */
+        RestoreSchemasView: {
+            /**
+             * Format: uint64
+             * @description Subject-versions the target already held.
+             */
+            alreadyPresent: number;
+            /**
+             * Format: uint64
+             * @description Subject-versions imported with their source IDs.
+             */
+            imported: number;
+            /** @description `noTargetRegistry` or `noSnapshot` when nothing was imported. */
+            notImported?: string | null;
         };
         /** @description **PROD-11.1b.** `Restore.selection` and `verificationScope.selection`: the signed replay selection, copied from `status.integrity.selection` (itself copied from the scorecard's `source.selection`) and never recomputed. Present exactly when the scorecard states a selection; every field may be absent when the controller could not read the signed block, which is still a selection (never read as a restore of everything). */
         RestoreSelectionView: {
@@ -4357,7 +4434,7 @@ export interface components {
         };
         /** @description Where a restore writes. */
         RestoreTargetRequest: {
-            /** @description The target connection, in this namespace. */
+            /** @description The target connection, in this workspace. */
             clusterRef: components["schemas"]["NameRef"];
             /** @description `scratch` or `newTopic`. */
             mode: components["schemas"]["RestoreMode"];
@@ -4549,7 +4626,7 @@ export interface components {
             mode: string;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /**
              * Format: int64
@@ -4607,7 +4684,7 @@ export interface components {
         };
         /** @description The four product roles. They are LOGWEIR roles: they are not Kubernetes roles, they are not granted by cluster RBAC, and holding one says nothing about what the console ServiceAccount may do. */
         Role: "viewer" | "operator" | "approver" | "administrator";
-        /** @description P10: why a manual run has no Job yet — the per-namespace ceiling of its manual-run pool, copied from the object's `status.queue`. Nothing that moves (a count, a place in line) is published: the controller does not record one. */
+        /** @description P10: why a manual run has no Job yet — the per-workspace ceiling of its manual-run pool, copied from the object's `status.queue`. Nothing that moves (a count, a place in line) is published: the controller does not record one. */
         RunQueueView: {
             /**
              * Format: date-time
@@ -4616,7 +4693,7 @@ export interface components {
             authorizationExpiresAt?: string | null;
             /**
              * Format: int64
-             * @description The ceiling: `runs.maxManualBackupsActivePerNamespace` for a Backup, `runs.maxManualRestoresActivePerNamespace` for a Restore.
+             * @description The ceiling: `runs.maxManualBackupsActivePerWorkspace` for a Backup, `runs.maxManualRestoresActivePerWorkspace` for a Restore.
              */
             limit: number;
         };
@@ -4686,7 +4763,7 @@ export interface components {
             generation?: number | null;
             /** @description The object name. */
             name: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /** @description The preset this expression IS, or absent for "Advanced cron". */
             preset?: components["schemas"]["CadencePreset"];
@@ -4791,7 +4868,7 @@ export interface components {
              * @description The revision this run copied.
              */
             generation?: number | null;
-            /** @description The schedule's name, in this namespace. */
+            /** @description The schedule's name, in this workspace. */
             name: string;
             /** @description The digest of the policy it copied. */
             runPolicySha256?: string | null;
@@ -4841,6 +4918,30 @@ export interface components {
             policy?: components["schemas"]["SchedulePolicyView"];
             /** @description The `Ready` condition. */
             ready?: components["schemas"]["ConditionView"];
+        };
+        /** @description A new connection's Schema Registry. `Debug` and `Serialize` never carry the password. */
+        SchemaRegistryRequest: {
+            /**
+             * @description The basic-auth password, entered once.
+             * @default null
+             */
+            password?: string | null;
+            /** @description `http://` or `https://`, no userinfo, query or fragment. */
+            url: string;
+            /**
+             * @description The basic-auth username; given exactly when `password` is.
+             * @default null
+             */
+            username?: string | null;
+        };
+        /** @description A stored connection's Schema Registry: the URL, the username and the Secret's NAME. Never the password. */
+        SchemaRegistryView: {
+            /** @description The Secret holding the password, by name. */
+            credentialRef?: components["schemas"]["NameRef"];
+            /** @description The registry URL. */
+            url: string;
+            /** @description The basic-auth username. */
+            username?: string | null;
         };
         /** @description PROD-16.2 (review S-1): the requester's owner statement for an original-name restore, as the plan signs it. */
         ScopeOwnerStatementView: {
@@ -5002,12 +5103,12 @@ export interface components {
              * @description When the session expires; `null` in localAdmin mode, which has no session.
              */
             expiresAt?: string | null;
-            /** @description The explicitly granted namespaces. */
-            namespaces: components["schemas"]["NamespaceGrant"][];
             /** @description The request ID. */
             requestId: string;
+            /** @description The workspaces the actor holds a role in. */
+            workspaces: components["schemas"]["WorkspaceGrant"][];
         };
-        /** @description `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension`. */
+        /** @description `POST /api/v1/workspaces/{ws}/schedules/{name}:set-suspension`. */
         SetSuspensionRequest: {
             /** @description The resourceVersion the client last read. A stale value is `precondition_failed`. */
             expectedResourceVersion: string;
@@ -5053,7 +5154,7 @@ export interface components {
         };
         /** @description The source-connection half of a preflight request. */
         SourceConnectionPreflightRequest: {
-            /** @description The `KafkaCluster` to dial, in this namespace. REQUIRED: a connectivity check with no connection is not a smaller check, it is no check, and the absence is refused as `422 connectionRef required` rather than defaulted to anything. */
+            /** @description The `KafkaCluster` to dial, in this workspace. REQUIRED: a connectivity check with no connection is not a smaller check, it is no check, and the absence is refused as `422 connectionRef required` rather than defaulted to anything. */
             connectionRef: string;
         };
         /**
@@ -5132,10 +5233,10 @@ export interface components {
         /**
          * @description `POST .../restores/{name}/approval` — an approver records the approval a Restore waits for.
          *
-         *     * Under an explicit **Governed** policy: `sidecarBytes` only — the DSSE sidecar `logweir drill countersign` wrote over the console's confirmation; the confirmation's exact document bytes are used, so `approvalBytes` is refused. * In an **unbound** namespace (`legacy-governed-v1`, today's flow): both files `logweir drill approve` wrote over the Restore's plan, exactly as they arrived.
+         *     * Under an explicit **Governed** policy: `sidecarBytes` only — the DSSE sidecar `logweir drill countersign` wrote over the console's confirmation; the confirmation's exact document bytes are used, so `approvalBytes` is refused. * In an **unbound** workspace (`legacy-governed-v1`, today's flow): both files `logweir drill approve` wrote over the Restore's plan, exactly as they arrived.
          */
         SubmitApprovalRequest: {
-            /** @description `approval.json` from `logweir drill approve` — unbound namespaces only. At most 64 KiB. */
+            /** @description `approval.json` from `logweir drill approve` — unbound workspaces only. At most 64 KiB. */
             approvalBytes?: string | null;
             /** @description The DSSE sidecar. At most 64 KiB. */
             sidecarBytes: string;
@@ -5161,7 +5262,6 @@ export interface components {
             expiresAt?: string | null;
             /** Format: date-time */
             issuedAt?: string | null;
-            namespace: string;
             planHash?: string | null;
             policy: string;
             policyDigest: string;
@@ -5186,6 +5286,7 @@ export interface components {
             /** @description Its UID, now. */
             switchoverUid: string;
             ticket?: string | null;
+            workspace: string;
         };
         /** @description One group's outcome, as the status carries it. */
         SwitchoverGroupView: {
@@ -5214,7 +5315,7 @@ export interface components {
         SwitchoverPreflightRequest: {
             /** @description At most 100 groups; absent: every group the restore's mapping maps. */
             groups?: components["schemas"]["SwitchoverPreflightGroup"][] | null;
-            /** @description The verified `Restore`, in this namespace. */
+            /** @description The verified `Restore`, in this workspace. */
             restoreName: string;
             /** @description Its UID, when the caller knows it: a replaced restore is then refused. */
             restoreUid?: string | null;
@@ -5229,7 +5330,7 @@ export interface components {
         };
         /** @description The restore a switchover applies, by name and UID. */
         SwitchoverRestoreRef: {
-            /** @description The `Restore`'s name, in this namespace. */
+            /** @description The `Restore`'s name, in this workspace. */
             name: string;
             /** @description Its UID. */
             uid: string;
@@ -5459,7 +5560,7 @@ export interface components {
             freshUntil?: string | null;
             /** @description The object name, which is the id every other route uses. */
             id: string;
-            /** @description The namespace. */
+            /** @description The namespace: the install's, for `kubectl`. */
             namespace: string;
             /**
              * Format: date-time
@@ -5809,7 +5910,7 @@ export interface components {
             transport?: components["schemas"]["UpdateTransportRequest"];
         };
         /**
-         * @description `PUT /api/v1/namespaces/{ns}/schedules/{name}` — the editable future policy (D1 §5.1, §5.6).
+         * @description `PUT /api/v1/workspaces/{ws}/schedules/{name}` — the editable future policy (D1 §5.1, §5.6).
          *
          *     THE WHOLE POLICY, NOT A DIFF. Every mutable field is sent; a field omitted is REMOVED, which is what makes "absent means the documented default" reachable from a form. `spec.sourceRef` is not on this DTO at all: the identity of the protected cluster is immutable, and a request naming it is `422 validation_failed` with `sourceRef: field_immutable` before anything is read or written.
          *
@@ -5838,7 +5939,7 @@ export interface components {
              */
             concurrencyPolicy?: components["schemas"]["ConcurrencyPolicy"];
             /**
-             * @description A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built here and is never accepted from a body.
+             * @description A saved `BackupDestination` in this workspace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built here and is never accepted from a body.
              * @default null
              */
             destinationRef?: components["schemas"]["NameRef"];
@@ -5926,7 +6027,7 @@ export interface components {
             kind: string;
             /** @description The subject name. */
             name: string;
-            /** @description The subject namespace. */
+            /** @description The subject namespace (the install's). */
             namespace: string;
             /** @description The subject UID. */
             uid: string;
@@ -5962,6 +6063,22 @@ export interface components {
              * @default null
              */
             serviceAccountName?: string | null;
+        };
+        /** @description One workspace the actor holds a role in. */
+        WorkspaceGrant: {
+            /** @description What the actor may do there. Domains without a route are `false`. */
+            capabilities: components["schemas"]["Capabilities"];
+            /** @description The workspace name. */
+            name: string;
+            /** @description The product roles the actor holds here, sorted and unioned across every binding that matched. Empty in localAdmin mode, which has no roles. */
+            roles: components["schemas"]["Role"][];
+        };
+        /** @description `GET /api/v1/workspaces`. */
+        WorkspaceListResponse: {
+            /** @description The actor's grants, from configuration. Core `Namespace` objects are never listed. */
+            items: components["schemas"]["WorkspaceGrant"][];
+            /** @description The request ID. */
+            requestId: string;
         };
         /** @description Whether an explicit readiness test may write a marker object. */
         WriteProbeDto: "disabled" | "createOnlyMarker";
@@ -6153,7 +6270,7 @@ export interface operations {
             };
         };
     };
-    listNamespaces: {
+    listWorkspaces: {
         parameters: {
             query?: never;
             header?: never;
@@ -6168,7 +6285,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["NamespaceListResponse"];
+                    "application/json": components["schemas"]["WorkspaceListResponse"];
                 };
             };
             /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
@@ -6187,15 +6304,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6225,14 +6342,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6276,8 +6393,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6360,15 +6477,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6398,14 +6515,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6449,8 +6566,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6486,8 +6603,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6527,8 +6644,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6565,15 +6682,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6603,14 +6720,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6654,8 +6771,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6688,15 +6805,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6726,14 +6843,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6777,8 +6894,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6806,6 +6923,80 @@ export interface operations {
             };
         };
     };
+    cancelRestore: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Must equal the configured public origin exactly. */
+                Origin: string;
+            };
+            path: {
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The cancel is recorded (or already was). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestoreResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cleanupRestore: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Must equal the configured public origin exactly. */
+                Origin: string;
+            };
+            path: {
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The cleanup is recorded (or already was). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestoreResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
     submitGovernedApproval: {
         parameters: {
             query?: never;
@@ -6814,8 +7005,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6861,8 +7052,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6898,8 +7089,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -6945,15 +7136,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -6983,14 +7174,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -7034,8 +7225,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7071,8 +7262,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7118,8 +7309,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7155,8 +7346,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7202,8 +7393,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7236,15 +7427,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -7275,8 +7466,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7309,8 +7500,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7343,15 +7534,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -7381,14 +7572,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -7432,8 +7623,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7469,8 +7660,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7506,14 +7697,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7559,8 +7750,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7593,7 +7784,7 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
@@ -7602,8 +7793,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7635,14 +7826,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -7688,8 +7879,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The check's id, which is its object name. */
                 id: string;
             };
@@ -7725,8 +7916,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The check's id, which is its object name. */
                 id: string;
             };
@@ -7772,8 +7963,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The check's id, which is its object name. */
                 id: string;
             };
@@ -7805,14 +7996,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -7859,8 +8050,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The check's id, which is its object name. */
                 id: string;
             };
@@ -7896,8 +8087,8 @@ export interface operations {
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The check's id, which is its object name. */
                 id: string;
             };
@@ -7937,8 +8128,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The check's id, which is its object name. */
                 id: string;
             };
@@ -7971,8 +8162,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description backup, restore, discovery or preflight. */
                 kind: "backup" | "restore" | "discovery" | "preflight";
                 /** @description The object name. */
@@ -8010,8 +8201,8 @@ export interface operations {
                 "Last-Event-ID"?: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description backup or restore. A transient check has a read route and no stream. */
                 kind: "backup" | "restore";
                 /** @description The object name. */
@@ -8044,15 +8235,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -8083,8 +8274,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -8117,15 +8308,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -8155,14 +8346,14 @@ export interface operations {
         parameters: {
             query?: never;
             header: {
-                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
+                /** @description 8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict. */
                 "Idempotency-Key": string;
                 /** @description Must equal the configured public origin exactly. */
                 Origin: string;
             };
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -8206,8 +8397,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -8247,8 +8438,8 @@ export interface operations {
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -8281,8 +8472,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };
@@ -8315,15 +8506,15 @@ export interface operations {
             query?: {
                 /** @description Page size, 1 to 200. Default 50. */
                 limit?: number;
-                /** @description The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes. */
+                /** @description The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes. */
                 cursor?: string;
                 /** @description Equality-only label selector, key=value terms separated by commas. */
                 labelSelector?: string;
             };
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
             };
             cookie?: never;
         };
@@ -8354,8 +8545,8 @@ export interface operations {
             query?: never;
             header?: never;
             path: {
-                /** @description An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists. */
-                ns: string;
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
                 /** @description The object name. */
                 name: string;
             };

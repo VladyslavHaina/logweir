@@ -1236,16 +1236,15 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         "the independent approver recipe remains explicit"
     );
 
-    // The managed and low-level paths are deliberately distinct: Helm owns
-    // declared runner namespaces; identity-off installs apply the base account.
+    // OD-23: the chart renders the runner account in the release namespace,
+    // where every Job runs; only the low-level path applies it by hand.
     assert!(
         install.contains("config/samples/backup-runner-serviceaccount.yaml"),
         "docs/install.md must tell the reader to apply the runner ServiceAccount"
     );
     assert!(
-        install.contains("identity.authorizedRunnerNamespaces")
-            && install.contains("For the low-level path, apply it once per namespace"),
-        "docs/install.md must distinguish Helm-managed authorized namespaces from the low-level manual account path"
+        install.contains("in the release namespace, where every runner Job runs"),
+        "docs/install.md must say the runner account lives in the release namespace"
     );
 
     assert!(
@@ -1274,8 +1273,9 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
          (PROD-14.1) and state exact API CIDR/port requirements"
     );
     assert!(
-        install.contains("Only the bootstrap/distributor **processes and their projected API tokens** are\nshort-lived")
-            && install.contains("ordinary persistent release resources")
+        install.contains(
+            "Only the bootstrap **process and its projected API token** are\nshort-lived"
+        ) && install.contains("ordinary persistent release resources")
             && install.contains("does not automatically revoke these RBAC grants"),
         "identity docs must distinguish short-lived processes/tokens from persistent scoped RBAC"
     );
@@ -1287,10 +1287,8 @@ fn install_md_runs_the_secret_preflight_before_any_custom_resource() {
         "rollback docs must describe the Helm 3/4-safe creation-hook retention boundary"
     );
     assert!(
-        install.contains("one Logweir\ninstallation identity per cluster")
-            && install.contains("different signer")
-            && install.contains("Never mint a per-namespace signer"),
-        "the singleton and same-identity namespace contract must be actionable"
+        install.contains("one Logweir\ninstallation identity per cluster"),
+        "the singleton contract must be actionable"
     );
     assert!(
         install.contains("apply --server-side --force-conflicts -f charts/logweir/crds/")
@@ -1439,7 +1437,7 @@ fn stability_lists_the_deferred_items() {
 
     const NEVER: [&str; 4] = [
         "Restore-in-place into a live topic",
-        "Confluent Schema Registry / Apicurio / RBAC-MDS / CSFLE",
+        "RBAC-MDS and CSFLE; Schema Registry beyond backup, resolution and selective import",
         "MSK ZK-to-KRaft migration",
         "Multi-cluster or fleet views",
     ];
@@ -2362,6 +2360,30 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ),
         // FX-52 F7 (item 136): the peer that holds TypeScript at 5.
         ("console dependencies", "`openapi-typescript`"),
+        // PROD-19.1 (item 137): the step a fresh install must not skip.
+        (
+            "one namespace per install",
+            "`helm install` does not replace a CRD that exists",
+        ),
+        // PROD-19.1 (item 138): the controller's refusal across workspaces.
+        ("workspaces", "`WorkspaceMismatch`"),
+        // PROD-19.1 (item 139): the residual an operator must read.
+        (
+            "a credential Secret carries its workspace",
+            "create Pods or Jobs",
+        ),
+        // PROD-19.1 (item 140): the new signed field.
+        ("an approval names its workspace", "`subject.workspace`"),
+        // PROD-19.1 (item 141): the renamed problem code.
+        ("the API by workspace", "`workspace_forbidden`"),
+        // PROD-03.1, 03.2 (item 142): the refusal of a registry without IMPORT.
+        ("Schema Registry", "`SchemaRegistryCannotKeepIds`"),
+        // PROD-00.3a/d/e/h (item 143): the one new plan key.
+        ("engine build 5", "`restore.rate_limit_bytes_per_sec`"),
+        // PROD-07.2 (item 144): the grant a reconcile needs.
+        ("an interrupted restore", "`<bucket>/logweir/drills/*`"),
+        // OD-23 (item 145): the verifier that reads the new blocks.
+        ("format steps", "`verify_scorecard.py` 1.35.0"),
     ];
     assert_eq!(
         items.len(),

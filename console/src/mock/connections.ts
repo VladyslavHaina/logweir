@@ -98,18 +98,18 @@ function checkNow(held: HeldCheck): Preflight {
 
 /** Starts a mock Preflight under an idempotency key; the same key replays the same check. */
 export function startCheck(
-  ns: string,
+  ws: string,
   key: string,
   operation: Preflight["operation"],
   referent: { kind: string; name: string; uid: string },
   final: HeldCheck["final"],
 ): { item: Preflight; replayed: boolean } {
-  const known = checkKeys.get(`${ns}/${key}`);
+  const known = checkKeys.get(`${ws}/${key}`);
   if (known && checks.has(known)) return { item: checkNow(checks.get(known)!), replayed: true };
-  const id = `pf-${base32(`${ns}/${key}`)}`;
+  const id = `pf-${base32(`${ws}/${key}`)}`;
   const item: Preflight = {
     id,
-    namespace: ns,
+    namespace: ws,
     uid: uuid(id),
     resourceVersion: String(70000 + checks.size),
     createdAt: iso(Date.now()),
@@ -128,13 +128,13 @@ export function startCheck(
     detailsAvailable: false,
   };
   checks.set(id, { item, since: Date.now(), runMs: 4500, final });
-  checkKeys.set(`${ns}/${key}`, id);
+  checkKeys.set(`${ws}/${key}`, id);
   return { item, replayed: false };
 }
 
 /** The newest check about one object, as a `lastTest` summary. */
-export function lastTestFor(ns: string, kind: string, name: string): S["LastTestView"] | undefined {
-  const mine = [...checks.values()].filter((h) => h.item.namespace === ns && h.item.binding.referents.some((r) => r.kind === kind && r.name === name));
+export function lastTestFor(ws: string, kind: string, name: string): S["LastTestView"] | undefined {
+  const mine = [...checks.values()].filter((h) => h.item.namespace === ws && h.item.binding.referents.some((r) => r.kind === kind && r.name === name));
   const newest = mine.sort((a, b) => b.since - a.since)[0];
   if (!newest) return undefined;
   const now = checkNow(newest);
@@ -175,7 +175,7 @@ function connectionCheckResult(c: Connection, at = Date.now() + 4500): HeldCheck
         : entry("connection.authenticated", "notReady", "BrokerTransportFailure", at, {
             scope,
             message: "no broker answered within the connect budget",
-            remedy: "Check the bootstrap servers, and that the brokers are reachable from pods in this namespace.",
+            remedy: "Check the bootstrap servers, and that the brokers are reachable from pods in this workspace.",
           }),
       reachable
         ? entry("connection.clusterIdentity", "ready", "ClusterIdentityMatched", at, { scope, message: `cluster id ${reachNow(c).reachability.clusterId ?? "recorded"}` })
@@ -187,10 +187,24 @@ function connectionCheckResult(c: Connection, at = Date.now() + 4500): HeldCheck
           "the runner image was present and the container started [imageID=docker-pullable://registry.example/logweir@sha256:6aad79ee4625aed9555fd0de794ec7671f9247f5be590ed1e4b1c0d2f3a4b5c6]",
       }),
       ...capabilityRows(at, scope, reachable),
+      ...registryRows(c, at, scope),
     ],
-    warnings: [],
+    warnings: registryRows(c, at, scope).filter((r) => r.state !== "ready"),
     executionOnly: [],
   };
+}
+
+/** Connections made here whose registry password was typed as "wrong": the registry refuses it. No value is kept. */
+const registryRefused = new Set<string>();
+
+/** OD-23 (PROD-03.1): `registry.reachable`, advisory, on a connection that names a registry. */
+function registryRows(c: Connection, at: number, scope: CheckEntry["scope"]): CheckEntry[] {
+  const registry = (c.schemaRegistry ?? null);
+  if (!registry) return [];
+  const advisory = { gating: "advisory" as const, scope };
+  return registryRefused.has(c.name)
+    ? [entry("registry.reachable", "notReady", "RegistryUnauthorized", at, { ...advisory, message: `${registry.url} answered 401 to the connection's registry credential`, remedy: "Add a new connection with the right registry password: a connection cannot be changed." })]
+    : [entry("registry.reachable", "ready", "RegistryReachable", at, { ...advisory, message: `${registry.url} answered with the connection's credential: 4 subjects` })];
 }
 
 // ------------------------------------------------------------------ topics
@@ -357,13 +371,18 @@ const HOST_PORT = /^[^\s:/@]+:\d{1,5}$/;
 const SASL = ["scramSha512", "scramSha256", "plain"];
 const connectionKeys = new Map<string, { name: string; digest: string }>();
 
-function createConnection(ns: string, key: string, body: S["CreateConnectionRequest"]): Response {
+function createConnection(ws: string, key: string, body: S["CreateConnectionRequest"]): Response {
   // Write-only fields hash as <write-only>: a value is not part of the request's identity.
-  const digest = JSON.stringify({ ...body, auth: { ...body.auth, credential: body.auth.credential ? "<write-only>" : undefined } });
-  const held = connectionKeys.get(`${ns}/${key}`);
+  const sr = body.schemaRegistry;
+  const digest = JSON.stringify({
+    ...body,
+    auth: { ...body.auth, credential: body.auth.credential ? "<write-only>" : undefined },
+    ...(sr ? { schemaRegistry: { ...sr, password: sr.password ? "<write-only>" : undefined } } : {}),
+  });
+  const held = connectionKeys.get(`${ws}/${key}`);
   if (held) {
     if (held.digest !== digest) return problem(409, "idempotency_conflict", "This idempotency key was already used with a different request body.");
-    const existing = connections.find((c) => c.namespace === ns && c.name === held.name)!;
+    const existing = connections.find((c) => c.namespace === ws && c.name === held.name)!;
     return json(200, { item: reachNow(existing), replayed: true, requestId: requestId() });
   }
   const errors: S["FieldError"][] = [];
@@ -387,14 +406,17 @@ function createConnection(ns: string, key: string, body: S["CreateConnectionRequ
     }
   }
   if (a.mode === "plaintext" && a.credential) errors.push({ field: "auth.credential", code: "not_allowed", message: "plaintext takes no credential" });
+  if (sr && !/^https?:\/\/[^/@\s]+/.test(sr.url)) errors.push({ field: "schemaRegistry.url", code: "invalid_url", message: "must be an http or https URL with no userinfo" });
+  if (sr?.password && !sr.username) errors.push({ field: "schemaRegistry.username", code: "required", message: "a registry password needs a username" });
   if (errors.length > 0) return problem(422, "validation_failed", "One or more fields are invalid.", errors);
 
-  const name = `conn-${base32(`${ns}/${key}`)}`;
-  const secret = a.mode === "plaintext" ? undefined : `${name}-credential`;
+  const name = `conn-${base32(`${ws}/${key}`)}`;
+  const secret = a.mode === "plaintext" && !sr?.password ? undefined : `${name}-credential`;
+  if (sr?.password === "wrong") registryRefused.add(name);
   if (secret) createdSecrets.push(secret);
   const item: Connection = {
     name,
-    namespace: ns,
+    namespace: ws,
     uid: uuid(name),
     role: body.role,
     resourceVersion: String(61000 + connections.length),
@@ -410,10 +432,11 @@ function createConnection(ns: string, key: string, body: S["CreateConnectionRequ
       tlsCa: a.tlsCa ? { kind: "configMap", name: a.tlsCa.configMapKeyRef.name, key: a.tlsCa.configMapKeyRef.key } : undefined,
     },
     reachability: { state: "unknown", reason: "ProbeRunning" },
+    ...((sr ? { schemaRegistry: { url: sr.url, username: sr.username ?? null } } : {}) as object),
   };
   connections.unshift(item);
   probeFrom.set(name, Date.now());
-  connectionKeys.set(`${ns}/${key}`, { name, digest });
+  connectionKeys.set(`${ws}/${key}`, { name, digest });
   return json(201, { item, replayed: false, requestId: requestId() });
 }
 
@@ -426,55 +449,55 @@ function listPage<T>(items: T[]) {
 /** The Connections, readiness-check and discovery routes, or null for any other request. */
 export async function connectionsMock(request: Request, method: string, path: string): Promise<Response | null> {
   let p: RegExpMatchArray | null;
-  const ns = path.match(/^\/namespaces\/([^/]+)\//)?.[1] ?? "";
+  const ws = path.match(/^\/workspaces\/([^/]+)\//)?.[1] ?? "";
   const key = request.headers.get("Idempotency-Key") ?? "";
-  const find = (name: string) => connections.find((c) => c.namespace === ns && c.name === name);
+  const find = (name: string) => connections.find((c) => c.namespace === ws && c.name === name);
 
-  if (method === "GET" && /^\/namespaces\/[^/]+\/connections$/.test(path)) {
-    return json(200, listPage(connections.filter((c) => c.namespace === ns).map(reachNow)));
+  if (method === "GET" && /^\/workspaces\/[^/]+\/connections$/.test(path)) {
+    return json(200, listPage(connections.filter((c) => c.namespace === ws).map(reachNow)));
   }
-  if (method === "POST" && /^\/namespaces\/[^/]+\/connections$/.test(path)) {
+  if (method === "POST" && /^\/workspaces\/[^/]+\/connections$/.test(path)) {
     if (key.length < 8) return problem(400, "idempotency_key_required", "This route requires an Idempotency-Key header.");
-    return createConnection(ns, key, (await request.json()) as S["CreateConnectionRequest"]);
+    return createConnection(ws, key, (await request.json()) as S["CreateConnectionRequest"]);
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/[^/]+\/connections\/([^/]+)$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/connections\/([^/]+)$/))) {
     const c = find(p[1]!);
-    if (!c) return problem(404, "not_found", `No connection named ${p[1]} in ${ns}.`);
-    const lastTest = lastTestFor(ns, "KafkaCluster", c.name) ?? SEEDED_TESTS[c.name];
+    if (!c) return problem(404, "not_found", `No connection named ${p[1]} in ${ws}.`);
+    const lastTest = lastTestFor(ws, "KafkaCluster", c.name) ?? SEEDED_TESTS[c.name];
     return json(200, { item: { ...reachNow(c), ...(lastTest ? { lastTest } : {}) }, requestId: requestId() });
   }
 
   // --- readiness checks
-  if (method === "POST" && /^\/namespaces\/[^/]+\/preflights$/.test(path)) {
+  if (method === "POST" && /^\/workspaces\/[^/]+\/preflights$/.test(path)) {
     const body = (await request.json()) as S["CreatePreflightRequest"];
     if (body.operation !== "sourceConnection" || !body.sourceConnection?.connectionRef) {
       return problem(422, "validation_failed", "The prototype only mocks the sourceConnection check here.", [{ field: "operation", code: "unsupported", message: "only sourceConnection is mocked" }]);
     }
     const c = find(body.sourceConnection.connectionRef);
-    if (!c) return problem(404, "not_found", `No connection named ${body.sourceConnection.connectionRef} in ${ns}.`);
-    const made = startCheck(ns, key, "sourceConnection", { kind: "KafkaCluster", name: c.name, uid: c.uid }, connectionCheckResult(c));
+    if (!c) return problem(404, "not_found", `No connection named ${body.sourceConnection.connectionRef} in ${ws}.`);
+    const made = startCheck(ws, key, "sourceConnection", { kind: "KafkaCluster", name: c.name, uid: c.uid }, connectionCheckResult(c));
     return json(made.replayed ? 200 : 202, { item: made.item, replayed: made.replayed, requestId: requestId() });
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/[^/]+\/preflights\/([^/:]+)$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/preflights\/([^/:]+)$/))) {
     const held = checks.get(p[1]!) ?? seededChecks.get(p[1]!);
-    return held ? json(200, { item: checkNow(held), requestId: requestId() }) : problem(404, "not_found", `No readiness check named ${p[1]} in ${ns}.`);
+    return held ? json(200, { item: checkNow(held), requestId: requestId() }) : problem(404, "not_found", `No readiness check named ${p[1]} in ${ws}.`);
   }
 
   // --- topic discovery
-  if (method === "GET" && (p = path.match(/^\/namespaces\/[^/]+\/connections\/([^/]+)\/topic-discoveries$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/connections\/([^/]+)\/topic-discoveries$/))) {
     const name = p[1]!;
-    if (!find(name)) return problem(404, "not_found", `No connection named ${name} in ${ns}.`);
+    if (!find(name)) return problem(404, "not_found", `No connection named ${name} in ${ws}.`);
     settleSlots(name);
     const slot = slots.get(name) ?? { latest: null, success: null };
     const read = (id: string | null) => (id && discoveries.has(id) ? discoveryNow(discoveries.get(id)!) : null);
     return json(200, { latestAttempt: read(slot.latest), lastSuccessful: read(slot.success), requestId: requestId() });
   }
-  if (method === "POST" && (p = path.match(/^\/namespaces\/[^/]+\/connections\/([^/]+)\/topic-discoveries$/))) {
+  if (method === "POST" && (p = path.match(/^\/workspaces\/[^/]+\/connections\/([^/]+)\/topic-discoveries$/))) {
     const c = find(p[1]!);
-    if (!c) return problem(404, "not_found", `No connection named ${p[1]} in ${ns}.`);
+    if (!c) return problem(404, "not_found", `No connection named ${p[1]} in ${ws}.`);
     const body = (await request.json()) as S["CreateTopicDiscoveryRequest"];
     const req = { includeInternal: body.includeInternal === true, expected: [...(body.expectedTopics ?? [])].sort() };
-    const replay = discoveryKeys.get(`${ns}/${key}`);
+    const replay = discoveryKeys.get(`${ws}/${key}`);
     if (replay) return json(200, { item: discoveryNow(discoveries.get(replay)!), replayed: true, requestId: requestId() });
     settleSlots(c.name);
     const slot = slots.get(c.name) ?? { latest: null, success: null };
@@ -482,21 +505,21 @@ export async function connectionsMock(request: Request, method: string, path: st
     if (body.reuseFresh !== false && success && JSON.stringify(success.request) === JSON.stringify(req) && !discoveryNow(success).stale) {
       return json(200, { item: discoveryNow(success), reused: true, requestId: requestId() });
     }
-    const id = `td-${base32(`${ns}/${key}`)}`;
+    const id = `td-${base32(`${ws}/${key}`)}`;
     discoveries.set(id, newDiscovery(c, id, req, Date.now()));
-    discoveryKeys.set(`${ns}/${key}`, id);
+    discoveryKeys.set(`${ws}/${key}`, id);
     slots.set(c.name, { latest: id, success: slot.success });
     return json(202, { item: discoveryNow(discoveries.get(id)!), replayed: false, reused: false, requestId: requestId() });
   }
-  if (method === "POST" && (p = path.match(/^\/namespaces\/[^/]+\/topic-discoveries\/([^/:]+):cancel$/))) {
+  if (method === "POST" && (p = path.match(/^\/workspaces\/[^/]+\/topic-discoveries\/([^/:]+):cancel$/))) {
     const held = discoveries.get(p[1]!);
-    if (!held) return problem(404, "not_found", `No topic discovery named ${p[1]} in ${ns}.`);
+    if (!held) return problem(404, "not_found", `No topic discovery named ${p[1]} in ${ws}.`);
     const now = discoveryNow(held);
     if (now.terminal) return json(200, { id: now.id, state: now.state, alreadyTerminal: true, requestId: requestId() });
     held.item = { ...now, state: "cancelled", terminal: true, reason: "Cancelled", observedAt: iso(Date.now()) };
     return json(200, { id: now.id, state: "cancelled", alreadyTerminal: false, requestId: requestId() });
   }
-  if (method === "GET" && (p = path.match(/^\/namespaces\/[^/]+\/topic-discoveries\/([^/:]+)\/topics$/))) {
+  if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/topic-discoveries\/([^/:]+)\/topics$/))) {
     const held = discoveries.get(p[1]!);
     if (!held || discoveryNow(held).state !== "succeeded") return problem(404, "not_found", `No stored inventory for ${p[1]}.`);
     const url = new URL(request.url);

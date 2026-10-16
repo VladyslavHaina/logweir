@@ -56,23 +56,23 @@ pub const CACHE_TTL: Duration = Duration::from_secs(30);
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ChecksPolicy {
     /// Active check Jobs in one namespace.
-    pub max_active_per_namespace: u32,
+    pub max_active_per_workspace: u32,
     /// Active check Jobs across the installation.
     pub max_active_total: u32,
     /// Active discoveries against one connection UID.
     pub max_active_discoveries_per_connection: u32,
     /// Active evidence fetches per namespace — a SEPARATE pool, so verification
     /// cannot be starved by interactive checks.
-    pub max_evidence_fetch_active_per_namespace: u32,
+    pub max_evidence_fetch_active_per_workspace: u32,
 }
 
 impl Default for ChecksPolicy {
     fn default() -> Self {
         Self {
-            max_active_per_namespace: 4,
+            max_active_per_workspace: 4,
             max_active_total: 20,
             max_active_discoveries_per_connection: 1,
-            max_evidence_fetch_active_per_namespace: 4,
+            max_evidence_fetch_active_per_workspace: 4,
         }
     }
 }
@@ -96,9 +96,9 @@ impl Default for ChecksPolicy {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RunsPolicy {
     /// Manual `Backup` runs ("Back up now") ACTIVE at once in one namespace.
-    pub max_manual_backups_active_per_namespace: u32,
+    pub max_manual_backups_active_per_workspace: u32,
     /// Manual `Restore` runs ACTIVE at once in one namespace.
-    pub max_manual_restores_active_per_namespace: u32,
+    pub max_manual_restores_active_per_workspace: u32,
 }
 
 impl Default for RunsPolicy {
@@ -107,10 +107,10 @@ impl Default for RunsPolicy {
             // Four, the `checks` number: one namespace rarely needs more ad-hoc
             // captures at once, and four runner pods is what the smallest
             // supported node carries beside the controller and console.
-            max_manual_backups_active_per_namespace: 4,
+            max_manual_backups_active_per_workspace: 4,
             // Two: a restore writes into a Kafka cluster, and the rest wait
             // with their approval intact.
-            max_manual_restores_active_per_namespace: 2,
+            max_manual_restores_active_per_workspace: 2,
         }
     }
 }
@@ -375,14 +375,14 @@ impl Policy {
             }
         };
         rule(
-            self.checks.max_active_per_namespace >= 1,
-            "checks.maxActivePerNamespace",
+            self.checks.max_active_per_workspace >= 1,
+            "checks.maxActivePerWorkspace",
             "must be at least 1; a limit of 0 would queue every check forever",
         )?;
         rule(
-            self.checks.max_active_total >= self.checks.max_active_per_namespace,
+            self.checks.max_active_total >= self.checks.max_active_per_workspace,
             "checks.maxActiveTotal",
-            "must be at least checks.maxActivePerNamespace",
+            "must be at least checks.maxActivePerWorkspace",
         )?;
         rule(
             self.checks.max_active_discoveries_per_connection >= 1,
@@ -390,18 +390,18 @@ impl Policy {
             "must be at least 1",
         )?;
         rule(
-            self.checks.max_evidence_fetch_active_per_namespace >= 1,
-            "checks.maxEvidenceFetchActivePerNamespace",
+            self.checks.max_evidence_fetch_active_per_workspace >= 1,
+            "checks.maxEvidenceFetchActivePerWorkspace",
             "must be at least 1",
         )?;
         rule(
-            self.runs.max_manual_backups_active_per_namespace >= 1,
-            "runs.maxManualBackupsActivePerNamespace",
+            self.runs.max_manual_backups_active_per_workspace >= 1,
+            "runs.maxManualBackupsActivePerWorkspace",
             "must be at least 1; a limit of 0 would queue every manual Backup forever",
         )?;
         rule(
-            self.runs.max_manual_restores_active_per_namespace >= 1,
-            "runs.maxManualRestoresActivePerNamespace",
+            self.runs.max_manual_restores_active_per_workspace >= 1,
+            "runs.maxManualRestoresActivePerWorkspace",
             "must be at least 1; a limit of 0 would queue every manual Restore forever",
         )?;
         // No rule for the withdrawn `discovery.defaultMaxTopics` or

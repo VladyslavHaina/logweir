@@ -3,7 +3,7 @@
 //! separate action (`approvalPacketRead`) bound to operator/approver roles
 //! alone. A governed approval is SUBMITTED through
 //! `POST .../restores/{name}/approval` (`routes::restores::submit_approval`);
-//! this module adds the namespace's effective approval policy.
+//! this module adds the workspace's effective approval policy.
 
 use axum::extract::State;
 use axum::response::Response;
@@ -24,19 +24,19 @@ use crate::projection;
 use logweir_core::approval_policy::{ApprovalMode, ApprovalRoute};
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/approvals";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/approvals";
 
 /// `GET .../approvals`.
 pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
+    authorize(&state, &actor, &ws, Action::ReadApprovals)?;
     let query = list_query(uri.query())?;
-    let (items, page) = list_page::<Approval>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+    let (items, page) = list_page::<Approval>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &ApprovalList {
@@ -52,12 +52,12 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
+    authorize(&state, &actor, &ws, Action::ReadApprovals)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Approval>(&state, &actor, &ns, &name).await?;
+    let object = get_object::<Approval>(&state, &actor, &ws, &name).await?;
     Ok(json(
         StatusCode::OK,
         &ApprovalResponse {
@@ -73,13 +73,13 @@ pub async fn packet(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadApprovalPacket)?;
+    authorize(&state, &actor, &ws, Action::ReadApprovalPacket)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<Approval>(&state, &actor, &ns, &name).await?;
-    tracing::info!(namespace = %ns, name = %name, actor = %actor.id(), "approval packet read");
+    let object = get_object::<Approval>(&state, &actor, &ws, &name).await?;
+    tracing::info!(workspace = %ws, name = %name, actor = %actor.id(), "approval packet read");
     Ok(json(
         StatusCode::OK,
         &ApprovalPacketResponse {
@@ -90,9 +90,9 @@ pub async fn packet(
 }
 
 /// The policy route identifier.
-pub const ROUTE_POLICY: &str = "GET /api/v1/namespaces/{ns}/approval-policy";
+pub const ROUTE_POLICY: &str = "GET /api/v1/workspaces/{ws}/approval-policy";
 
-/// `GET .../approval-policy` — the namespace's effective approval policy
+/// `GET .../approval-policy` — the workspace's effective approval policy
 /// (D0: "Approver: read effective policy").
 ///
 /// Readable by every role that may read approvals, because the operator's
@@ -102,10 +102,10 @@ pub async fn policy(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadApprovals)?;
+    authorize(&state, &actor, &ws, Action::ReadApprovals)?;
     crate::http::parse_query(uri.query(), &[])?;
     let settings = state.approval();
     // The policies as a create here would see them, the fresh-install marker
@@ -113,7 +113,7 @@ pub async fn policy(
     let policies = crate::approval::effective_policies(settings, state.kube())
         .await
         .map_err(crate::kube::KubeFailure::into_api_error)?;
-    let effective = policies.resolve(&ns);
+    let effective = policies.resolve(&ws);
     let bound = effective.bound();
     let key = settings
         .confirmation_key()
@@ -127,11 +127,11 @@ pub async fn policy(
         &ApprovalPolicyResponse {
             request_id,
             item: ApprovalPolicyView {
-                namespace: ns.clone(),
+                workspace: ws.clone(),
                 name: effective.name().to_string(),
                 mode: effective.mode().into(),
                 operator_mode,
-                basis: PolicyBasisView::of(&policies, &ns),
+                basis: PolicyBasisView::of(&policies, &ws),
                 legacy: effective.is_legacy(),
                 max_age_seconds: bound.map(|p| p.max_age_seconds),
                 require_distinct_principal: bound.is_some_and(|p| p.require_distinct_principal),

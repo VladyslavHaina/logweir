@@ -97,6 +97,8 @@ use crate::check;
 /// (`controllers/restore_clone.rs`).
 #[path = "restore_clone.rs"]
 pub mod restore_clone;
+#[path = "restore_interruption.rs"]
+pub mod restore_interruption;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
@@ -690,8 +692,8 @@ fn policy_refusal(
     let bound = match (admission.policy, is_authorization_v2(approval)) {
         (EffectivePolicy::Legacy, false) => return None,
         (EffectivePolicy::Legacy, true) => {
-            return Some(mismatch(approval_policy::unbound_namespace_refusal(
-                &namespace,
+            return Some(mismatch(approval_policy::unbound_workspace_refusal(
+                crate::workspace::label_of(restore).unwrap_or_default(),
             )))
         }
         (EffectivePolicy::Bound(bound), false) => {
@@ -708,6 +710,9 @@ fn policy_refusal(
     let expected = ExpectedSubject {
         kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace,
+        workspace: crate::workspace::label_of(restore)
+            .unwrap_or_default()
+            .to_string(),
         name: restore.name_any(),
         uid: restore.uid().unwrap_or_default(),
         plan_hash: recomputed_plan_hash(restore),
@@ -876,6 +881,9 @@ pub fn admit_with_policy(
         Some("the API response name differs from spec.approvalRef".to_string())
     } else if approval_namespace != restore_namespace {
         Some("the Approval is from a different namespace".to_string())
+    } else if let Err(refusal) = crate::workspace::same(restore, approval) {
+        // PROD-19.1: an Approval of another workspace, or of none.
+        Some(refusal.to_string())
     } else if subject.kind != crate::crds::approval::SubjectKind::Restore {
         Some(format!("spec.subjectRef.kind is {}", subject.kind))
     } else if subject.name != restore_name {
@@ -1871,6 +1879,12 @@ pub fn execution_contract_env_with_policy(
         ),
         (contract::SUBJECT_NAME_ENV.to_string(), restore.name_any()),
         (contract::SUBJECT_NAMESPACE_ENV.to_string(), namespace),
+        (
+            contract::SUBJECT_WORKSPACE_ENV.to_string(),
+            crate::workspace::label_of(restore)
+                .unwrap_or_default()
+                .to_string(),
+        ),
         (contract::SUBJECT_UID_ENV.to_string(), restore_uid),
         (contract::APPROVAL_NAME_ENV.to_string(), approval.name_any()),
         (contract::APPROVAL_UID_ENV.to_string(), approval_uid),
@@ -2253,6 +2267,7 @@ pub fn runner_job_spec_with_policy(
         crate::connection::resolve(cluster, crate::connection::ConnectionUse::RestoreTarget)?;
     connection.check_job_namespace(&namespace)?;
     connection.check_restore_target(&plan.target.bootstrap_servers, &plan.target.auth)?;
+    connection.check_restore_registry(plan.target.schema_registry.as_ref())?;
     let projection = connection.project();
 
     // The private signing key is the only file-backed Secret; the approval
@@ -2352,6 +2367,7 @@ pub fn runner_job_spec_with_policy(
             kind: Restore::kind(&()).to_string(),
             name,
             uid,
+            workspace: crate::workspace::label_of(restore).map(str::to_string),
         },
         args: {
             let mut argv = runner_argv(restore, plan, approver_key_ids);
@@ -2768,6 +2784,9 @@ pub struct ScorecardObservation {
     /// read by [`positions_mapping_record`]: `Some` on every document read,
     /// `bound: false` when it binds none (DUI-50).
     pub positions_mapping: Option<crate::crds::restore::PositionsMappingRecord>,
+    /// `target.schemas` (format 1.13.0 / 2.5.0, PROD-03.2): `None` when the
+    /// document carries no block.
+    pub schemas: Option<crate::crds::restore::SchemasRecord>,
     /// `Some` when the scorecard was not read because it exceeds the
     /// controller's read cap: the `NotAttempted` detail naming the cap
     /// ([`crate::verification::over_read_cap_detail`]). Every other field is
@@ -3223,6 +3242,7 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
         positions_mapping: Some(positions_mapping_record(
             doc.pointer("/integrity/verification/positions_mapping"),
         )),
+        schemas: doc.pointer("/target/schemas").and_then(schemas_record),
         read_refused: None,
     })
 }
@@ -3255,6 +3275,24 @@ pub fn positions_mapping_record(
             .filter(|o| logweir_core::positions_mapping::OMITTED_REASONS.contains(o))
             .map(str::to_string),
     }
+}
+
+/// A signed `target.schemas` block read as the status'
+/// [`crate::crds::restore::SchemasRecord`]: the counts, and `not_imported`
+/// only as one of the scorecard's own reasons.
+#[must_use]
+pub fn schemas_record(block: &Value) -> Option<crate::crds::restore::SchemasRecord> {
+    let block = block.as_object()?;
+    let count = |k: &str| block.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some(crate::crds::restore::SchemasRecord {
+        imported: count("imported_count"),
+        already_present: count("already_present"),
+        not_imported: block
+            .get("not_imported")
+            .and_then(Value::as_str)
+            .filter(|r| logweir_core::schema_registry::NOT_IMPORTED_REASONS.contains(r))
+            .map(str::to_string),
+    })
 }
 
 /// `target_diff.would_create` read as `(topic, partitions)` pairs — all of
@@ -3671,6 +3709,7 @@ fn restore_owner(restore: &Restore) -> Option<RunnerOwner> {
         kind: Restore::kind(&()).to_string(),
         name: restore.name_any(),
         uid: restore.uid()?,
+        workspace: crate::workspace::label_of(restore).map(str::to_string),
     })
 }
 
@@ -3779,6 +3818,7 @@ async fn evidence_fetch_pass(
     let step = crate::evidence_fetch::advance(&crate::evidence_fetch::Inputs {
         client,
         namespace,
+        workspace: crate::workspace::label_of(restore).unwrap_or_default(),
         owner: &owner,
         attempt,
         request: &request,
@@ -4562,7 +4602,6 @@ pub fn queued_status_patch(
     authorization_expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> Value {
-    let namespace = restore.namespace().unwrap_or_default();
     let deadline = match authorization_expires_at {
         Some(at) => format!(
             ". Its approval expires at {}: the queue does not extend an approval's maximum age, \
@@ -4583,7 +4622,7 @@ pub fn queued_status_patch(
                 "{}{deadline}",
                 crate::run_pool::queued_message(
                     "Restore",
-                    &namespace,
+                    crate::workspace::label_of(restore).unwrap_or_default(),
                     limit,
                     crate::run_pool::RESTORE_LIMIT_FIELD,
                 )
@@ -4613,7 +4652,6 @@ pub fn queued_status_patch(
 /// after every restart.
 #[must_use]
 pub fn admitted_status_patch(restore: &Restore, limit: u32, now: DateTime<Utc>) -> Value {
-    let namespace = restore.namespace().unwrap_or_default();
     let conditions = crate::conditions::upsert_conditions(
         restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![condition(
@@ -4623,7 +4661,7 @@ pub fn admitted_status_patch(restore: &Restore, limit: u32, now: DateTime<Utc>) 
             REASON_ADMITTED,
             &crate::run_pool::admitted_message(
                 "Restore",
-                &namespace,
+                crate::workspace::label_of(restore).unwrap_or_default(),
                 limit,
                 crate::run_pool::RESTORE_LIMIT_FIELD,
             ),
@@ -5417,6 +5455,14 @@ pub fn integrity_block(o: &ScorecardObservation) -> serde_json::Map<String, Valu
         .and_then(|pm| serde_json::to_value(pm).ok())
     {
         m.insert("positionsMapping".to_string(), v);
+    }
+    // PROD-03.2: the schemas the run imported, or why none were.
+    if let Some(v) = o
+        .schemas
+        .as_ref()
+        .and_then(|sc| serde_json::to_value(sc).ok())
+    {
+        m.insert("schemas".to_string(), v);
     }
     m
 }
@@ -6381,13 +6427,25 @@ async fn reconcile_restore_inner(
     let namespace = restore
         .namespace()
         .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
-    // What this namespace is bound to now, resolved once per pass for
-    // admission, the bundle, the argv and the environment alike.
-    let effective_policy = policies.resolve(&namespace);
+    // What this Restore's workspace is bound to now, resolved once per pass
+    // for admission, the bundle, the argv and the environment alike. An
+    // absent or unlisted label resolves to nothing: it is refused.
+    let workspace = crate::workspace::installed()
+        .of(restore)
+        .map_err(|refusal| RestoreError::Refused(refusal.reason(), refusal.to_string()))?;
+    let effective_policy = policies.resolve(workspace.as_str());
     // The Job is named after the CR, verbatim.
     let job_name = name.clone();
     let jobs: Api<Job> = Api::namespaced(client.clone(), &namespace);
     let restores: Api<Restore> = Api::namespaced(client.clone(), &namespace);
+
+    // PROD-07.2: an `Interrupted` restore's reconcile and cleanup, and a
+    // cancel.
+    if let Some(outcome) =
+        restore_interruption::before(restore, client, &namespace, now, runner, &reads).await?
+    {
+        return Ok(outcome);
+    }
 
     // STEP 0. The object's own name, before any `POST`.
     if name.len() > crate::slot::NAME_LIMIT {
@@ -6714,6 +6772,12 @@ async fn reconcile_restore_inner(
         .await?;
 
         let mut desired_job = job::build(&spec);
+        // PROD-07.2: the run's id, named here so its targets record can be
+        // found after its pod is gone, and a grace for its stop.
+        restore_interruption::prepare_run_job(
+            &mut desired_job,
+            restore_interruption::new_run_id(now).as_deref(),
+        );
         // The Job's line token, made now and kept nowhere but in the Job; a
         // re-created Job gets another. Never logged (see
         // `crate::job::new_line_token`).
@@ -6790,8 +6854,9 @@ async fn reconcile_restore_inner(
         });
     };
 
-    // STEP 2. Running.
-    if !backup::job_finished(&job) {
+    // STEP 2. Running. (A `Restore` an interruption ended may keep a
+    // suspended run Job: it is terminal, below.)
+    if !backup::job_finished(&job) && !status_is_terminal(restore) {
         // The same derivation the `Backup` twin calls, so a runner that cannot
         // mount its approval bundle is visible before its deadline.
         let stored = restore.status.as_ref().and_then(|s| s.progress.as_ref());
@@ -6925,17 +6990,29 @@ async fn reconcile_restore_inner(
              state for the runner container, or more than one pod claimed the Job and none was \
              read. A terminal status rather than watching forever, and no invented exit code"
         );
-        patch_status_if_changed(
-            &restores,
-            restore,
-            &name,
-            diagnostics::apply_finished(
-                crashed_status_patch(restore, terminal_state, &job_name, now),
-                restore.status.as_ref().and_then(|s| s.progress.as_ref()),
-                now,
-            ),
-        )
-        .await?;
+        let crashed = diagnostics::apply_finished(
+            crashed_status_patch(restore, terminal_state, &job_name, now),
+            restore.status.as_ref().and_then(|s| s.progress.as_ref()),
+            now,
+        );
+        // PROD-07.2: a run that may have started is Interrupted, and the
+        // reconcile decides whether it created anything.
+        if let Some(patch) =
+            restore_interruption::after_crash(restore, &job, terminal_state, crashed.clone(), now)
+        {
+            patch_status_if_changed(&restores, restore, &name, patch).await?;
+            return Ok(RestoreOutcome {
+                job_name,
+                created: false,
+                admission: None,
+                exit_code: None,
+                terminal_state: Some(restore_interruption::PHASE_INTERRUPTED.to_string()),
+                keys: RestoreEvidenceKeys::default(),
+                ttl_patched: false,
+                requeue: Requeue::After(1),
+            });
+        }
+        patch_status_if_changed(&restores, restore, &name, crashed).await?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
@@ -6948,21 +7025,72 @@ async fn reconcile_restore_inner(
         });
     };
 
+    finish_job(
+        restore,
+        client,
+        &namespace,
+        &job,
+        pod,
+        exit_code,
+        &reads,
+        now,
+        runner,
+        Finish::Run,
+    )
+    .await
+}
+
+/// Which Job's end [`finish_job`] reads (PROD-07.2).
+enum Finish<'a> {
+    /// The run Job's: an exit that signed nothing after the run created its
+    /// targets is `Interrupted` (`restore_interruption::after_exit`).
+    Run,
+    /// An interrupted run's reconcile Job's
+    /// (`restore_interruption::ReconcileEnd::adjust`).
+    Reconcile(&'a restore_interruption::ReconcileEnd),
+}
+
+/// **STEP 3: a Job whose runner's exit code is known** — the run Job, or a
+/// reconcile Job (PROD-07.2). Read the log, the evidence keys and the
+/// scorecard; write the terminal status, the Job's TTL and the verdict.
+#[allow(clippy::too_many_arguments)]
+async fn finish_job(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    job: &Job,
+    pod: &Pod,
+    exit_code: i32,
+    reads: &Reread<'_>,
+    now: DateTime<Utc>,
+    runner: &job::RunnerImage,
+    finish: Finish<'_>,
+) -> Result<RestoreOutcome, RestoreError> {
+    let Reread {
+        scorecard,
+        verify,
+        archive_url,
+        memory,
+    } = *reads;
+    let name = restore.name_any();
+    let job_name = job.name_any();
+    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+    let restores: Api<Restore> = Api::namespaced(client.clone(), namespace);
     // STEP 3. The code is known. Read the log through the `pods/log`
     // subresource, the only route to a runner's stdout (interface I28), with
     // THE terminal bound (`runner_log::TERMINAL`) at every exit code.
     let pod_name = pod.name_any();
-    let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     // The Job's own line token, and by which flag (FX-43): whose lines are
     // read at all.
-    let job_token = job::job_token(&job);
+    let job_token = job::job_token(job);
     // A refused run's read failure is an answer (see the `Backup` twin). This
     // `if` is the only gate: every other exit code's failure is still a
     // reconcile error.
     let (raw, mut runner_reason) = if exit_code == 3 {
         let read = crate::refusal::read(
             &pods,
-            &namespace,
+            namespace,
             &pod_name,
             logweir_core::refusal_detail::RefusingRun::Restore,
             &job_token,
@@ -7035,7 +7163,7 @@ async fn reconcile_restore_inner(
     let routed = backup::evidence_source_for(
         restore.spec.evidence_destination_ref.as_ref(),
         client,
-        &namespace,
+        namespace,
         now,
     )
     .await
@@ -7164,6 +7292,43 @@ async fn reconcile_restore_inner(
         restore.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
+    // PROD-07.2: a run that signed nothing after it created its targets is
+    // `Interrupted` (its Job keeps no TTL: the reconcile copies it); a
+    // reconcile's end is written as the reconcile's.
+    let terminal = match finish {
+        Finish::Run => {
+            if let Some(patch) = restore_interruption::after_exit(
+                restore,
+                job,
+                exit_code,
+                log,
+                terminal.clone(),
+                now,
+            ) {
+                warn!(
+                    restore = %name,
+                    namespace = %namespace,
+                    job = %job_name,
+                    exit_code,
+                    "the run ended without a signed scorecard after it created its target \
+                     topics; the Restore is Interrupted and a reconcile Job verifies what it left"
+                );
+                patch_status_if_changed(&restores, restore, &name, patch).await?;
+                return Ok(RestoreOutcome {
+                    job_name,
+                    created: false,
+                    admission: None,
+                    exit_code: Some(exit_code),
+                    terminal_state: Some(restore_interruption::PHASE_INTERRUPTED.to_string()),
+                    keys,
+                    ttl_patched: false,
+                    requeue: Requeue::After(1),
+                });
+            }
+            terminal
+        }
+        Finish::Reconcile(end) => end.adjust(restore, terminal, &keys),
+    };
     // Where the object now stands. The verification patch below is this
     // pass's second write; preconditioned on the version the watch delivered
     // it would be refused, and a terminal `Restore` is never reconciled again.
@@ -7347,7 +7512,7 @@ async fn reconcile_restore_inner(
             &stored,
             &at,
             client,
-            &namespace,
+            namespace,
             &name,
             1,
             &evidence_from,
@@ -7554,6 +7719,11 @@ async fn reconcile_with_trust(
     approval_policies: crate::approval_policy::PolicySource,
     objects: reflector::Store<Restore>,
 ) -> Result<Action, RestoreError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, restore.as_ref()).await? {
+        return Ok(action);
+    }
     if synced.load(Ordering::Relaxed) {
         let value = serde_json::to_value(&*restore).ok();
         let status = value.as_ref().and_then(|v| v.get("status"));
@@ -7655,40 +7825,30 @@ pub async fn controller(
     runner_image: job::RunnerImage,
     approval_policies: crate::approval_policy::PolicySource,
 ) {
-    // One watch per watched namespace: `crate::scope` is the whole cluster
-    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
-    // then this reconciler runs once per namespace with an `Api::namespaced`
-    // watch, the only shape the scoped chart's RoleBindings permit.
-    //
     // The `TrustPolicy` store is built once and shared by every copy: the kind
     // is cluster-scoped, so a reflector per namespace would be N identical
     // cluster-wide watches.
     let policies = crate::trust::spawn_policy_reflector(&client);
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(
-            client.clone(),
-            archive.clone(),
-            runner_image.clone(),
-            policies.clone(),
-            approval_policies.clone(),
-            namespace,
-        )
-    })
+    controller_in(
+        client.clone(),
+        archive.clone(),
+        runner_image.clone(),
+        policies.clone(),
+        approval_policies.clone(),
+    )
     .await;
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     archive: Option<Arc<Store>>,
     runner_image: job::RunnerImage,
     shared: crate::trust::SharedPolicies,
     approval_policies: crate::approval_policy::PolicySource,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<Restore> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<Restore> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let client_for_watch = client.clone();
     let ctx = Arc::new(Context {
         client,

@@ -91,7 +91,7 @@ fn console_with_key(pkcs8: &str, document: &str, binding: &str) -> Console {
     let key = SigningKey::from_pkcs8_pem(pkcs8).expect("the key parses");
     let public = key.verifying_key();
     let policies =
-        ApprovalPolicySet::parse(&format!("{document}namespaces:\n  {NS_A}: {binding}\n"))
+        ApprovalPolicySet::parse(&format!("{document}workspaces:\n  {NS_A}: {binding}\n"))
             .expect("valid");
     Console {
         settings: Arc::new(ApprovalSettings {
@@ -225,7 +225,7 @@ struct Requested {
 /// key and the approval name of several requests in one namespace apart.
 async fn request_as(app: &SharedApp, who: &Session, tag: &str, body: Value) -> TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/restores"),
+        &format!("/api/v1/workspaces/{NS_A}/restores"),
         &who.cookie,
         Some(&who.csrf),
         Some(&format!("p162-request-{tag}")),
@@ -256,7 +256,7 @@ async fn requested(app: &SharedApp, subject: &str, tag: &str) -> Requested {
 
 async fn view(app: &SharedApp, who: &Session, restore: &str) -> TestResponse {
     app.get(
-        &format!("/api/v1/namespaces/{NS_A}/restores/{restore}/approval-request"),
+        &format!("/api/v1/workspaces/{NS_A}/restores/{restore}/approval-request"),
         &who.cookie,
     )
     .await
@@ -274,7 +274,7 @@ async fn shown(app: &SharedApp, who: &Session, restore: &str) -> String {
 
 async fn click_with(app: &SharedApp, who: &Session, restore: &str, body: &Value) -> TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/restores/{restore}/console-approval"),
+        &format!("/api/v1/workspaces/{NS_A}/restores/{restore}/console-approval"),
         &who.cookie,
         Some(&who.csrf),
         None,
@@ -441,7 +441,7 @@ fn capture() -> (Buffer, tracing::subscriber::DefaultGuard) {
 /// **Two people, one click, no key.** alice requests; bob signs in, is shown
 /// the request from its verified bytes, and clicks Approve. The stored
 /// Approval is the request's document with `approver`, `approvedAt` and
-/// `formatVersion` 2.2.0 added and NOTHING else changed, signed by the
+/// this build's `formatVersion` and NOTHING else changed, signed by the
 /// console key — and the controller's own verdict function accepts it and
 /// names bob.
 ///
@@ -453,10 +453,13 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
     let (log, _guard) = capture();
     let (app, console) = pair_app();
     let r = requested(&app, "alice", "happy").await;
-    // The request: today's governed confirmation, byte for byte a 2.0.0
-    // document, and nothing under the Restore's approvalRef yet.
+    // The request: today's governed confirmation, in this build's format,
+    // and nothing under the Restore's approvalRef yet.
     let (request, request_bytes, request_sidecar) = stored_document(&app, &r.confirmation);
-    assert!(request_bytes.starts_with("{\"formatVersion\":\"2.0.0\","));
+    assert!(request_bytes.starts_with(&format!(
+        "{{\"formatVersion\":\"{}\",",
+        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+    )));
     assert_eq!(request.requester.principal_id(), format!("{ISSUER}#alice"));
     assert!(request.approver.is_none() && request.approved_at.is_none());
     assert!(verifies(&request_bytes, &request_sidecar, &console.public));
@@ -535,7 +538,10 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
     assert_eq!(approvals_posted(&app.app.fake), before + 1);
 
     let (approved, bytes, sidecar) = stored_document(&app, &r.approval);
-    assert!(bytes.starts_with("{\"formatVersion\":\"2.2.0\","));
+    assert!(bytes.starts_with(&format!(
+        "{{\"formatVersion\":\"{}\",",
+        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+    )));
     assert!(verifies(&bytes, &sidecar, &console.public));
     assert_eq!(
         approved.approver,
@@ -568,7 +574,8 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
         .expect("the Restore");
     let expected = ExpectedSubject {
         kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
-        namespace: NS_A.into(),
+        namespace: support::INSTALL_NS.into(),
+        workspace: NS_A.into(),
         name: r.restore.clone(),
         uid: restore["metadata"]["uid"].as_str().expect("uid").into(),
         plan_hash: logweir_core::ids::sha256_prefixed(
@@ -589,6 +596,25 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
     .expect("the controller verifies what the console signed");
     assert_eq!(verdict.approver, format!("{ISSUER}#bob"));
     assert_eq!(verdict.matched_key_id, console.key().key_id());
+    // PROD-19.1: the console signs the install's namespace and the path's
+    // workspace; the same bytes do not authorise the Restore relabelled into
+    // another workspace.
+    assert_eq!(approved.subject.namespace, support::INSTALL_NS);
+    assert_eq!(approved.subject.workspace, NS_A);
+    let relabelled = ExpectedSubject {
+        workspace: support::NS_B.into(),
+        ..expected.clone()
+    };
+    let crossed = weirkeeper::controllers::approval::evaluate_authorization_v2(
+        bytes.as_bytes(),
+        sidecar.as_bytes(),
+        &trust_of(&console),
+        app.app.clock.now(),
+        &relabelled,
+        &console.policy(),
+    )
+    .expect_err("a team-a approval never authorises a team-b Restore");
+    assert_eq!(crossed.reason(), "AuthorizationSubjectMismatch");
     // ... and it refuses the REQUEST offered in its place.
     let pending = weirkeeper::controllers::approval::evaluate_authorization_v2(
         request_bytes.as_bytes(),
@@ -1648,7 +1674,7 @@ async fn a_cross_site_request_or_a_get_approves_nothing() {
     let sha = stored_sha(&app, &r.confirmation);
     let bob = signed_in(&app, "bob", &["approvers"]);
     let path = format!(
-        "/api/v1/namespaces/{NS_A}/restores/{}/console-approval",
+        "/api/v1/workspaces/{NS_A}/restores/{}/console-approval",
         r.restore
     );
     let body = json!({"confirmationSha256": sha}).to_string();
@@ -1773,7 +1799,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
         },
     );
     let policy = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/approval-policy"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/approval-policy"))
         .await
         .json()["item"]
         .clone();
@@ -1781,7 +1807,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
     assert_eq!(policy["consoleApprovalAvailable"], false, "{policy}");
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("p162-local-admin-01"),
             &restore_request("approval-la").to_string(),
         )
@@ -1801,7 +1827,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
     let r = requested(&shared, "alice", "la-click").await;
     let item = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/restores/{}/approval-request",
+            "/api/v1/workspaces/{NS_A}/restores/{}/approval-request",
             r.restore
         ))
         .await
@@ -1813,7 +1839,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
     let clicked = app
         .post(
             &format!(
-                "/api/v1/namespaces/{NS_A}/restores/{}/console-approval",
+                "/api/v1/workspaces/{NS_A}/restores/{}/console-approval",
                 r.restore
             ),
             None,
@@ -1866,7 +1892,7 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
         assert_eq!(approvals_posted(&app.app.fake), before, "{binding}");
         let policy = app
             .get(
-                &format!("/api/v1/namespaces/{NS_A}/approval-policy"),
+                &format!("/api/v1/workspaces/{NS_A}/approval-policy"),
                 &bob.cookie,
             )
             .await
@@ -1902,7 +1928,7 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
     let bob = signed_in(&app, "bob", &["approvers"]);
     let submitted = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{}/approval", r.restore),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{}/approval", r.restore),
             &bob.cookie,
             Some(&bob.csrf),
             None,
@@ -1921,7 +1947,7 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
     assert_eq!(record["failureCode"], "countersignature_not_accepted");
     let policy = app
         .get(
-            &format!("/api/v1/namespaces/{NS_A}/approval-policy"),
+            &format!("/api/v1/workspaces/{NS_A}/approval-policy"),
             &bob.cookie,
         )
         .await
@@ -2018,7 +2044,10 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
         confirmation: "approval-original-confirmation".into(),
     };
     let (request, bytes, _) = stored_document(&app, &r.confirmation);
-    assert!(bytes.starts_with("{\"formatVersion\":\"2.1.0\","));
+    assert!(bytes.starts_with(&format!(
+        "{{\"formatVersion\":\"{}\",",
+        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+    )));
     assert_eq!(request.approval_subject.as_deref(), Some("originalName"));
     assert!(request.original_name_confirmation.is_none());
 
@@ -2052,7 +2081,10 @@ async fn an_original_name_restore_is_shown_with_its_topics_and_approved_as_exact
     .await;
     assert_eq!(clicked.status, 201, "{}", clicked.text());
     let (approved, bytes, sidecar) = stored_document(&app, &r.approval);
-    assert!(bytes.starts_with("{\"formatVersion\":\"2.2.0\","));
+    assert!(bytes.starts_with(&format!(
+        "{{\"formatVersion\":\"{}\",",
+        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+    )));
     assert_eq!(approved.approval_subject.as_deref(), Some("originalName"));
     assert!(approved.original_name_confirmation.is_none());
     assert_eq!(approved.approver.expect("approver").subject, "bob");
@@ -2319,11 +2351,11 @@ fn the_console_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
     for (name, document) in [
         (
             "internal-words.yaml",
-            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: Ordinary\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: Ordinary\n    approverSignature: Console\nworkspaces:\n  team-a: p\n",
         ),
         (
             "operator-words.yaml",
-            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: confirm\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: confirm\n    approverSignature: Console\nworkspaces:\n  team-a: p\n",
         ),
     ] {
         let file = dir.join(name);
@@ -2338,8 +2370,8 @@ fn the_console_decides_from_the_table_and_refuses_a_pair_that_is_no_row() {
     }
     // NEGATIVE CONTROL: the two-person document, in either spelling, loads.
     for document in [
-        "policies:\n  - name: p\n    mode: two-person\nnamespaces:\n  team-a: p\n",
-        "policies:\n  - name: p\n    mode: Governed\n    approverSignature: Console\nnamespaces:\n  team-a: p\n",
+        "policies:\n  - name: p\n    mode: two-person\nworkspaces:\n  team-a: p\n",
+        "policies:\n  - name: p\n    mode: Governed\n    approverSignature: Console\nworkspaces:\n  team-a: p\n",
     ] {
         let file = dir.join("two-person.yaml");
         std::fs::write(&file, document).expect("written");

@@ -116,6 +116,7 @@ const BLANK: WizardValues = {
   timeBasis: false,
   coverage: "sampled",
   completeMaxRecords: "",
+  rateLimit: "",
   target: "orders-dr",
   naming: "prefix",
   prefix: "",
@@ -387,7 +388,7 @@ describe("approval routing on submit", () => {
     expect(body.target.topicNaming).toEqual({ prefix: "", originalName: true });
     expect(body.coverage).toBe("complete");
   });
-  it("OD-10: a namespace with a second person (or the strict or legacy route) asks for no typed names", async () => {
+  it("OD-10: a workspace with a second person (or the strict or legacy route) asks for no typed names", async () => {
     for (const p of [pair, strict, legacy, null]) {
       expect(typedConfirmationRequired(p, originalValues)).toBe(false);
       expect(typedTopicsProblem(p, originalValues, ["orders"])).toBeNull();
@@ -396,7 +397,7 @@ describe("approval routing on submit", () => {
     // And an ordinary-name restore under confirm sends none either.
     expect(typedConfirmationRequired(confirm, { ...originalValues, naming: "prefix" })).toBe(false);
   });
-  it("the ticket travels only under an explicit binding; an unbound namespace signs nothing", async () => {
+  it("the ticket travels only under an explicit binding; an unbound workspace signs nothing", async () => {
     expect((await bodyFor(pair, { ticket: " CHG-1 " })).ticket).toBe("CHG-1");
     expect((await bodyFor(legacy, { ticket: "CHG-1" })).ticket).toBeUndefined();
     expect((await bodyFor(null, { ticket: "CHG-1" })).ticket).toBeUndefined();

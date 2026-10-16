@@ -2,4 +2,4 @@
 approvalPolicy:
   policies:
     - {name: prod, mode: Governed, maxAge: 900}
-  namespaces: {}
+  workspaces: {}

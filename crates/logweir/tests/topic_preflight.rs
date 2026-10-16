@@ -73,6 +73,7 @@ fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec 
             default_replication_factor: 1,
             teardown: "delete".into(),
             topic_configuration: None,
+            schema_registry: None,
         },
         sample: SampleSpec {
             window_start: window_end - chrono::Duration::hours(1),

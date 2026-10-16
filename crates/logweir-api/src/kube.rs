@@ -54,6 +54,18 @@
 //! closed [`SpecRule`] value. What leaves is a constant compiled into this
 //! binary, never the API server's text.
 //!
+//! ONE NAMESPACE, WORKSPACES BY LABEL (PROD-19.1). The adapter holds the
+//! install's one namespace and no method takes a namespace. Every product
+//! method takes the workspace (`ws`) instead, and the label
+//! [`weirkeeper::workspace::LABEL`] is the boundary: [`KubeAdapter::list`]
+//! adds it to the selector, so paging stays on the API server;
+//! [`KubeAdapter::get`] answers another workspace's object as `NotFound`; and
+//! [`KubeAdapter::create`] and [`KubeAdapter::create_credential`] set it,
+//! overwriting any value the caller put there. The four merge patches take
+//! `ws` and read the object through `get` first, so another workspace's
+//! object is `NotFound` before anything is written: a resourceVersion is a
+//! request field, and it proves nothing about which object it came from.
+//!
 //! NO INBOUND HEADER IS FORWARDED. Requests are built by `kube::Api` from typed
 //! parameters; nothing from the HTTP request reaches them but validated names.
 
@@ -769,46 +781,92 @@ pub struct ScheduleSpecEdit {
     pub suspend: bool,
 }
 
+/// The label selector that keeps a list in one workspace, with the caller's
+/// own equality selector after it.
+fn workspace_selector(ws: &str, page: &PageRequest) -> String {
+    let mine = format!("{}={ws}", weirkeeper::workspace::LABEL);
+    match &page.label_selector {
+        Some(selector) => format!("{mine},{selector}"),
+        None => mine,
+    }
+}
+
+/// Whether an object carries the workspace label `ws`.
+fn in_workspace(meta: &ObjectMeta, ws: &str) -> bool {
+    meta.labels
+        .as_ref()
+        .and_then(|labels| labels.get(weirkeeper::workspace::LABEL))
+        .is_some_and(|value| value == ws)
+}
+
+/// Place an object about to be created: the install's namespace and the
+/// workspace label, each overwriting any value the caller set.
+fn place(meta: &mut ObjectMeta, namespace: &str, ws: &str) {
+    meta.namespace = Some(namespace.to_string());
+    meta.labels
+        .get_or_insert_with(std::collections::BTreeMap::new)
+        .insert(weirkeeper::workspace::LABEL.to_string(), ws.to_string());
+}
+
 /// The adapter.
 #[derive(Clone)]
 pub struct KubeAdapter {
     client: kube::Client,
+    namespace: String,
     deadline: Duration,
 }
 
 impl KubeAdapter {
-    /// An adapter over a built client with the standard deadline.
+    /// An adapter over a built client, in the install's one namespace, with
+    /// the standard deadline.
     #[must_use]
-    pub fn new(client: kube::Client) -> Self {
-        Self {
-            client,
-            deadline: KUBE_DEADLINE,
-        }
+    pub fn new(client: kube::Client, namespace: impl Into<String>) -> Self {
+        Self::with_deadline(client, namespace, KUBE_DEADLINE)
     }
 
     /// An adapter with a different deadline. Tests only shorten it.
     #[must_use]
-    pub fn with_deadline(client: kube::Client, deadline: Duration) -> Self {
-        Self { client, deadline }
+    pub fn with_deadline(
+        client: kube::Client,
+        namespace: impl Into<String>,
+        deadline: Duration,
+    ) -> Self {
+        Self {
+            client,
+            namespace: namespace.into(),
+            deadline,
+        }
     }
 
-    /// One page of a namespaced list.
+    /// The install's namespace.
+    #[must_use]
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    fn api<K>(&self) -> Api<K>
+    where
+        K: kube::Resource<DynamicType = (), Scope = NamespaceResourceScope>,
+    {
+        Api::namespaced(self.client.clone(), &self.namespace)
+    }
+
+    /// One page of one workspace's objects of a kind.
     ///
     /// # Errors
     ///
     /// [`KubeFailure`].
     pub async fn list<K: ProductResource>(
         &self,
-        namespace: &str,
+        ws: &str,
         page: &PageRequest,
     ) -> Result<ObjectList<K>, KubeFailure> {
-        let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
-        let mut params = ListParams::default().limit(page.limit);
+        let api: Api<K> = self.api();
+        let mut params = ListParams::default()
+            .limit(page.limit)
+            .labels(&workspace_selector(ws, page));
         if let Some(token) = &page.continue_token {
             params = params.continue_token(token);
-        }
-        if let Some(selector) = &page.label_selector {
-            params = params.labels(selector);
         }
         // The verb label is `list_page` and not the bare word: that word is a
         // denied engine subcommand token, and `scripts/check-no-oso.sh`'s
@@ -833,49 +891,84 @@ impl KubeAdapter {
     /// [`KubeFailure`].
     pub async fn list_untyped<K: ProductResource>(
         &self,
-        namespace: &str,
+        ws: &str,
         page: &PageRequest,
     ) -> Result<ObjectList<Untyped<K>>, KubeFailure> {
-        let api: Api<Untyped<K>> = Api::namespaced(self.client.clone(), namespace);
-        let mut params = ListParams::default().limit(page.limit);
+        let api: Api<Untyped<K>> = self.api();
+        let mut params = ListParams::default()
+            .limit(page.limit)
+            .labels(&workspace_selector(ws, page));
         if let Some(token) = &page.continue_token {
             params = params.continue_token(token);
-        }
-        if let Some(selector) = &page.label_selector {
-            params = params.labels(selector);
         }
         self.bounded("list_page", K::plural(&()).as_ref(), api.list(&params))
             .await
     }
 
-    /// One object by name.
+    /// One object of workspace `ws` by name. An object of another workspace,
+    /// or one with no workspace label, is `NotFound`, exactly like a missing
+    /// one.
     ///
     /// # Errors
     ///
     /// [`KubeFailure`], `NotFound` included.
-    pub async fn get<K: ProductResource>(
-        &self,
-        namespace: &str,
-        name: &str,
-    ) -> Result<K, KubeFailure> {
-        let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
-        self.bounded("get", K::plural(&()).as_ref(), api.get(name))
-            .await
+    pub async fn get<K: ProductResource>(&self, ws: &str, name: &str) -> Result<K, KubeFailure> {
+        let api: Api<K> = self.api();
+        let object = self
+            .bounded("get", K::plural(&()).as_ref(), api.get(name))
+            .await?;
+        if in_workspace(object.meta(), ws) {
+            Ok(object)
+        } else {
+            Err(KubeFailure::NotFound)
+        }
     }
 
-    /// Create one object.
+    /// Whether an object of kind `K` named `name` exists in ANOTHER workspace
+    /// (or carries no workspace label). Names are unique per install, so the
+    /// routes use this to refuse a typed name another workspace holds and a
+    /// create body that references another workspace's object. Untyped: only
+    /// the label is read, so a stored object this build cannot decode still
+    /// answers.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`] other than `NotFound`.
+    pub async fn held_elsewhere<K: ProductResource>(
+        &self,
+        ws: &str,
+        name: &str,
+    ) -> Result<bool, KubeFailure> {
+        // A body's name is not validated yet when the reference checks run:
+        // nothing that is not an object name ever reaches the request path
+        // (`../`, `/`, `?`). Such a name is held by nobody; the route's own
+        // validation refuses it.
+        if !crate::validate::is_dns_subdomain(name) {
+            return Ok(false);
+        }
+        let api: Api<Untyped<K>> = self.api();
+        match self
+            .bounded("get", K::plural(&()).as_ref(), api.get(name))
+            .await
+        {
+            Ok(object) => Ok(!in_workspace(&object.metadata, ws)),
+            Err(KubeFailure::NotFound) => Ok(false),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Create one object in workspace `ws`. The label is set here, over any
+    /// value the object already carries. Names are unique per install, so a
+    /// name another workspace holds is `AlreadyExists`.
     ///
     /// # Errors
     ///
     /// [`KubeFailure`], `AlreadyExists` included.
-    pub async fn create<K: ProductResource>(
-        &self,
-        namespace: &str,
-        object: &K,
-    ) -> Result<K, KubeFailure> {
+    pub async fn create<K: ProductResource>(&self, ws: &str, object: &K) -> Result<K, KubeFailure> {
         let mut object = object.clone();
+        place(object.meta_mut(), &self.namespace, ws);
         attribute(object.meta_mut())?;
-        let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
+        let api: Api<K> = self.api();
         let params = PostParams {
             dry_run: false,
             field_manager: Some(FIELD_MANAGER.to_string()),
@@ -901,12 +994,13 @@ impl KubeAdapter {
     /// [`KubeFailure`], `Conflict` for a stale version.
     pub async fn set_schedule_suspension(
         &self,
-        namespace: &str,
+        ws: &str,
         name: &str,
         suspend: bool,
         expected_resource_version: &str,
     ) -> Result<BackupSchedule, KubeFailure> {
-        let api: Api<BackupSchedule> = Api::namespaced(self.client.clone(), namespace);
+        self.get::<BackupSchedule>(ws, name).await?;
+        let api: Api<BackupSchedule> = self.api();
         let patch = serde_json::json!({
             "metadata": { "resourceVersion": expected_resource_version },
             "spec": { "suspend": suspend },
@@ -951,12 +1045,13 @@ impl KubeAdapter {
     /// [`KubeFailure::RuleRefused`] for one of the CRD's own rules.
     pub async fn set_schedule_policy(
         &self,
-        namespace: &str,
+        ws: &str,
         name: &str,
         edit: &ScheduleSpecEdit,
         expected_resource_version: &str,
     ) -> Result<BackupSchedule, KubeFailure> {
-        let api: Api<BackupSchedule> = Api::namespaced(self.client.clone(), namespace);
+        self.get::<BackupSchedule>(ws, name).await?;
+        let api: Api<BackupSchedule> = self.api();
         // EVERY OPTIONAL KEY IS SPELLED OUT, `null` INCLUDED, AND SO IS EVERY
         // OPTIONAL KEY INSIDE A NESTED OBJECT. A JSON merge patch merges an
         // object KEY BY KEY: patching `archive` with `{url}` alone leaves a
@@ -1054,13 +1149,14 @@ impl KubeAdapter {
     /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
     pub async fn set_destination_access(
         &self,
-        namespace: &str,
+        ws: &str,
         name: &str,
         access: &serde_json::Value,
         ca_bundle: Option<serde_json::Value>,
         expected_resource_version: &str,
     ) -> Result<BackupDestination, KubeFailure> {
-        let api: Api<BackupDestination> = Api::namespaced(self.client.clone(), namespace);
+        self.get::<BackupDestination>(ws, name).await?;
+        let api: Api<BackupDestination> = self.api();
         let mut spec = serde_json::Map::new();
         spec.insert("access".to_string(), access.clone());
         if let Some(bundle) = ca_bundle {
@@ -1099,11 +1195,12 @@ impl KubeAdapter {
     /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
     pub async fn request_check_cancel<K: CancellableCheck>(
         &self,
-        namespace: &str,
+        ws: &str,
         name: &str,
         expected_resource_version: &str,
     ) -> Result<K, KubeFailure> {
-        let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
+        self.get::<K>(ws, name).await?;
+        let api: Api<K> = self.api();
         let patch = serde_json::json!({
             "metadata": { "resourceVersion": expected_resource_version },
             "spec": { "cancelRequested": true },
@@ -1115,6 +1212,45 @@ impl KubeAdapter {
         self.bounded(
             "patch",
             K::plural(&()).as_ref(),
+            api.patch(name, &params, &Patch::Merge(&patch)),
+        )
+        .await
+    }
+
+    /// **PROD-07.2: ask the controller to cancel a `Restore`, or to clean up
+    /// an interrupted one**: the one annotation `key` (`weirkeeper`'s
+    /// `CANCEL_ANNOTATION` or `CLEANUP_ANNOTATION`) set to `by`, under an
+    /// optimistic-concurrency precondition. Metadata only: the sealed `spec`
+    /// is never touched.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`, `NotFound`
+    /// for a restore of another workspace (read through [`Self::get`] first,
+    /// as every other patch is).
+    pub async fn request_restore(
+        &self,
+        ws: &str,
+        name: &str,
+        expected_resource_version: &str,
+        key: &str,
+        by: &str,
+    ) -> Result<Restore, KubeFailure> {
+        self.get::<Restore>(ws, name).await?;
+        let api: Api<Restore> = self.api();
+        let patch = serde_json::json!({
+            "metadata": {
+                "resourceVersion": expected_resource_version,
+                "annotations": { key: by },
+            },
+        });
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_string()),
+            ..PatchParams::default()
+        };
+        self.bounded(
+            "patch",
+            "restores",
             api.patch(name, &params, &Patch::Merge(&patch)),
         )
         .await
@@ -1185,14 +1321,36 @@ impl KubeAdapter {
     ///
     /// # Errors
     ///
-    /// [`KubeFailure`], `NotFound` when the owner was collected.
+    /// THE OWNER IS THE WORKSPACE BOUNDARY. A result document carries no
+    /// workspace label; it belongs to the object `owner_uid` names, which the
+    /// caller read through [`KubeAdapter::get`] in its workspace. A document
+    /// whose controlling owner is another object (a check's), and which is
+    /// not labelled with that uid as a catalog page (a catalog's, whose
+    /// controlling owner is the sync Job), is `NotFound`, exactly like a
+    /// missing one.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `NotFound` when the owner was collected or the
+    /// document is another object's.
     pub async fn get_result_document(
         &self,
-        namespace: &str,
+        owner_uid: &str,
         name: &str,
     ) -> Result<ResultDocument, KubeFailure> {
-        let api: Api<ResultDocument> = Api::namespaced(self.client.clone(), namespace);
-        self.bounded("get", "configmaps", api.get(name)).await
+        let api: Api<ResultDocument> = self.api();
+        let document = self.bounded("get", "configmaps", api.get(name)).await?;
+        let catalog_page = document
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(weirkeeper::catalog_view::LABEL_CATALOG_UID))
+            .is_some_and(|uid| uid == owner_uid);
+        if document.controller_owner_uid() == Some(owner_uid) || catalog_page {
+            Ok(document)
+        } else {
+            Err(KubeFailure::NotFound)
+        }
     }
 
     /// Read the installation's public identity ConfigMap, for the
@@ -1240,16 +1398,17 @@ impl KubeAdapter {
     /// `AlreadyExists`.
     pub async fn credential_name_is_taken(
         &self,
-        namespace: &str,
         probe: &WriteOnlyCredential,
     ) -> Result<bool, KubeFailure> {
-        let api: Api<WriteOnlyCredential> = Api::namespaced(self.client.clone(), namespace);
+        let mut probe = probe.clone();
+        probe.metadata.namespace = Some(self.namespace.clone());
+        let api: Api<WriteOnlyCredential> = self.api();
         let params = PostParams {
             dry_run: true,
             field_manager: Some(FIELD_MANAGER.to_string()),
         };
         match self
-            .bounded("create", "secrets", api.create(&params, probe))
+            .bounded("create", "secrets", api.create(&params, &probe))
             .await
         {
             Ok(_) => Ok(false),
@@ -1258,7 +1417,8 @@ impl KubeAdapter {
         }
     }
 
-    /// Create one write-only credential Secret and keep only its identity.
+    /// Create one write-only credential Secret in workspace `ws` and keep only
+    /// its identity. The label is set here, as [`KubeAdapter::create`] does.
     ///
     /// THE ANSWER IS TWO STRINGS. The API server echoes `data` on a create;
     /// [`WriteOnlyCredential`]'s `data` is `skip_deserializing`, so the echo is
@@ -1272,12 +1432,13 @@ impl KubeAdapter {
     /// no verb that could.
     pub async fn create_credential(
         &self,
-        namespace: &str,
+        ws: &str,
         secret: &WriteOnlyCredential,
     ) -> Result<CreatedCredential, KubeFailure> {
         let mut secret = secret.clone();
+        place(&mut secret.metadata, &self.namespace, ws);
         attribute(&mut secret.metadata)?;
-        let api: Api<WriteOnlyCredential> = Api::namespaced(self.client.clone(), namespace);
+        let api: Api<WriteOnlyCredential> = self.api();
         let params = PostParams {
             dry_run: false,
             field_manager: Some(FIELD_MANAGER.to_string()),
@@ -1341,21 +1502,22 @@ impl KubeAdapter {
     }
 
     /// Readiness: the API server answers and `kafkaclusters` can be listed in
-    /// `namespace` with this service's identity.
+    /// the install's namespace with this service's identity.
     ///
     /// # Errors
     ///
     /// [`KubeFailure`].
-    pub async fn probe(&self, namespace: &str) -> Result<(), KubeFailure> {
+    pub async fn probe(&self) -> Result<(), KubeFailure> {
         self.bounded("version", "version", self.client.apiserver_version())
             .await?;
-        let page = PageRequest {
-            limit: 1,
-            ..PageRequest::default()
-        };
-        self.list::<KafkaCluster>(namespace, &page)
-            .await
-            .map(|_| ())
+        let api: Api<KafkaCluster> = self.api();
+        self.bounded(
+            "list_page",
+            <KafkaCluster as kube::Resource>::plural(&()).as_ref(),
+            api.list(&ListParams::default().limit(1)),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn bounded<T>(

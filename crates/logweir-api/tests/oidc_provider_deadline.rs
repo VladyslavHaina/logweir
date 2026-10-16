@@ -878,11 +878,11 @@ fn shared_server(issuer: &str) -> (Server, u16, Scratch) {
                  \"https://console.test\"\nuiDirectory: {ui}\n\
                  oidc:\n  issuer: {issuer}\n  clientId: logweir-console\n  \
                  clientSecretFile: {dir}/client.secret\n  insecureLoopbackIssuer: true\n\
-                 roles:\n  revision: r1\n  bindings:\n  - role: viewer\n    namespace: team-a\n    \
+                 roles:\n  revision: r1\n  bindings:\n  - role: viewer\n    workspace: team-a\n    \
                  groups: [lw-viewers]\n\
                  sessionKey:\n  file: {dir}/session.key.yaml\n  expectedVersion: 1\n\
                  cursorKey:\n  file: {dir}/cursor.key.yaml\n  expectedVersion: 1\n\
-                 namespaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  kubeconfig: \
+                 namespace: logweir-system\nworkspaces: [team-a]\nkubernetes:\n  source: kubeconfig\n  kubeconfig: \
                  {dir}/kubeconfig.yaml\n  context: fixture\n",
                 ui = ui.display(),
                 dir = dir.display(),

@@ -496,10 +496,13 @@ fn the_adapter_spends_each_verb_on_exactly_these_resources() {
         "list_page <ProductResource plural>",
         "get <ProductResource plural>",
         "create <ProductResource plural>",
-        // The three named merge patches.
+        // The four named merge patches.
         "patch <ProductResource plural>",
         "patch backupschedules",
         "patch backupdestinations",
+        // PROD-07.2: the cancel and cleanup annotations on a `Restore`
+        // (metadata only; the chart's API Role needs `patch` on `restores`).
+        "patch restores",
         // THE ONE CLUSTER-SCOPED OBJECT OUTSIDE THE SEALS: `TrustRoster/default`,
         // `get` by that fixed name. No list.
         "get trustrosters",

@@ -3073,7 +3073,11 @@ async fn a_foreign_owner_plan_config_map_is_never_adopted() {
     });
     let mut routes = referent_routes(None, vec![]);
     routes.push(not_found("GET", leak(job.clone())));
-    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "/apis/batch/v1/namespaces/team-a/jobs",
+        list_of(vec![]),
+    ));
     routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
     routes.push(Route {
         method: "POST",
@@ -3134,7 +3138,11 @@ async fn a_plan_refusal_after_the_pending_write_is_stored() {
     });
     let mut routes = referent_routes(None, vec![]);
     routes.push(not_found("GET", leak(job.clone())));
-    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "/apis/batch/v1/namespaces/team-a/jobs",
+        list_of(vec![]),
+    ));
     routes.push(Route {
         method: "POST",
         path_suffix: "/configmaps",
@@ -4898,6 +4906,7 @@ fn the_check_pod_mirrors_the_execution_pod() {
         kind: "Preflight".to_string(),
         name: "pf-1".to_string(),
         uid: PF_UID.to_string(),
+        workspace: None,
     };
     let shape = weirkeeper::controllers::preflight::build_job_shape(
         &inputs,
@@ -5118,6 +5127,7 @@ fn fixture_connection_plan() -> logweir_core::check_contract::ConnectionPlan {
         client_cert_file: None,
         client_key_file: None,
         principal: "User:backup".to_string(),
+        schema_registry: None,
     }
 }
 
@@ -5205,7 +5215,15 @@ fn the_expected_rows_include_the_capability_rows_a_plan_lists() {
         unreachable!()
     };
     let without = job_rows(&CheckRequest::OperationReadiness(r.clone()), false);
-    r.capability_checks = capability_checks_for(CheckOperation::Backup).to_vec();
+    // What this controller lists for a connection with no Schema Registry: the
+    // two registry rows are listed only beside one (PROD-03.1/03.2).
+    let no_registry = |ids: &[CheckId]| -> Vec<CheckId> {
+        ids.iter()
+            .copied()
+            .filter(|id| !matches!(id, CheckId::RegistryReachable | CheckId::TargetSchemas))
+            .collect()
+    };
+    r.capability_checks = no_registry(capability_checks_for(CheckOperation::Backup));
     let with = job_rows(&CheckRequest::OperationReadiness(r.clone()), false);
     assert_eq!(
         with.difference(&without).copied().collect::<Vec<_>>(),
@@ -5233,7 +5251,7 @@ fn the_expected_rows_include_the_capability_rows_a_plan_lists() {
     };
     let without = job_rows(&CheckRequest::RestorePreflight(r.clone()), true);
     assert!(!without.contains(&CheckId::TargetEngineProtocol));
-    r.capability_checks = capability_checks_for(CheckOperation::Restore).to_vec();
+    r.capability_checks = no_registry(capability_checks_for(CheckOperation::Restore));
     let with = job_rows(&CheckRequest::RestorePreflight(r), true);
     assert_eq!(
         with.difference(&without).copied().collect::<Vec<_>>(),
@@ -5314,10 +5332,11 @@ fn a_rendered_backup_plan_lists_its_capability_rows_and_validates() {
     // The pure function, for the operations with no engine to ask about.
     assert_eq!(
         pf::capability_checks(CheckOperation::Restore, &[]),
-        vec![CheckId::TargetEngineProtocol]
+        vec![CheckId::TargetEngineProtocol, CheckId::TargetSchemas]
     );
-    assert!(
-        pf::capability_checks(CheckOperation::Restore, &[CheckId::TargetEngineProtocol]).is_empty()
+    assert_eq!(
+        pf::capability_checks(CheckOperation::Restore, &[CheckId::TargetEngineProtocol]),
+        vec![CheckId::TargetSchemas]
     );
     // FX-46: a connection test asks what the endpoint could be used for.
     assert_eq!(
@@ -5325,7 +5344,8 @@ fn a_rendered_backup_plan_lists_its_capability_rows_and_validates() {
         vec![
             CheckId::ConnectionEngineProtocol,
             CheckId::TargetEngineProtocol,
-            CheckId::ConnectionGroupTypes
+            CheckId::ConnectionGroupTypes,
+            CheckId::RegistryReachable,
         ]
     );
     assert!(pf::capability_checks(CheckOperation::DestinationAccess, &[]).is_empty());
@@ -5482,6 +5502,7 @@ fn rendered_backup_shape(rich: bool) -> weirkeeper::controllers::preflight::JobS
             kind: "Preflight".to_string(),
             name: "pf-1".to_string(),
             uid: PF_UID.to_string(),
+            workspace: None,
         },
         &weirkeeper::job::RunnerImage::default(),
     )
@@ -5522,6 +5543,7 @@ fn a_source_connection_plan_carries_the_connection_and_projects_no_signer() {
             kind: "Preflight".to_string(),
             name: "pf-1".to_string(),
             uid: PF_UID.to_string(),
+            workspace: None,
         },
         &weirkeeper::job::RunnerImage::default(),
     )
@@ -5533,11 +5555,17 @@ fn a_source_connection_plan_carries_the_connection_and_projects_no_signer() {
     assert_eq!(r.connection.principal, "User:backup");
     // FX-46: the test asks what the endpoint could be used for, and the
     // rows the result must hold include them.
+    // The registry row only beside a `schemaRegistry`, which this fixture
+    // connection does not name.
     assert_eq!(
         r.capability_checks,
         logweir_core::check_contract::capability_checks_for(
             logweir_core::check_contract::CheckOperation::SourceConnection
         )
+        .iter()
+        .copied()
+        .filter(|id| *id != CheckId::RegistryReachable)
+        .collect::<Vec<_>>()
     );
     let expected = job_rows(&shape.plan.request, false);
     for id in &r.capability_checks {
@@ -5647,6 +5675,7 @@ fn owner() -> weirkeeper::job::RunnerOwner {
         kind: "Preflight".to_string(),
         name: "pf-1".to_string(),
         uid: PF_UID.to_string(),
+        workspace: None,
     }
 }
 
@@ -6494,7 +6523,11 @@ async fn a_destination_access_preflight_renders_the_evidence_write_principal_end
             object.to_string()
         }),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -7017,7 +7050,11 @@ async fn the_binding_is_recorded_before_the_plan_and_the_job_are_created() {
             rich_destination("primary").to_string(),
         ),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -8052,7 +8089,11 @@ async fn a_legacy_point_readiness_check_creates_the_restore_jobs_own_read() {
     let mut routes = legacy_referent_routes();
     routes.extend([
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -8438,7 +8479,11 @@ async fn a_preflights_own_budget_reaches_its_plan_and_its_job_deadline() {
             separated_destination("primary", evidence_secret_grant(), true).to_string(),
         ),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),
@@ -8495,7 +8540,11 @@ async fn a_preflights_own_skip_list_reaches_its_plan() {
     let job = job_name(CheckPlanKind::OperationReadiness);
     let mut routes = referent_routes(None, vec![]);
     routes.push(not_found("GET", leak(job.clone())));
-    routes.push(route("GET", "/apis/batch/v1/jobs", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "/apis/batch/v1/namespaces/team-a/jobs",
+        list_of(vec![]),
+    ));
     routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
     routes.push(route("POST", "/configmaps", echo("ConfigMap", "plan")));
     routes.push(route("POST", "/jobs", echo("Job", &job)));
@@ -9110,7 +9159,11 @@ async fn fx20c_a_thief_access_preflight_carries_its_grant_binding_end_to_end() {
             thief_destination().to_string(),
         ),
         not_found("GET", leak(job.clone())),
-        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route(
+            "GET",
+            "/apis/batch/v1/namespaces/team-a/jobs",
+            list_of(vec![]),
+        ),
         route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
         route("POST", "/configmaps", echo("ConfigMap", "plan")),
         route("POST", "/jobs", echo("Job", &job)),

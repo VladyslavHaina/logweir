@@ -52,7 +52,7 @@ pub const REFUSAL_STATES: &[&str] = &[
     "ApprovalNotReceived",
     "ApprovalSubjectMismatch",
     "ApprovalBundleConflict",
-    // The approval was issued under another policy than the namespace's
+    // The approval was issued under another policy than the workspace's
     // current binding, or its authorization window closed, before any Job
     // existed. Both end the Restore with nothing executed.
     "ApprovalPolicyMismatch",
@@ -177,7 +177,7 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
             reason.or_else(|| Some("JobCreated".to_string())),
         ),
         // THE CONTROLLER'S OWN WORD, NOT AN INFERENCE. A manual run that waits
-        // for a slot in its namespace's manual-run pool is written
+        // for a slot in its workspace's manual-run pool is written
         // `phase: Queued` by `weirkeeper::run_pool`'s gate, so this is the
         // resource's phase byte for byte -- unlike the `queued` STAGE, which
         // the progress channel alone may draw (a Job with no pod yet).
@@ -201,6 +201,10 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
             if phase == "Succeeded" {
                 return (OperationState::Succeeded, reason);
             }
+            // PROD-07.2: a cancel before anything was created.
+            if reason.as_deref() == Some("Cancelled") {
+                return (OperationState::Cancelled, reason);
+            }
             let refused = o.exit_code == Some(3)
                 || (o.exit_code.is_none()
                     && reason
@@ -212,6 +216,9 @@ fn state_of(o: &Observed<'_>) -> (OperationState, Option<String>) {
                 (OperationState::Failed, reason)
             }
         }
+        // PROD-07.2: stopped after it created its targets; not terminal (the
+        // reconcile may still find every partition exact).
+        Some("Interrupted") => (OperationState::Interrupted, reason),
         Some(_) => (
             OperationState::Unknown,
             Some("UnrecognizedPhase".to_string()),
@@ -1597,13 +1604,13 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
 // can be put in a URL, where a credential survives in a proxy log and a
 // browser history), the connection is closed at
 // [`StreamBounds::max_connection`], the heartbeat is fixed, and the number
-// of concurrent streams one principal may hold in one namespace is capped.
+// of concurrent streams one principal may hold in one workspace is capped.
 //
 // THE CEILING IS WALL CLOCK FROM SUBSCRIBE, NOT PRODUCER TIME: every send is
 // bounded by the REMAINING budget and the tick never overshoots it, so a
 // client that opens the stream and never reads costs one slot for
 // `max_connection`, not for ever. Authorization is decided ONCE at
-// subscribe, and the stream re-reads the same object in the same namespace
+// subscribe, and the stream re-reads the same object in the same workspace
 // and can reach nothing else.
 
 /// The bounds a stream runs inside.
@@ -1748,19 +1755,19 @@ impl StreamKind {
     async fn read(
         self,
         state: &crate::app::AppState,
-        namespace: &str,
+        workspace: &str,
         name: &str,
         now: DateTime<Utc>,
     ) -> Result<OperationView, crate::kube::KubeFailure> {
         match self {
             StreamKind::Backup => state
                 .kube()
-                .get::<Backup>(namespace, name)
+                .get::<Backup>(workspace, name)
                 .await
                 .map(|o| backup_view(&o, now)),
             StreamKind::Restore => state
                 .kube()
-                .get::<Restore>(namespace, name)
+                .get::<Restore>(workspace, name)
                 .await
                 .map(|o| restore_view(&o, now)),
         }
@@ -1814,14 +1821,14 @@ pub const STREAM_BUFFER: usize = 8;
 pub async fn open_stream(
     state: crate::app::AppState,
     kind: StreamKind,
-    namespace: String,
+    workspace: String,
     name: String,
     slot: crate::auth::ratelimit::StreamSlot,
     last_event_id: Option<String>,
 ) -> Result<axum::response::Response, crate::problem::ApiError> {
     let bounds = stream_bounds();
     let first = kind
-        .read(&state, &namespace, &name, state.now())
+        .read(&state, &workspace, &name, state.now())
         .await
         .map_err(crate::kube::KubeFailure::into_api_error)?;
 
@@ -1890,7 +1897,7 @@ pub async fn open_stream(
                 let _ = send_end(&tx, &mut terminal_permit, StreamEnd::MaxDuration, deadline).await;
                 return;
             }
-            let view = match kind.read(&state, &namespace, &name, state.now()).await {
+            let view = match kind.read(&state, &workspace, &name, state.now()).await {
                 Ok(view) => view,
                 Err(crate::kube::KubeFailure::NotFound) => {
                     let _ =

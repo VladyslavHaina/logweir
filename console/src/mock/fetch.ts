@@ -154,12 +154,12 @@ function operationOf(r: Restore): OperationView {
 
 // ----------------------------------------------------------------- routing
 
-function forNamespace<T extends { namespace: string }>(ns: string, items: T[]): T[] {
-  return items.filter((i) => i.namespace === ns);
+function forWorkspace<T extends { namespace: string }>(ws: string, items: T[]): T[] {
+  return items.filter((i) => i.namespace === ws);
 }
 
-function newestVerified(ns: string, source: string): Backup | undefined {
-  return forNamespace(ns, backups)
+function newestVerified(ws: string, source: string): Backup | undefined {
+  return forWorkspace(ws, backups)
     .map(backupNow)
     .filter((b) => b.sourceRef.name === source && b.operation.verifiedSuccess)
     .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
@@ -180,17 +180,17 @@ async function route(request: Request): Promise<Response> {
   { const approvals = await approvalsMock(request, method, path); if (approvals) return approvals; }
   // A switchover review is R7's preflight: before R5's and R2's, which refuse other checks.
   if (/\/preflights(\/|$)/.test(path)) { const so = await switchoversMock(request); if (so) return so; }
-  // After the approvals demo namespaces (R6), before R2's preflight mock, which refuses a restore check.
+  // After the approvals demo workspaces (R6), before R2's preflight mock, which refuses a restore check.
   { const r5 = await restoresMock(request); if (r5) return r5; }
   { const settings = (await connectionsMock(request, method, path)) ?? (await destinationsMock(request, method, path)); if (settings) return settings; }
 
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/backups$/))) {
-    return json(200, page(forNamespace(p[1]!, backups).map(backupNow)));
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/backups$/))) {
+    return json(200, page(forWorkspace(p[1]!, backups).map(backupNow)));
   }
-  if (method === "POST" && (p = m(/^\/namespaces\/([^/]+)\/backups$/))) {
-    const ns = p[1]!;
+  if (method === "POST" && (p = m(/^\/workspaces\/([^/]+)\/backups$/))) {
+    const ws = p[1]!;
     const body = (await request.json()) as { scheduleRef?: { name?: string } };
-    const schedule = schedules.find((s) => s.namespace === ns && s.name === body.scheduleRef?.name);
+    const schedule = schedules.find((s) => s.namespace === ws && s.name === body.scheduleRef?.name);
     if (!schedule) return problem(422, "validation_failed", "Name a schedule to back up now.");
     const name = `${schedule.name}-manual-${slotName(Date.now())}`.replace("-hourly", "");
     const base = backups.find((b) => b.schedule === schedule.name) ?? backups[0]!;
@@ -208,16 +208,16 @@ async function route(request: Request): Promise<Response> {
     liveSince.set(name, Date.now());
     return json(201, { item: backupNow(created), requestId: requestId() });
   }
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/backups\/([^/]+)$/))) {
-    const found = forNamespace(p[1]!, backups).find((b) => b.name === p![2]);
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/backups\/([^/]+)$/))) {
+    const found = forWorkspace(p[1]!, backups).find((b) => b.name === p![2]);
     return found ? json(200, { item: backupNow(found), requestId: requestId() }) : problem(404, "not_found", `No Backup named ${p[2]} in ${p[1]}.`);
   }
 
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/restores$/))) {
-    return json(200, page(forNamespace(p[1]!, restores).map(restoreNow)));
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/restores$/))) {
+    return json(200, page(forWorkspace(p[1]!, restores).map(restoreNow)));
   }
-  if (method === "POST" && (p = m(/^\/namespaces\/([^/]+)\/restores$/))) {
-    const ns = p[1]!;
+  if (method === "POST" && (p = m(/^\/workspaces\/([^/]+)\/restores$/))) {
+    const ws = p[1]!;
     const body = (await request.json()) as CreateRestoreRequest;
     restoreSerial += 1;
     const suffix = (NOW / MINUTE + restoreSerial).toString(36).slice(-5);
@@ -226,7 +226,7 @@ async function route(request: Request): Promise<Response> {
     const created: Restore = {
       ...restores[0]!,
       name,
-      namespace: ns,
+      namespace: ws,
       uid: crypto.randomUUID(),
       createdAt: iso(Date.now()),
       approvalRef: { name },
@@ -253,23 +253,23 @@ async function route(request: Request): Promise<Response> {
       requestId: requestId(),
     });
   }
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/restores\/([^/]+)$/))) {
-    const found = forNamespace(p[1]!, restores).find((r) => r.name === p![2]);
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/restores\/([^/]+)$/))) {
+    const found = forWorkspace(p[1]!, restores).find((r) => r.name === p![2]);
     return found ? json(200, { item: restoreNow(found), requestId: requestId() }) : problem(404, "not_found", `No Restore named ${p[2]} in ${p[1]}.`);
   }
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/operations\/restore\/([^/]+)$/))) {
-    const found = forNamespace(p[1]!, restores).find((r) => r.name === p![2]);
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/operations\/restore\/([^/]+)$/))) {
+    const found = forWorkspace(p[1]!, restores).find((r) => r.name === p![2]);
     return found ? json(200, { item: operationOf(found), requestId: requestId() }) : problem(404, "not_found", `No restore named ${p[2]}.`);
   }
 
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/connections$/))) return json(200, page(forNamespace(p[1]!, connections)));
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/schedules$/))) return json(200, page(forNamespace(p[1]!, schedules)));
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/protection-policies$/))) {
-    const ns = p[1]!;
-    return json(200, page(forNamespace(ns, protectionPolicies).map((pp) => withPoint(pp, newestVerified(ns, pp.protects.sourceRef.name)))));
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/connections$/))) return json(200, page(forWorkspace(p[1]!, connections)));
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/schedules$/))) return json(200, page(forWorkspace(p[1]!, schedules)));
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/protection-policies$/))) {
+    const ws = p[1]!;
+    return json(200, page(forWorkspace(ws, protectionPolicies).map((pp) => withPoint(pp, newestVerified(ws, pp.protects.sourceRef.name)))));
   }
-  if (method === "GET" && (p = m(/^\/namespaces\/([^/]+)\/catalogs\/([^/]+)\/points$/))) {
-    const points = forNamespace(p[1]!, backups)
+  if (method === "GET" && (p = m(/^\/workspaces\/([^/]+)\/catalogs\/([^/]+)\/points$/))) {
+    const points = forWorkspace(p[1]!, backups)
       .map(backupNow)
       .filter((b) => b.operation.verifiedSuccess && b.sourceRef.name === "orders-prod")
       .map(pointOf);

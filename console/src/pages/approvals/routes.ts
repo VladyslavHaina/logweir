@@ -1,6 +1,6 @@
-// The Approvals routes, under the namespace route (router.tsx registers them).
+// The Approvals routes, under the workspace route (router.tsx registers them).
 import { createRoute } from "@tanstack/react-router";
-import type { nsRoute } from "../../router";
+import type { wsRoute } from "../../router";
 import type { RouteClaim } from "../../api/approvals";
 import { ApprovalList } from "./ApprovalList";
 import { ApprovalPage } from "./ApprovalPage";
@@ -14,7 +14,7 @@ function claim(search: Record<string, unknown>): RouteClaim {
   };
 }
 
-export function approvalRoutes(parent: typeof nsRoute) {
+export function approvalRoutes(parent: typeof wsRoute) {
   return [
     createRoute({ getParentRoute: () => parent, path: "approvals", component: ApprovalList }),
     // A Switchover's approval (subject kind Switchover, theme A).

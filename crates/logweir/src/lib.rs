@@ -53,6 +53,9 @@ pub mod show;
 /// (`scripts/check-one-signer.sh`), which visibility does not widen: one type
 /// in this workspace holds a parsed private key.
 pub mod signer;
+/// PROD-07.2: SIGTERM and SIGINT stop a `restore run`: the engine gets
+/// SIGTERM, then SIGKILL, and nothing is signed.
+pub mod stop_signal;
 /// `logweir switchover plan|rollback-plan|run` (PROD-04.2).
 pub mod switchover;
 /// The ONE read of a projected private-CA location, shared by

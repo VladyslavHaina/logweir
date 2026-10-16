@@ -154,7 +154,7 @@ fn install(document: &str, cluster: Cluster) -> Install {
 
 async fn create(app: &TestApp, ns: &str, key: &str) -> support::TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{ns}/restores"),
+        &format!("/api/v1/workspaces/{ns}/restores"),
         Some(key),
         &support::restore_body(&support::golden_plan()).to_string(),
     )
@@ -180,7 +180,7 @@ fn verify(document: &str, sidecar: &str, key: &VerifyingKey) -> bool {
 }
 
 async fn policy(app: &TestApp, ns: &str) -> Value {
-    app.get(&format!("/api/v1/namespaces/{ns}/approval-policy"))
+    app.get(&format!("/api/v1/workspaces/{ns}/approval-policy"))
         .await
         .json()["item"]
         .clone()
@@ -316,7 +316,7 @@ async fn an_upgraded_install_keeps_legacy_and_a_patched_marker_changes_nothing()
 async fn an_explicit_binding_wins_over_the_fresh_install_default() {
     let install = install(
         &format!(
-            "policies:\n  - name: prod-governed\n    mode: strict\nnamespaces:\n  {NS_A}: prod-governed\n"
+            "policies:\n  - name: prod-governed\n    mode: strict\nworkspaces:\n  {NS_A}: prod-governed\n"
         ),
         Cluster::Fresh,
     );

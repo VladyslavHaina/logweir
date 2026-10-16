@@ -186,6 +186,48 @@ spec:
               role:
                 description: 'What this cluster is to Logweir — `source` or `target`. A free-form string rather than an enum: the value is a label the adopter picks and the controller reports, and `allowedClusterIds` on the cluster-scoped `TrustRoster` is what actually authorises a target, never a role written next to the address it authorises.'
                 type: string
+              schemaRegistry:
+                description: 'The cluster''s Confluent-compatible Schema Registry. A backup of this (source) connection snapshots it beside the receipt; a restore into this (target) connection imports, before any topic is created, the schemas the restored records reference, keeping their IDs. Absent: no registry is contacted. Immutable with the rest of `spec`.'
+                nullable: true
+                properties:
+                  secretRef:
+                    description: The Secret in this namespace holding the basic-auth password, and its key (default `registry-password`). It carries the connection's `logweir-binding`, like every Secret the connection names.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The Secret's `metadata.name`, in this namespace.
+                        maxLength: 253
+                        minLength: 1
+                        pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                        type: string
+                      passwordKey:
+                        description: The data key. Absent means `registry-password`.
+                        maxLength: 253
+                        minLength: 1
+                        nullable: true
+                        pattern: ^[-._a-zA-Z0-9]+$
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  url:
+                    description: The registry's base URL. TLS uses the connection's `auth.tlsCa`, when set, added to the system roots.
+                    maxLength: 2048
+                    minLength: 1
+                    pattern: ^https?://[^\s/@?#]+(/[^\s?#]*)?$
+                    type: string
+                  username:
+                    description: The HTTP basic-auth username; set exactly when `secretRef` is.
+                    maxLength: 256
+                    minLength: 1
+                    nullable: true
+                    type: string
+                required:
+                - url
+                type: object
+                x-kubernetes-validations:
+                - message: schemaRegistry.username and schemaRegistry.secretRef are set together (HTTP basic auth) or not at all
+                  rule: has(self.username) == has(self.secretRef)
               strimzi:
                 description: 'The Strimzi cluster that manages this Kafka cluster''s topics. Set, a `Backup` of this cluster lists the `KafkaTopic` resources of that namespace labelled `strimzi.io/cluster=<cluster>` (read only, granted per namespace by the chart values `strimzi.readKafkaTopics` and `strimzi.namespaces`), and its receipt records each named topic''s Strimzi owner, so a restore exports desired state for it. A namespace the chart does not list, a refused list, or a `KafkaTopic` resource the API server does not serve fails the backup closed (`OwnerDetectionFailed`), never "looked, none found". Absent: nothing is listed, as before.'
                 nullable: true

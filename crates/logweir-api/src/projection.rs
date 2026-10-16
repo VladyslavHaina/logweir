@@ -115,6 +115,15 @@ pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Co
             observed_at: status.and_then(|s| s.observed_at),
         },
         last_test,
+        schema_registry: cluster.spec.schema_registry.as_ref().map(|r| {
+            crate::contract::SchemaRegistryView {
+                url: r.url.clone(),
+                username: r.username.clone(),
+                credential_ref: r.secret_ref.as_ref().map(|s| NameRef {
+                    name: s.name.clone(),
+                }),
+            }
+        }),
     }
 }
 
@@ -507,6 +516,26 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
         topic_configuration: status
             .and_then(|s| s.topic_configuration.as_ref())
             .map(topic_configuration_view),
+        interruption: status.and_then(|s| s.interruption.as_ref()).map(|i| {
+            use weirkeeper::controllers::restore::restore_interruption as ri;
+            crate::contract::RestoreInterruptionView {
+                cause: i.cause.clone(),
+                requested_by: i.requested_by.as_deref().map(|r| bounded(r, 256)),
+                verification: i.verification.clone(),
+                verification_reason: i.verification_reason.as_deref().map(|r| bounded(r, 1024)),
+                cleanup_offered: status.and_then(|s| s.phase.as_deref())
+                    == Some(ri::PHASE_INTERRUPTED)
+                    && i.verification.as_deref() == Some(ri::VERIFICATION_DONE)
+                    && i.reconcile_run_id.is_some()
+                    && i.cleanup.is_none(),
+                cleanup: i.cleanup.as_ref().and_then(|c| c.phase.clone()),
+                cleanup_reason: i
+                    .cleanup
+                    .as_ref()
+                    .and_then(|c| c.reason.as_deref())
+                    .map(|r| bounded(r, 1024)),
+            }
+        }),
         old_topics: status
             .and_then(|s| s.old_topics.clone())
             .unwrap_or_default()
@@ -589,6 +618,16 @@ pub fn restore_coverage(object: &RestoreCr) -> crate::contract::RestoreCoverageV
                 groups: pm.groups,
                 omitted: pm.omitted.as_ref().map(|o| crate::validate::bounded(o, 64)),
             }),
+        schemas: integrity.and_then(|i| i.schemas.as_ref()).map(|sc| {
+            crate::contract::RestoreSchemasView {
+                imported: sc.imported,
+                already_present: sc.already_present,
+                not_imported: sc
+                    .not_imported
+                    .as_ref()
+                    .map(|o| crate::validate::bounded(o, 64)),
+            }
+        }),
     }
 }
 

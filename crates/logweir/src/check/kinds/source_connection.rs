@@ -94,8 +94,9 @@ pub fn run(req: &SourceConnectionRequest, wiring: &dyn Wiring, deadline: Deadlin
             );
             for id in &req.capability_checks {
                 checks.push(advisory(
-                    capability::blocked(
+                    capability::blocked_unless_registry(
                         *id,
+                        &req.connection,
                         "the connection did not authenticate, so this check did not run",
                         now,
                     )

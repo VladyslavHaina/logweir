@@ -2,4 +2,4 @@
 approvalPolicy:
   policies:
     - {name: team, mode: confirm}
-  namespaces: {}
+  workspaces: {}

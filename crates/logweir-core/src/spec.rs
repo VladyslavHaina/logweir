@@ -179,6 +179,11 @@ pub struct RestoreSpecBlock {
     /// inside `plan_hash`. `false` (absent) is not serialised, so a plan
     /// rendered from this type keeps its bytes.
     pub allow_transaction_markers: bool,
+    /// `restore.rate_limit_bytes_per_sec` (PROD-00.3h): at most this many key
+    /// and value bytes per second for the WHOLE restore, every partition
+    /// together, rendered into the engine's restore block. An integer of at
+    /// least 1; absent limits nothing, and is not serialised.
+    pub rate_limit_bytes_per_sec: Option<u64>,
 }
 
 /// The open start of an ISO 8601 interval (ISO 8601-2, `"../<end>"`): the
@@ -201,6 +206,8 @@ struct RestoreSpecBlockWire {
     partitions: BTreeMap<String, Vec<i32>>,
     #[serde(default)]
     allow_transaction_markers: bool,
+    #[serde(default)]
+    rate_limit_bytes_per_sec: Option<u64>,
 }
 
 /// One RFC 3339 instant exactly as chrono's own `Deserialize` reads it (a
@@ -292,12 +299,18 @@ impl<'de> Deserialize<'de> for RestoreSpecBlock {
             }
             _ => {}
         }
+        if wire.rate_limit_bytes_per_sec == Some(0) {
+            return Err(D::Error::custom(
+                "restore.rate_limit_bytes_per_sec must be at least 1; leave it out for no limit",
+            ));
+        }
         Ok(RestoreSpecBlock {
             point_in_time,
             time_basis: wire.time_basis,
             window_start,
             partitions: wire.partitions,
             allow_transaction_markers: wire.allow_transaction_markers,
+            rate_limit_bytes_per_sec: wire.rate_limit_bytes_per_sec,
         })
     }
 }
@@ -321,6 +334,8 @@ struct RestoreSpecBlockOut<'a> {
     partitions: &'a BTreeMap<String, Vec<i32>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     allow_transaction_markers: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rate_limit_bytes_per_sec: Option<u64>,
 }
 
 impl Serialize for RestoreSpecBlock {
@@ -357,6 +372,7 @@ impl Serialize for RestoreSpecBlock {
             time_basis: self.time_basis,
             partitions: &self.partitions,
             allow_transaction_markers: self.allow_transaction_markers,
+            rate_limit_bytes_per_sec: self.rate_limit_bytes_per_sec,
         }
         .serialize(s)
     }
@@ -611,7 +627,27 @@ pub struct TargetSpec {
     /// what it always did and claims nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_configuration: Option<crate::topic_transition::TopicConfigurationPlan>,
+    /// **PROD-03.2.** The target connection's Schema Registry: before any
+    /// topic is created, the schemas the restored records reference are
+    /// imported into it keeping their IDs. The controller checks it equals the
+    /// target connection's. ABSENT: nothing is imported, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistrySpec>,
 }
+
+/// **PROD-03.1/03.2.** A connection's Schema Registry as a plan names it: the
+/// URL and the basic-auth username. The password reaches the runner as
+/// `LOGWEIR_SOURCE_REGISTRY_PASSWORD` / `LOGWEIR_TARGET_REGISTRY_PASSWORD`,
+/// never through a plan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SchemaRegistrySpec {
+    /// `http://` or `https://`, no userinfo.
+    pub url: String,
+    /// The basic-auth username, when the registry asks for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+}
+
 impl TargetSpec {
     /// The plan's `topic_naming.original_name` block, WHATEVER the mode — the
     /// shape rule ([`crate::original_name::refuse_shape`]) is what refuses it
@@ -1210,6 +1246,11 @@ pub struct BackupSourceSpec {
     /// older runner ignores the key and records no positions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_groups: Option<Vec<String>>,
+    /// **PROD-03.1.** The source connection's Schema Registry, rendered by
+    /// the controller from the `KafkaCluster`: after the engine, the runner
+    /// snapshots it beside the receipt. ABSENT: no registry is contacted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistrySpec>,
 }
 
 /// The `backup:` block's tunables. The two keys the rendered document pins
@@ -1378,5 +1419,27 @@ mod tests {
             "window_start: 2026-08-29T00:00:00Z\nwindow_end: 2026-08-30T00:00:00Z\nanchor: Head\n"
         )
         .is_err());
+    }
+
+    /// PROD-00.3h: `restore.rate_limit_bytes_per_sec` parses as an integer of
+    /// at least 1, is written back only when stated, and 0 is refused (it is
+    /// not "no limit").
+    #[test]
+    fn the_byte_rate_limit_parses_round_trips_and_refuses_zero() {
+        let block = |yaml: &str| serde_yaml::from_str::<RestoreSpecBlock>(yaml);
+        let b = block("rate_limit_bytes_per_sec: 1048576\n").unwrap();
+        assert_eq!(b.rate_limit_bytes_per_sec, Some(1_048_576));
+        assert_eq!(
+            serde_yaml::to_string(&b).unwrap(),
+            "point_in_time: null\nrate_limit_bytes_per_sec: 1048576\n"
+        );
+        let none = block("{}").unwrap();
+        assert_eq!(none.rate_limit_bytes_per_sec, None);
+        assert!(!serde_yaml::to_string(&none).unwrap().contains("rate_limit"));
+        let zero = block("rate_limit_bytes_per_sec: 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(zero.contains("at least 1"), "{zero}");
+        assert!(block("rate_limit_bytes_per_sec: -5\n").is_err());
     }
 }

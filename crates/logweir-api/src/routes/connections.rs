@@ -14,7 +14,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{Resource as _, ResourceExt as _};
 use weirkeeper::crds::kafka_cluster::{
     AuthBlock, AuthMode, ClientCertificateRef, CredentialSecretRef, KafkaCluster, KafkaClusterSpec,
-    ObjectKeyRef, TlsCaSource, UnrecognizedFields,
+    ObjectKeyRef, RegistrySecretRef, SchemaRegistryBlock, TlsCaSource, UnrecognizedFields,
 };
 use weirkeeper::crds::preflight::Preflight as PreflightCr;
 
@@ -37,9 +37,9 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier (cursor scope).
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/connections";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/connections";
 /// The create route identifier (idempotency scope).
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/connections";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/connections";
 /// The deterministic name prefix. With 26 hash characters the name is 31
 /// characters, inside the 49 the probe Job name leaves a KafkaCluster.
 pub const NAME_PREFIX: &str = "conn-";
@@ -65,12 +65,12 @@ pub async fn list(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadConnections)?;
+    authorize(&state, &actor, &ws, Action::ReadConnections)?;
     let query = list_query(uri.query())?;
-    let (items, page) = list_page::<KafkaCluster>(&state, &actor, &ns, ROUTE_LIST, &query).await?;
+    let (items, page) = list_page::<KafkaCluster>(&state, &actor, &ws, ROUTE_LIST, &query).await?;
     Ok(json(
         StatusCode::OK,
         &ConnectionList {
@@ -92,7 +92,7 @@ pub async fn list(
 /// ONE SELECTOR, PAGED TO EXHAUSTION, BOUNDED — `destinations::last_test`'s
 /// shape, because it answers the same question about the other half of a run.
 /// [`CONNECTION_TEST_LABEL`] is set only by a connectivity check, the loop
-/// follows the continue token so a namespace with many checks cannot hide the
+/// follows the continue token so a workspace with many checks cannot hide the
 /// newest one behind a first page in name order, and [`MAX_PAGES`] caps the
 /// work with the cap REPORTED rather than swallowed.
 ///
@@ -110,7 +110,7 @@ pub async fn list(
 /// connection's last test and is skipped.
 async fn last_test(
     state: &AppState,
-    namespace: &str,
+    workspace: &str,
     name: &str,
     cluster_uid: &str,
 ) -> Result<Option<LastTestView>, ApiError> {
@@ -129,7 +129,7 @@ async fn last_test(
         };
         let list = state
             .kube()
-            .list::<PreflightCr>(namespace, &page)
+            .list::<PreflightCr>(workspace, &page)
             .await
             .map_err(KubeFailure::into_api_error)?;
         for item in list.items {
@@ -153,7 +153,7 @@ async fn last_test(
     let Some(newest) = newest else {
         return Ok(None);
     };
-    let live = super::preflights::read_live_binding(state, namespace, &newest).await;
+    let live = super::preflights::read_live_binding(state, workspace, &newest).await;
     let projected = super::preflights::project(&newest, now, None, Some(&live));
     Ok(Some(LastTestView {
         preflight_id: projected.id.clone(),
@@ -183,13 +183,13 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, name)): ApiPath<(String, String)>,
+    ApiPath((ws, name)): ApiPath<(String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::ReadConnections)?;
+    authorize(&state, &actor, &ws, Action::ReadConnections)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let object = get_object::<KafkaCluster>(&state, &actor, &ns, &name).await?;
-    let test = last_test(&state, &ns, &name, &object.uid().unwrap_or_default()).await?;
+    let object = get_object::<KafkaCluster>(&state, &actor, &ws, &name).await?;
+    let test = last_test(&state, &ws, &name, &object.uid().unwrap_or_default()).await?;
     Ok(json(
         StatusCode::OK,
         &ConnectionResponse {
@@ -231,6 +231,9 @@ pub fn validate_create(request: &CreateConnectionRequest) -> Result<(), ApiError
         }
     }
     validate_auth(&request.auth, &mut errors);
+    if let Some(registry) = &request.schema_registry {
+        validate_registry(registry, &mut errors);
+    }
     if let Some(topic) = &request.marker_topic {
         if !validate::is_topic_name(topic) {
             errors.push(FieldError::new(
@@ -245,6 +248,54 @@ pub fn validate_create(request: &CreateConnectionRequest) -> Result<(), ApiError
     } else {
         Err(ApiError::validation(errors))
     }
+}
+
+/// The registry block's rules (PROD-03.1): a registry URL, and a username
+/// exactly when a password is entered.
+fn validate_registry(
+    registry: &crate::contract::SchemaRegistryRequest,
+    errors: &mut Vec<FieldError>,
+) {
+    if !weirkeeper::connection::is_registry_url(&registry.url) {
+        errors.push(FieldError::new(
+            "schemaRegistry.url",
+            "invalid_url",
+            "must be an http:// or https:// URL with no userinfo, query or fragment",
+        ));
+    }
+    match (&registry.username, &registry.password) {
+        (Some(username), Some(password)) => {
+            if let Err(code) = validate::check_single_line(username, 256) {
+                errors.push(FieldError::new(
+                    "schemaRegistry.username",
+                    code,
+                    "must be one printable line",
+                ));
+            }
+            if let Err(e) = weirkeeper::connection::credential::check_password(password) {
+                errors.push(FieldError::new(
+                    "schemaRegistry.password",
+                    "invalid_credential",
+                    e.to_string(),
+                ));
+            }
+        }
+        (None, None) => {}
+        _ => errors.push(FieldError::new(
+            "schemaRegistry",
+            "username_and_password",
+            "a registry username and password are entered together (HTTP basic auth) or not at \
+             all",
+        )),
+    }
+}
+
+/// Whether the request carries a registry password VALUE.
+fn registry_password(request: &CreateConnectionRequest) -> Option<&String> {
+    request
+        .schema_registry
+        .as_ref()
+        .and_then(|r| r.password.as_ref())
 }
 
 /// The auth block's rules, every mode.
@@ -430,7 +481,6 @@ pub fn credential_secret_name(connection: &str) -> String {
 /// Secret the request chose.
 #[must_use]
 pub fn build(
-    namespace: &str,
     name: String,
     annotations: BTreeMap<String, String>,
     request: &CreateConnectionRequest,
@@ -445,7 +495,6 @@ pub fn build(
     KafkaCluster {
         metadata: ObjectMeta {
             name: Some(name),
-            namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
             ..ObjectMeta::default()
         },
@@ -498,6 +547,20 @@ pub fn build(
             // PROD-05.1a's Strimzi reference is set on the object, never by
             // this route.
             strimzi: None,
+            // The registry, its password in THIS route's Secret, by name.
+            schema_registry: request
+                .schema_registry
+                .as_ref()
+                .map(|r| SchemaRegistryBlock {
+                    url: r.url.clone(),
+                    username: r.username.clone(),
+                    secret_ref: r.password.is_some().then(|| RegistrySecretRef {
+                        name: secret.clone(),
+                        password_key: None,
+                        unrecognized_fields: UnrecognizedFields::default(),
+                    }),
+                    unrecognized_fields: UnrecognizedFields::default(),
+                }),
             unrecognized_fields: UnrecognizedFields::default(),
         },
         status: None,
@@ -515,9 +578,9 @@ pub fn build(
 /// built from a validated request, so that is a defect) or the contract
 /// refuses a value validation already accepted.
 fn credential_secret(
-    namespace: &str,
     created: &KafkaCluster,
-    credential: &crate::contract::NewConnectionCredentialRequest,
+    credential: Option<&crate::contract::NewConnectionCredentialRequest>,
+    registry_password: Option<&String>,
     request_id: &str,
 ) -> Result<WriteOnlyCredential, ApiError> {
     use weirkeeper::connection::credential;
@@ -535,13 +598,29 @@ fn credential_secret(
         .ok_or_else(|| internal("the connection has no UID to bind the credential to"))?;
     let name = created.metadata.name.clone().unwrap_or_default();
     let uid = created.metadata.uid.clone().unwrap_or_default();
+    let namespace = created.metadata.namespace.as_deref().unwrap_or_default();
     let secret_name = credential_secret_name(&name);
     let request_id = (!request_id.is_empty() && request_id.len() <= 128).then_some(request_id);
     let built = match (
-        credential.password.as_ref(),
-        credential.certificate_pem.as_ref(),
-        credential.private_key_pem.as_ref(),
+        credential.and_then(|c| c.password.as_ref()),
+        credential.and_then(|c| c.certificate_pem.as_ref()),
+        credential.and_then(|c| c.private_key_pem.as_ref()),
     ) {
+        // PROD-03.1: a connection whose only credential is its registry's.
+        (None, None, None) => match registry_password {
+            Some(password) => {
+                credential::build_registry_credential_secret(credential::NewKafkaCredential {
+                    namespace,
+                    secret_name: &secret_name,
+                    connection_name: &name,
+                    password: credential::WriteOnlyPassword::new(password.clone()),
+                    request_id,
+                    binding: Some(&binding),
+                    owner_uid: Some(&uid),
+                })
+            }
+            None => return Err(internal("the request carries no credential")),
+        },
         (Some(password), None, None) => {
             credential::build_kafka_credential_secret(credential::NewKafkaCredential {
                 namespace,
@@ -566,16 +645,23 @@ fn credential_secret(
         ),
         _ => return Err(internal("the request carries no single credential")),
     }
+    .and_then(|built| match registry_password {
+        // The registry password joins the Kafka credential in the
+        // connection's one Secret.
+        Some(password) if credential.is_some() => {
+            built.with_registry_password(credential::WriteOnlyPassword::new(password.clone()))
+        }
+        _ => Ok(built),
+    })
     .map_err(|e| internal(&e.to_string()))?;
     Ok(WriteOnlyCredential::from_parts(built.into_parts()))
 }
 
 /// The name-only dry-run probe for the credential Secret.
-fn probe_secret(namespace: &str, name: &str, type_: &str) -> WriteOnlyCredential {
+fn probe_secret(name: &str, type_: &str) -> WriteOnlyCredential {
     WriteOnlyCredential {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
-            namespace: Some(namespace.to_string()),
             labels: Some(BTreeMap::from([(
                 weirkeeper::connection::credential::MANAGED_BY_LABEL.to_string(),
                 weirkeeper::connection::credential::MANAGED_BY_VALUE.to_string(),
@@ -604,12 +690,12 @@ pub async fn create(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath(ns): ApiPath<String>,
+    ApiPath(ws): ApiPath<String>,
     uri: Uri,
     headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
-    authorize(&state, &actor, &ns, Action::CreateConnection)?;
+    authorize(&state, &actor, &ws, Action::CreateConnection)?;
     crate::http::parse_query(uri.query(), &[])?;
     let key = IdempotencyKey::from_headers(&headers)?;
     let request: CreateConnectionRequest = read_json(body, MAX_JSON_BODY).await?;
@@ -619,8 +705,10 @@ pub async fn create(
         .credential
         .as_ref()
         .filter(|_| request.auth.carries_a_value());
-    if credential.is_some() {
-        authorize_also(&state, &actor, &ns, Action::WriteCredential)?;
+    let registry_password = registry_password(&request);
+    let writes_secret = credential.is_some() || registry_password.is_some();
+    if writes_secret {
+        authorize_also(&state, &actor, &ws, Action::WriteCredential)?;
     }
     // The name the object will have, decided before anything is written, so
     // the credential's name is known and can be checked free first.
@@ -631,9 +719,9 @@ pub async fn create(
         )
     })?;
     let name =
-        crate::idempotency::identity(&actor, &ns, ROUTE_CREATE, NAME_PREFIX, &key, &canonical).name;
+        crate::idempotency::identity(&actor, &ws, ROUTE_CREATE, NAME_PREFIX, &key, &canonical).name;
     let replaying =
-        is_own_replay::<KafkaCluster, _>(&state, &actor, &ns, ROUTE_CREATE, &name, &key, &request)
+        is_own_replay::<KafkaCluster, _>(&state, &actor, &ws, ROUTE_CREATE, &name, &key, &request)
             .await?;
     let secret_type = if request.auth.mode == ConnectionAuthMode::Mtls {
         weirkeeper::connection::credential::CLIENT_CERTIFICATE_SECRET_TYPE
@@ -641,11 +729,11 @@ pub async fn create(
         weirkeeper::connection::credential::CREDENTIAL_SECRET_TYPE
     };
     let secret_name = credential_secret_name(&name);
-    if credential.is_some() && !replaying {
-        let probe = probe_secret(&ns, &secret_name, secret_type);
+    if writes_secret && !replaying {
+        let probe = probe_secret(&secret_name, secret_type);
         if state
             .kube()
-            .credential_name_is_taken(&ns, &probe)
+            .credential_name_is_taken(&probe)
             .await
             .map_err(KubeFailure::into_api_error)?
         {
@@ -663,23 +751,24 @@ pub async fn create(
     let created = create_named_idempotent(
         &state,
         &actor,
-        &ns,
+        &ws,
         ROUTE_CREATE,
         &name,
         &key,
         &request_id,
         &request,
-        |name, annotations| build(&ns, name, annotations, &request),
+        |name, annotations| build(name, annotations, &request),
     )
     .await?;
-    if let Some(credential) = credential {
-        let secret = credential_secret(&ns, &created.object, credential, &request_id)?;
-        match state.kube().create_credential(&ns, &secret).await {
+    if writes_secret {
+        let secret =
+            credential_secret(&created.object, credential, registry_password, &request_id)?;
+        match state.kube().create_credential(&ws, &secret).await {
             Ok(reference) => {
                 // THE LOG LINE IS A NAME — the only non-secret fact about a
                 // credential is which object holds it.
                 tracing::info!(
-                    namespace = %ns,
+                    workspace = %ws,
                     secret = %reference.name,
                     connection = %name,
                     "connection credential secret created"

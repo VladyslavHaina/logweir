@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# deploy/poc/trustpolicy.sh — print the TrustPolicy that governs logweir-poc.
+# deploy/poc/trustpolicy.sh — print a TrustPolicy that governs the install's
+# namespace (only for an install that predates PROD-16.1, README.md step 8).
 #
 #   bash deploy/poc/trustpolicy.sh confirmation.pub.pem > trustpolicy.yaml
 #   # read it, then, as a cluster administrator (logweir-trust-admin):
@@ -54,7 +55,7 @@ kind: TrustPolicy
 metadata:
   name: logweir-poc
 spec:
-  namespaces: [${POC_NAMESPACE}]
+  namespaces: [${LOGWEIR_NAMESPACE}]
   allowedTargetClusterIds: [${TARGET_CLUSTER_ID}]
   keys:
     - keyId: ${signing_id}

@@ -454,6 +454,53 @@ pub fn build_kafka_credential_secret(
     }))
 }
 
+/// **PROD-03.1.** The data key a connection's Schema Registry password is
+/// written under — the resolver's default, so the `KafkaCluster` needs no
+/// `passwordKey`.
+pub const REGISTRY_PASSWORD_DATA_KEY: &str =
+    crate::crds::kafka_cluster::DEFAULT_REGISTRY_PASSWORD_KEY;
+
+impl CredentialSecret {
+    /// Add the connection's registry password to the Secret, validated like
+    /// any password: one Secret per connection holds every value it names.
+    ///
+    /// # Errors
+    ///
+    /// [`CredentialInputError`] for the password rules.
+    pub fn with_registry_password(
+        mut self,
+        password: WriteOnlyPassword,
+    ) -> Result<Self, CredentialInputError> {
+        let password = password.0;
+        check_password(&password)?;
+        self.0.data.get_or_insert_with(BTreeMap::new).insert(
+            REGISTRY_PASSWORD_DATA_KEY.to_string(),
+            ByteString(password.into_bytes()),
+        );
+        Ok(self)
+    }
+}
+
+/// **PROD-03.1.** A connection whose only credential is its registry
+/// password (a `plaintext` Kafka connection with a registry behind basic
+/// auth): [`build_kafka_credential_secret`]'s shape, with the value under
+/// [`REGISTRY_PASSWORD_DATA_KEY`] instead of `password`.
+///
+/// # Errors
+///
+/// [`CredentialInputError`], as [`build_kafka_credential_secret`].
+pub fn build_registry_credential_secret(
+    request: NewKafkaCredential<'_>,
+) -> Result<CredentialSecret, CredentialInputError> {
+    let mut built = build_kafka_credential_secret(request)?;
+    if let Some(data) = built.0.data.as_mut() {
+        if let Some(value) = data.remove(PASSWORD_DATA_KEY) {
+            data.insert(REGISTRY_PASSWORD_DATA_KEY.to_string(), value);
+        }
+    }
+    Ok(built)
+}
+
 /// The owner reference that makes a credential the connection's: deleting the
 /// `KafkaCluster` collects it.
 fn owner_reference(

@@ -52,6 +52,7 @@ import {
   consumerPositionsWords,
   isRedacted,
   schemaDependentTopics,
+  registryCaptureWords,
   truncatedWords,
   viewIsUsable,
   catalogSentence,
@@ -183,21 +184,21 @@ function Verification({ p }: { p: PointView }) {
   );
 }
 
-function restoreHref(ns: string, catalog: string, pointId: string): string {
-  return `#/${ns}/restores/new?catalog=${encodeURIComponent(catalog)}&point=${encodeURIComponent(pointId)}`;
+function restoreHref(ws: string, catalog: string, pointId: string): string {
+  return `#/${ws}/restores/new?catalog=${encodeURIComponent(catalog)}&point=${encodeURIComponent(pointId)}`;
 }
 
-function PointsCard({ ns, name }: { ns: string; name: string }) {
+function PointsCard({ ws, name }: { ws: string; name: string }) {
   const [onlyRestorable, setOnlyRestorable] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const points = useCatalogPoints(ns, name, onlyRestorable);
-  const flags = useFlags(ns);
+  const points = useCatalogPoints(ws, name, onlyRestorable);
+  const flags = useFlags(ws);
   const mayRestore = flags?.restoreCreate === true;
   const pages: PointPage[] = points.data?.pages ?? [];
   const pageFacts = { viewExpired: pages.some((p) => p.viewExpired), backupVerdictsIncomplete: pages.find((p) => p.backupVerdictsIncomplete)?.backupVerdictsIncomplete };
   const rows = pages.flatMap((p) => p.items);
   const redacted = rows.some((p) => isRedacted(p.receiptKey) || isRedacted(p.backupId));
-  const schema = rows.map((p) => ({ id: p.pointId, topics: schemaDependentTopics(p) })).filter((r) => r.topics.length > 0);
+  const schema = rows.map((p) => ({ id: p.pointId, topics: schemaDependentTopics(p), captured: p.schemaRegistry?.captured === true })).filter((r) => r.topics.length > 0);
 
   return (
     <Card>
@@ -285,7 +286,7 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                         <Td dataLabel="Signed by">{p.signerKeyId ? <Ident value={p.signerKeyId} label="signer key id" /> : <Value value={null} />}</Td>
                         <Td dataLabel="Restore" modifier="fitContent">
                           {restore ? (
-                            <Button component="a" href={restoreHref(ns, name, p.pointId)} variant="secondary" size="sm">
+                            <Button component="a" href={restoreHref(ws, name, p.pointId)} variant="secondary" size="sm">
                               Restore this point
                             </Button>
                           ) : (
@@ -327,6 +328,7 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                                   <Ident value={p.receiptSha256} label="receipt sha256" />
                                 </div>
                               </Term>
+                              <Term term="Schema Registry">{registryCaptureWords(p.schemaRegistry ?? null)}</Term>
                               <Term term="Format">
                                 <Value value={p.formatVersion} />
                               </Term>
@@ -363,11 +365,12 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
                 <Content component="h3" className="lw-small">
                   Schema-dependent topics
                 </Content>
-                <Alert isInline isPlain variant="warning" title={SCHEMA_REGISTRY_NOT_CAPTURED} />
+                {schema.some((r) => !r.captured) && <Alert isInline isPlain variant="warning" title={SCHEMA_REGISTRY_NOT_CAPTURED} />}
                 <ul className="lw-plain-list lw-small">
                   {schema.map((r) => (
                     <li key={r.id} className="lw-break">
                       <span className="lw-mono">{r.id}</span>: {r.topics.join(", ")}
+                      {r.captured && <span className="lw-subtle"> (registry captured)</span>}
                     </li>
                   ))}
                 </ul>
@@ -386,12 +389,12 @@ function PointsCard({ ns, name }: { ns: string; name: string }) {
 /** The document a trust administrator applies for an untrusted signer. Rendered, never submitted. */
 export function trustSnippet(keyIds: string[]): string[] {
   const lines = [
-    "# Add the key to the TrustPolicy that governs this namespace.",
+    "# Add the key to the TrustPolicy that governs this installation's namespace.",
     "# `state: Retired` verifies what it already signed and authorises nothing new.",
     "apiVersion: logweir.dev/v1alpha1",
     "kind: TrustPolicy",
     "metadata:",
-    "  name: <the policy that names this namespace>",
+    "  name: <the policy that names this installation's namespace>",
     "spec:",
     "  keys:",
   ];
@@ -492,12 +495,12 @@ function SignersCard({ signers }: { signers: SignerPage }) {
 }
 
 export function CatalogDetail() {
-  const { ns, name } = useParams({ from: "/$ns/catalog/$name" });
-  const catalog = useCatalog(ns, name);
-  const signers = useCatalogSigners(ns, name);
+  const { ws, name } = useParams({ from: "/$ws/catalog/$name" });
+  const catalog = useCatalog(ws, name);
+  const signers = useCatalogSigners(ws, name);
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
-      <BreadcrumbItem render={() => <Link to="/$ns/catalog" params={{ ns }}>Recovery catalog</Link>} />
+      <BreadcrumbItem render={() => <Link to="/$ws/catalog" params={{ ws }}>Recovery catalog</Link>} />
       <BreadcrumbItem isActive>{name}</BreadcrumbItem>
     </Breadcrumb>
   );
@@ -552,7 +555,7 @@ export function CatalogDetail() {
             <ViewCard c={c} />
           </GridItem>
           <GridItem>
-            <PointsCard ns={ns} name={c.name} />
+            <PointsCard ws={ws} name={c.name} />
           </GridItem>
           <GridItem>
             <Card>

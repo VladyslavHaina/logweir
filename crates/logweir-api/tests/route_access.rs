@@ -278,7 +278,7 @@ fn concrete(entry: &access::RouteAccess, namespace: &str) -> String {
     };
     let path = entry
         .path
-        .replace("{ns}", namespace)
+        .replace("{ws}", namespace)
         .replace("{kind}", "backup")
         .replace("{*path}", "index.html");
     // The LAST parameter of a command route is its target.
@@ -410,7 +410,7 @@ async fn every_role_is_refused_exactly_the_routes_its_row_does_not_hold() {
             }
             let allowed = match entry.access {
                 // Held in at least one bound namespace; this actor has one.
-                Access::AnyNamespace(action) => role.allows(action),
+                Access::AnyWorkspace(action) => role.allows(action),
                 _ => actions.iter().all(|a| role.allows(*a)),
             };
             shared.app.fake.clear_requests();
@@ -455,7 +455,7 @@ async fn an_unbound_namespace_is_404_on_every_namespaced_route_before_any_kubern
     let csrf = shared.csrf_for("only-in-a");
     let mut checked = 0;
     for entry in ROUTES {
-        if !entry.path.contains("{ns}") {
+        if !entry.path.contains("{ws}") {
             continue;
         }
         shared.app.fake.clear_requests();
@@ -475,7 +475,7 @@ async fn an_unbound_namespace_is_404_on_every_namespaced_route_before_any_kubern
     let own = send_as(
         &shared,
         "GET",
-        &format!("/api/v1/namespaces/{NS_A}/backups"),
+        &format!("/api/v1/workspaces/{NS_A}/backups"),
         Some(&cookie),
         None,
     )
@@ -512,7 +512,7 @@ async fn the_namespaceless_routes_are_decided_over_every_grant() {
 /// **localAdmin mode keeps working unchanged through the layer.** Every
 /// declared route is reachable by the local administrator in a configured
 /// namespace (no 401, no access 403), and an unconfigured namespace is still
-/// the informative `403 namespace_forbidden` rather than shared mode's 404.
+/// the informative `403 workspace_forbidden` rather than shared mode's 404.
 #[tokio::test]
 async fn local_admin_mode_passes_the_layer_on_every_route() {
     let app = TestApp::new();
@@ -542,9 +542,9 @@ async fn local_admin_mode_passes_the_layer_on_every_route() {
             response.text()
         );
     }
-    app.get("/api/v1/namespaces/elsewhere/backups")
+    app.get("/api/v1/workspaces/elsewhere/backups")
         .await
-        .assert_problem(403, "namespace_forbidden");
+        .assert_problem(403, "workspace_forbidden");
 }
 
 static DUMMY_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -691,7 +691,7 @@ async fn the_layer_alone_enforces_the_matrix_with_handlers_that_check_nothing() 
                     entry.path
                 );
             }
-            if entry.path.contains("{ns}") {
+            if entry.path.contains("{ws}") {
                 let (status, reached) = send(
                     entry.method,
                     concrete(entry, NS_B),
@@ -747,7 +747,7 @@ fn no_mutating_route_is_declared_with_a_viewers_action() {
 fn the_event_stream_is_declared_with_the_stream_action() {
     let access = access::lookup(
         &http::Method::GET,
-        "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+        "/api/v1/workspaces/{ws}/operations/{kind}/{name}/events",
     )
     .expect("the stream route is declared");
     assert_eq!(
@@ -759,7 +759,7 @@ fn the_event_stream_is_declared_with_the_stream_action() {
     assert_eq!(
         access::lookup(
             &http::Method::GET,
-            "/api/v1/namespaces/{ns}/operations/{kind}/{name}"
+            "/api/v1/workspaces/{ws}/operations/{kind}/{name}"
         )
         .unwrap()
         .actions(),
@@ -813,7 +813,7 @@ async fn an_undeclared_command_verb_fails_closed() {
         };
         let base = entry
             .path
-            .replace("{ns}", NS_A)
+            .replace("{ws}", NS_A)
             .replace("{name}", "x1{verb}")
             .replace("{id}", "x1{verb}");
         let unknown = base.replace("{verb}", ":promote-to-admin");

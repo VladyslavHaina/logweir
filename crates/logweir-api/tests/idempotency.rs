@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use support::{FakeKube, Options, TestApp, NS_A, NS_B};
 
 fn path(ns: &str, resource: &str) -> String {
-    format!("/api/v1/namespaces/{ns}/{resource}")
+    format!("/api/v1/workspaces/{ns}/{resource}")
 }
 
 fn posts(app: &TestApp) -> Vec<support::Recorded> {
@@ -375,7 +375,8 @@ async fn an_object_deleted_between_conflict_and_read_is_created_again() {
         .iter()
         .map(|r| r.method.clone())
         .collect();
-    assert_eq!(methods, vec!["POST", "GET", "POST"]);
+    // The leading GET is the reference check on `sourceRef` (PROD-19.1).
+    assert_eq!(methods, vec!["GET", "POST", "GET", "POST"]);
     other.fake.assert_strict();
 }
 

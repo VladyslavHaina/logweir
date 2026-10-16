@@ -31,7 +31,7 @@ export const OPERATING_ROLES: readonly string[] = ["operator", "administrator"];
 export interface Grant {
   /** False until the session has answered. */
   known: boolean;
-  /** The namespace grant's capability flags (`implemented && allowed`), or null without a grant. */
+  /** The workspace grant's capability flags (`implemented && allowed`), or null without a grant. */
   can: Capabilities | null;
   /**
    * A role, not a flag: the domain flags (`destinations`, `topicDiscovery`,
@@ -41,9 +41,9 @@ export interface Grant {
   mayOperate: boolean;
 }
 
-export function grantFor(session: Session | undefined, ns: string): Grant {
+export function grantFor(session: Session | undefined, ws: string): Grant {
   if (!session) return { known: false, can: null, mayOperate: false };
-  const grant = session.namespaces.find((g) => g.name === ns);
+  const grant = session.workspaces.find((g) => g.name === ws);
   if (!grant) return { known: true, can: null, mayOperate: false };
   const mayOperate =
     session.authenticationMode === "localAdmin" || grant.roles.some((r) => OPERATING_ROLES.includes(r));
@@ -60,8 +60,8 @@ export function mayStart(g: Grant, domain: "preflight" | "topicDiscovery" | "des
   return Boolean(g.can?.[domain]) && g.mayOperate;
 }
 
-export function useGrant(ns: string): Grant {
-  return grantFor(useSessionDoc(), ns);
+export function useGrant(ws: string): Grant {
+  return grantFor(useSessionDoc(), ws);
 }
 
 // ------------------------------------------------------- writes and errors
@@ -127,7 +127,7 @@ export function carriesKeyMaterial(text: unknown): boolean {
 
 /** What a field that is stored and shown back says when private-key text is typed into it. */
 export const KEY_IN_PLAIN_FIELD =
-  "This looks like a private key. This field is stored and shown to everyone who can read this namespace, so this page never takes a private key here.";
+  "This looks like a private key. This field is stored and shown to everyone who can read this workspace, so this page never takes a private key here.";
 
 // ------------------------------------------------------------- the probe
 
@@ -167,7 +167,7 @@ export const REFUSAL_GLOSS: Record<string, string> = {
   ConnectionConfigInvalid:
     "the saved settings contradict each other (plaintext with TLS on, a CA with TLS off, or two CA sources), so the controller refused to dial rather than dial something else",
   ConnectionReferenceInvalid:
-    "a reference on this object is not a legal Kubernetes name or data key, so nothing could be resolved in this namespace",
+    "a reference on this object is not a legal Kubernetes name or data key, so nothing could be resolved in this workspace",
   ConnectionFieldUnsupported: "this object sets a field this controller does not implement; it is refused rather than resolved without that field",
   CredentialNotRenderable:
     "the credential this connection needs cannot be rendered (a missing SASL username or Secret reference), so no run could present an identity",
@@ -353,12 +353,17 @@ export interface ConnectionValues {
   tls: boolean;
   caName: string;
   caKey: string;
+  /** OD-23 (PROD-03.1): the optional Schema Registry, set when the connection is created. */
+  registryUrl: string;
+  registryUsername: string;
+  /** Write-only: goes into the connection's own Secret under `registry-password`. */
+  registryPassword: string;
 }
 
 export type ConnectionField = keyof ConnectionValues;
 
 /** The fields that carry a credential: read for the one request, then cleared. */
-export const CONNECTION_SECRET_FIELDS = ["password", "certificatePem", "privateKeyPem"] as const satisfies readonly ConnectionField[];
+export const CONNECTION_SECRET_FIELDS = ["password", "certificatePem", "privateKeyPem", "registryPassword"] as const satisfies readonly ConnectionField[];
 
 export const CONNECTION_DEFAULTS: ConnectionValues = {
   role: "source",
@@ -371,6 +376,9 @@ export const CONNECTION_DEFAULTS: ConnectionValues = {
   tls: true,
   caName: "",
   caKey: "",
+  registryUrl: "",
+  registryUsername: "",
+  registryPassword: "",
 };
 
 const HOST_PORT = /^(\[[0-9A-Fa-f:.]+\]|[^\s:[\]/@]+):([0-9]{1,5})$/;
@@ -426,10 +434,19 @@ export function connectionProblems(v: ConnectionValues): Partial<Record<Connecti
   const caKey = v.caKey.trim();
   if (caName.length > 0 || caKey.length > 0) {
     if (!v.tls) p.caName = "A CA verifies a TLS transport, so naming one requires TLS on.";
-    else if (!isObjectName(caName)) p.caName = "The name of a ConfigMap in this namespace that holds the PEM CA certificate(s).";
+    else if (!isObjectName(caName)) p.caName = "The name of a ConfigMap in this workspace that holds the PEM CA certificate(s).";
     if (!isDataKey(caKey)) p.caKey = "The data key inside it: letters, digits, '-', '_' and '.'.";
   }
-  for (const f of ["servers", "username", "caName", "caKey"] as const) {
+  const registry = v.registryUrl.trim();
+  if (registry) {
+    const url = URL.canParse(registry) ? new URL(registry) : null;
+    if (!url || (url.protocol !== "https:" && url.protocol !== "http:")) p.registryUrl = "An http or https URL, such as https://schema-registry.kafka.svc:8081.";
+    else if (url.username || url.password) p.registryUrl = "The URL carries no username or password: type them in the fields below.";
+  } else if (v.registryUsername.trim() || v.registryPassword) {
+    p.registryUrl = "A registry username or password needs the registry URL.";
+  }
+  if (v.registryPassword && !v.registryUsername.trim()) p.registryUsername = "A registry password goes with a username (HTTP basic authentication).";
+  for (const f of ["servers", "username", "caName", "caKey", "registryUrl", "registryUsername"] as const) {
     if (carriesKeyMaterial(v[f])) p[f] = KEY_IN_PLAIN_FIELD;
   }
   return p;
@@ -447,7 +464,15 @@ export function connectionBody(v: ConnectionValues): CreateConnectionRequest {
   if (v.caName.trim().length > 0) {
     auth.tlsCa = { configMapKeyRef: { name: v.caName.trim(), key: v.caKey.trim() } };
   }
-  return { role: v.role, bootstrapServers: serverList(v.servers), auth };
+  const body: CreateConnectionRequest = { role: v.role, bootstrapServers: serverList(v.servers), auth };
+  if (v.registryUrl.trim()) {
+    body.schemaRegistry = {
+      url: v.registryUrl.trim(),
+      ...(v.registryUsername.trim() ? { username: v.registryUsername.trim() } : {}),
+      ...(v.registryPassword ? { password: v.registryPassword } : {}),
+    };
+  }
+  return body;
 }
 
 /** The form field an API field path is about, so a 422 lands beside it. */
@@ -463,12 +488,16 @@ export function connectionField(path: string, mode: ConnectionAuthMode): Connect
   if (path === "auth.credential" || path === "auth.credentialRef") return mode === "mtls" ? "certificatePem" : "password";
   if (path === "auth.tlsCa.configMapKeyRef.key") return "caKey";
   if (path.startsWith("auth.tlsCa")) return "caName";
+  if (path === "schemaRegistry.username") return "registryUsername";
+  if (path === "schemaRegistry.password") return "registryPassword";
+  if (path.startsWith("schemaRegistry")) return "registryUrl";
   return undefined;
 }
 
 /** Drops the credential from a request once it has been sent, so nothing that holds the request keeps it. */
 export function forgetConnectionCredential(body: CreateConnectionRequest): void {
   delete body.auth.credential;
+  if (body.schemaRegistry) delete body.schemaRegistry.password;
 }
 
 // ----------------------------------------------------------------- reads
@@ -494,17 +523,17 @@ export function connectionReReadMs(c: Connection | undefined, reads: number): nu
   return (probing(c) || awaitingFirstProbe(c)) && reads < PROBE_RE_READS ? PROBE_RE_READ_MS : false;
 }
 
-/** The namespace's connections (the Overview's list, one cache), re-read while a probe is in flight or awaited. */
-export function useConnectionList(ns: string) {
-  return useConnections(ns, (items, reads) => (items.some((c) => connectionReReadMs(c, reads) !== false) ? PROBE_RE_READ_MS : false));
+/** The workspace's connections (the Overview's list, one cache), re-read while a probe is in flight or awaited. */
+export function useConnectionList(ws: string) {
+  return useConnections(ws, (items, reads) => (items.some((c) => connectionReReadMs(c, reads) !== false) ? PROBE_RE_READ_MS : false));
 }
 
-export function useConnection(ns: string, name: string, enabled = true) {
-  const readable = useCan(ns, "connectionsRead");
+export function useConnection(ws: string, name: string, enabled = true) {
+  const readable = useCan(ws, "connectionsRead");
   return useQuery({
-    queryKey: keys.item("connections", ns, name),
+    queryKey: keys.item("connections", ws, name),
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/connections/{name}", { params: { path: { ns, name } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/connections/{name}", { params: { path: { ws, name } }, signal }))).item,
     enabled: enabled && readable,
     refetchInterval: (q) => connectionReReadMs(q.state.data, q.state.dataUpdateCount),
     retry: (count, error) => !(error instanceof ApiError && (error.status === 404 || error.status === 403)) && count < 2,
@@ -513,13 +542,13 @@ export function useConnection(ns: string, name: string, enabled = true) {
 
 // ---------------------------------------------------------------- writes
 
-export function useCreateConnection(ns: string) {
+export function useCreateConnection(ws: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ key, body }: { key: string; body: CreateConnectionRequest }) => {
       try {
         return await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/connections", { params: { path: { ns }, header: createHeaders(key) }, body }),
+          api.POST("/api/v1/workspaces/{ws}/connections", { params: { path: { ws }, header: createHeaders(key) }, body }),
         );
       } finally {
         // The request is serialized before it is sent; the copy the mutation
@@ -527,7 +556,7 @@ export function useCreateConnection(ns: string) {
         forgetConnectionCredential(body);
       }
     },
-    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("connections", ns) }),
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.list("connections", ws) }),
   });
 }
 
@@ -584,13 +613,13 @@ function useFollowingSince(id: string | null): number {
 }
 
 /** Reads one preflight and follows it until a read answers terminal, the deadline passes, or a read fails. */
-export function useFollowedPreflight(ns: string, id: string | null) {
+export function useFollowedPreflight(ws: string, id: string | null) {
   const at = useFollowingSince(id);
-  const readable = useCan(ns, "preflight");
+  const readable = useCan(ws, "preflight");
   const query = useQuery({
-    queryKey: ["preflights", ns, id],
+    queryKey: ["preflights", ws, id],
     queryFn: async ({ signal }) =>
-      (await call(() => api.GET("/api/v1/namespaces/{ns}/preflights/{id}", { params: { path: { ns, id: id ?? "" } }, signal }))).item,
+      (await call(() => api.GET("/api/v1/workspaces/{ws}/preflights/{id}", { params: { path: { ws, id: id ?? "" } }, signal }))).item,
     enabled: id !== null && readable,
     retry: 3,
     refetchInterval: (q) =>
@@ -604,13 +633,13 @@ export function useFollowedPreflight(ns: string, id: string | null) {
 }
 
 /** "Test connection": one `sourceConnection` Preflight per click. */
-export function useStartConnectionCheck(ns: string, name: string) {
+export function useStartConnectionCheck(ws: string, name: string) {
   return useMutation({
     mutationFn: async (key: string) =>
       (
         await call(() =>
-          api.POST("/api/v1/namespaces/{ns}/preflights", {
-            params: { path: { ns }, header: createHeaders(key) },
+          api.POST("/api/v1/workspaces/{ws}/preflights", {
+            params: { path: { ws }, header: createHeaders(key) },
             body: { operation: "sourceConnection", sourceConnection: { connectionRef: name } },
           }),
         )
@@ -626,16 +655,16 @@ export interface DiscoverySlots {
 }
 
 /** `?latest=true`: the two slots, so a failed attempt never hides the last inventory and the reverse. */
-export function useDiscoverySlots(ns: string, name: string, enabled = true) {
+export function useDiscoverySlots(ws: string, name: string, enabled = true) {
   const [followFrom, setFollowFrom] = useState<string | null>(null);
   const at = useFollowingSince(followFrom);
-  const readable = useCan(ns, "topicDiscovery");
+  const readable = useCan(ws, "topicDiscovery");
   const query = useQuery({
-    queryKey: ["topic-discoveries", ns, "slots", name],
+    queryKey: ["topic-discoveries", ws, "slots", name],
     queryFn: async ({ signal }): Promise<DiscoverySlots> => {
       const answer = (await call(() =>
-        api.GET("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
-          params: { path: { ns, name }, query: { latest: true } },
+        api.GET("/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries", {
+          params: { path: { ws, name }, query: { latest: true } },
           signal,
         }),
       )) as unknown as Partial<DiscoverySlots>;
@@ -674,31 +703,31 @@ export function discoveryBody(v: DiscoveryRequest): S["CreateTopicDiscoveryReque
   return body;
 }
 
-export function useStartDiscovery(ns: string, name: string) {
+export function useStartDiscovery(ws: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async ({ key, request }: { key: string; request: DiscoveryRequest }) =>
       call(() =>
-        api.POST("/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries", {
-          params: { path: { ns, name }, header: createHeaders(key) },
+        api.POST("/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries", {
+          params: { path: { ws, name }, header: createHeaders(key) },
           body: discoveryBody(request),
         }),
       ),
-    // Every discovery read of the namespace: these slots and a schedule form's topic offer.
-    onSuccess: () => client.invalidateQueries({ queryKey: ["topic-discoveries", ns] }),
+    // Every discovery read of the workspace: these slots and a schedule form's topic offer.
+    onSuccess: () => client.invalidateQueries({ queryKey: ["topic-discoveries", ws] }),
   });
 }
 
-export function useCancelDiscovery(ns: string, name: string) {
+export function useCancelDiscovery(ws: string, name: string) {
   const client = useQueryClient();
   return useMutation({
     mutationFn: async (id: string) =>
       call(() =>
-        api.POST("/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel", {
-          params: { path: { ns, id }, header: { Origin: window.location.origin } },
+        api.POST("/api/v1/workspaces/{ws}/topic-discoveries/{id}:cancel", {
+          params: { path: { ws, id }, header: { Origin: window.location.origin } },
         }),
       ),
-    onSettled: () => client.invalidateQueries({ queryKey: ["topic-discoveries", ns, "slots", name] }),
+    onSettled: () => client.invalidateQueries({ queryKey: ["topic-discoveries", ws, "slots", name] }),
   });
 }
 
@@ -715,10 +744,10 @@ type TopicQuery = NonNullable<
   operations["listDiscoveredTopics"]["parameters"]["query"]
 >;
 
-export function useTopicPage(ns: string, id: string | null, filters: TopicFilters, cursor: string | null) {
-  const readable = useCan(ns, "topicDiscovery");
+export function useTopicPage(ws: string, id: string | null, filters: TopicFilters, cursor: string | null) {
+  const readable = useCan(ws, "topicDiscovery");
   return useQuery({
-    queryKey: ["topic-discoveries", ns, "topics", id, filters, cursor],
+    queryKey: ["topic-discoveries", ws, "topics", id, filters, cursor],
     queryFn: async ({ signal }) => {
       const query: TopicQuery = { limit: TOPIC_PAGE_LIMIT };
       if (filters.q.trim()) query.q = filters.q.trim();
@@ -727,8 +756,8 @@ export function useTopicPage(ns: string, id: string | null, filters: TopicFilter
       if (filters.errored !== "include") query.errored = filters.errored;
       if (cursor) query.cursor = cursor;
       return call(() =>
-        api.GET("/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics", {
-          params: { path: { ns, id: id ?? "" }, query },
+        api.GET("/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics", {
+          params: { path: { ws, id: id ?? "" }, query },
           signal,
         }),
       );

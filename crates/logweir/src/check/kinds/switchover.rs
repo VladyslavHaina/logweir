@@ -986,6 +986,7 @@ mod tests {
                 client_cert_file: None,
                 client_key_file: None,
                 principal: "User:ANONYMOUS".into(),
+                schema_registry: None,
             },
             evidence: DestinationPlan {
                 name: "evidence".into(),

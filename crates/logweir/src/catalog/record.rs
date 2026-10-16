@@ -78,6 +78,14 @@ pub const FORMAT_VERSION_WITH_GENERATIONS: &str = "1.6.0";
 /// Written only for a backup that selected consumer groups.
 pub const FORMAT_VERSION_WITH_CONSUMER_POSITIONS: &str = "1.7.0";
 
+/// The format of a record that carries `schema_registry` — copied from a
+/// receipt that is itself 1.9.0
+/// (`logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY`). A
+/// MINOR bump over [`FORMAT_VERSION_WITH_CONSUMER_POSITIONS`]: one optional
+/// field, which an older reader ignores, and 1.8.0 includes every earlier
+/// minor. Written only for a backup whose source connection names a registry.
+pub const FORMAT_VERSION_WITH_SCHEMA_REGISTRY: &str = "1.8.0";
+
 /// `lwp1-`: the identity scheme's own version, inside the identifier.
 ///
 /// It is part of the id and not metadata beside it, so a future scheme cannot
@@ -353,6 +361,12 @@ pub struct CatalogPoint {
     /// never "no positions".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<RecordConsumerPositions>,
+    /// **Format 1.8.0 (PROD-03.1).** The receipt's `schema_registry`,
+    /// summarised: captured, its counts, and why it is incomplete. Receipt-
+    /// derived under rule 3. ABSENT means the registry was not captured (the
+    /// source connection names none, or the record predates 1.8.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<logweir_core::schema_registry::PointSchemaRegistry>,
 }
 
 /// **PROD-04.1.** A receipt's `consumer_positions`, as the catalog carries it.

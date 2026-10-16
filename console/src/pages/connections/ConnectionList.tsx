@@ -1,4 +1,4 @@
-// Every saved connection in the namespace: where it points, how it
+// Every saved connection in the workspace: where it points, how it
 // authenticates, and what the controller's probe last saw.
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
@@ -14,7 +14,7 @@ import { AddConnection } from "./AddConnection";
 import { Instant, ProbeLabels } from "./parts";
 
 export const READ_ONLY_SENTENCE =
-  "This login may read the connections in this namespace and not add one: that needs the operator or administrator role.";
+  "This login may read the connections in this workspace and not add one: that needs the operator or administrator role.";
 
 /** How a connection authenticates, in one line: the mode, the principal, TLS, and the credential Secret's name. */
 export function authText(c: Connection): string {
@@ -46,11 +46,11 @@ function matches(c: Connection, needle: string): boolean {
 }
 
 export function ConnectionList() {
-  const { ns } = useParams({ from: "/$ns/connections" });
+  const { ws } = useParams({ from: "/$ws/connections" });
   const navigate = useNavigate();
-  const grant = useGrant(ns);
+  const grant = useGrant(ws);
   const readable = grant.can?.connectionsRead !== false;
-  const list = useConnectionList(ns);
+  const list = useConnectionList(ws);
   const narrow = useNarrow();
   const [search, setSearch] = useState("");
   const [adding, setAdding] = useState(false);
@@ -74,7 +74,7 @@ export function ConnectionList() {
         <Card>
           {!readable ? (
             <Empty title="Not available to you here" icon={PlugIcon}>
-              Your roles in {ns} do not include reading connections.
+              Your roles in {ws} do not include reading connections.
             </Empty>
           ) : list.isPending ? (
             <div className="lw-pad">
@@ -126,7 +126,7 @@ export function ConnectionList() {
                     const probe = probeState(c.reachability);
                     return {
                       key: c.uid,
-                      href: `#/${ns}/connections/${c.name}`,
+                      href: `#/${ws}/connections/${c.name}`,
                       title: c.name,
                       meta: (
                         <>
@@ -153,7 +153,7 @@ export function ConnectionList() {
                       return (
                         <Tr key={c.uid}>
                           <Td dataLabel="Name">
-                            <Link to="/$ns/connections/$name" params={{ ns, name: c.name }} className="lw-break">
+                            <Link to="/$ws/connections/$name" params={{ ws, name: c.name }} className="lw-break">
                               {c.name}
                             </Link>
                             <div className="lw-subtle lw-small">{c.role}</div>
@@ -212,11 +212,11 @@ export function ConnectionList() {
       </PageSection>
       {adding && (
         <AddConnection
-          ns={ns}
+          ws={ws}
           onClose={() => setAdding(false)}
           onCreated={(name) => {
             setAdding(false);
-            void navigate({ to: "/$ns/connections/$name", params: { ns, name } });
+            void navigate({ to: "/$ws/connections/$name", params: { ws, name } });
           }}
         />
       )}

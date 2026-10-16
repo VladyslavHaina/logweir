@@ -20,11 +20,11 @@ use crate::authz::{Capabilities, Role};
 
 // SHARED PIECES.
 
-/// A same-namespace reference by name.
+/// A same-workspace reference by name.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct NameRef {
-    /// The referenced object's name, in the same namespace.
+    /// The referenced object's name, in the same workspace.
     pub name: String,
 }
 
@@ -35,7 +35,7 @@ pub struct Page {
     /// The page size that was applied.
     pub limit: u32,
     /// An opaque cursor for the next page, valid for fifteen minutes for the
-    /// same actor, route, namespace and filters; absent on the last page.
+    /// same actor, route, workspace and filters; absent on the last page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
     /// The Kubernetes list resourceVersion this page was read at.
@@ -83,7 +83,7 @@ pub struct HealthStatus {
     pub status: String,
 }
 
-// SESSION AND NAMESPACES.
+// SESSION AND WORKSPACES.
 
 /// The authenticated actor.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -99,11 +99,11 @@ pub struct ActorView {
     pub display_name: String,
 }
 
-/// One explicitly granted namespace.
+/// One workspace the actor holds a role in.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct NamespaceGrant {
-    /// The namespace name.
+pub struct WorkspaceGrant {
+    /// The workspace name.
     pub name: String,
     /// The product roles the actor holds here, sorted and unioned across every
     /// binding that matched. Empty in localAdmin mode, which has no roles.
@@ -132,20 +132,21 @@ pub struct SessionResponse {
     /// these grants. It is recorded in every audit line, so a decision can be
     /// tied to the configuration that made it. Empty in localAdmin mode.
     pub binding_revision: String,
-    /// The explicitly granted namespaces.
-    pub namespaces: Vec<NamespaceGrant>,
+    /// The workspaces the actor holds a role in.
+    pub workspaces: Vec<WorkspaceGrant>,
     /// The union of the grants' capabilities.
     pub capabilities: Capabilities,
 }
 
-/// `GET /api/v1/namespaces`.
+/// `GET /api/v1/workspaces`.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct NamespaceListResponse {
+pub struct WorkspaceListResponse {
     /// The request ID.
     pub request_id: String,
-    /// The configured grants. Core `Namespace` objects are never listed.
-    pub items: Vec<NamespaceGrant>,
+    /// The actor's grants, from configuration. Core `Namespace` objects are
+    /// never listed.
+    pub items: Vec<WorkspaceGrant>,
 }
 
 // CONNECTIONS (KafkaCluster).
@@ -177,11 +178,12 @@ pub enum ConnectionAuthMode {
     Mtls,
 }
 
-/// One key of a ConfigMap in this namespace.
+/// One key of a ConfigMap in the installation's namespace. ConfigMaps are not
+/// held to a workspace: name only a public CA bundle.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ObjectKeyRefRequest {
-    /// The object's name, in the same namespace.
+    /// The ConfigMap's name.
     pub name: String,
     /// The data key.
     pub key: String,
@@ -210,7 +212,7 @@ pub struct TlsCaRequest {
 /// connection, bound to it (`logweir-binding`) — and is never echoed in any
 /// response, log line, status, annotation or audit record; the only thing that
 /// comes out of it is the Secret's NAME. This replaces naming an existing
-/// Secret: a connection that could name any Secret in the namespace could make
+/// Secret: a connection that could name any Secret in the workspace could make
 /// Logweir present another team's credential to a broker of its author's
 /// choosing.
 ///
@@ -312,7 +314,7 @@ impl ConnectionAuthRequest {
     }
 }
 
-/// `POST /api/v1/namespaces/{ns}/connections`.
+/// `POST /api/v1/workspaces/{ws}/connections`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateConnectionRequest {
@@ -325,6 +327,63 @@ pub struct CreateConnectionRequest {
     /// The marker topic that proves a scratch target.
     #[serde(default)]
     pub marker_topic: Option<String>,
+    /// **PROD-03.1.** The cluster's Schema Registry: captured by a backup of
+    /// this connection, written by a restore into it. The password, when
+    /// given, goes into the connection's own Secret under
+    /// `registry-password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistryRequest>,
+}
+
+/// A new connection's Schema Registry. `Debug` and `Serialize` never carry the
+/// password.
+#[derive(Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SchemaRegistryRequest {
+    /// `http://` or `https://`, no userinfo, query or fragment.
+    pub url: String,
+    /// The basic-auth username; given exactly when `password` is.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// The basic-auth password, entered once.
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+impl std::fmt::Debug for SchemaRegistryRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SchemaRegistryRequest")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &write_only(self.password.as_ref()))
+            .finish()
+    }
+}
+
+impl Serialize for SchemaRegistryRequest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("SchemaRegistryRequest", 3)?;
+        out.serialize_field("url", &self.url)?;
+        out.serialize_field("username", &self.username)?;
+        out.serialize_field("password", &write_only(self.password.as_ref()))?;
+        out.end()
+    }
+}
+
+/// A stored connection's Schema Registry: the URL, the username and the
+/// Secret's NAME. Never the password.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SchemaRegistryView {
+    /// The registry URL.
+    pub url: String,
+    /// The basic-auth username.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// The Secret holding the password, by name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential_ref: Option<NameRef>,
 }
 
 /// Where a stored connection's CA certificate is — a reference, never the
@@ -401,7 +460,7 @@ pub struct ReachabilityView {
 pub struct Connection {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -431,6 +490,9 @@ pub struct Connection {
     /// bounded label scan, and a page of connections would be one per row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_test: Option<LastTestView>,
+    /// The connection's Schema Registry (PROD-03.1), when it names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<SchemaRegistryView>,
 }
 
 // SCHEDULES (BackupSchedule).
@@ -441,7 +503,7 @@ pub struct Connection {
 pub struct ArchiveRequest {
     /// `s3://`, `gs://`, `az://` or `file:///`; no userinfo.
     pub url: String,
-    /// An existing Secret in this namespace carrying the object-store
+    /// An existing Secret in this workspace carrying the object-store
     /// credential.
     #[serde(default)]
     pub credential_ref: Option<NameRef>,
@@ -470,7 +532,7 @@ pub struct RetentionRequest {
     pub keep_days: Option<i64>,
 }
 
-/// `POST /api/v1/namespaces/{ns}/schedules`.
+/// `POST /api/v1/workspaces/{ws}/schedules`.
 ///
 /// # It creates what the edit route can edit (PLAT-10.1)
 ///
@@ -515,7 +577,7 @@ pub struct CreateScheduleRequest {
     /// pre-PLAT-04.2 schedule does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
-    /// The source connection, in this namespace.
+    /// The source connection, in this workspace.
     pub source_ref: NameRef,
     /// Named topics, up to 256; patterns are refused. Empty only with
     /// `allUserTopics`.
@@ -548,7 +610,7 @@ pub struct CreateScheduleRequest {
     /// `destinationRef`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archive: Option<ArchiveRequest>,
-    /// A saved `BackupDestination` in this namespace. Exactly one of `archive`
+    /// A saved `BackupDestination` in this workspace. Exactly one of `archive`
     /// or `destinationRef`; the sentinel `archive.url` the CRD requires is
     /// built by the route and is never accepted from a body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,7 +638,7 @@ pub struct CreateScheduleRequest {
     pub suspended: bool,
 }
 
-/// `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension`.
+/// `POST /api/v1/workspaces/{ws}/schedules/{name}:set-suspension`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SetSuspensionRequest {
@@ -663,7 +725,7 @@ pub struct ScheduleStatusView {
 pub struct Schedule {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -772,8 +834,14 @@ pub enum OperationState {
     Failed,
     /// A guard or the controller refused the run before anything executed.
     Refused,
-    /// Cancelled. Not produced by current resources (no cancel exists).
+    /// Cancelled before it created anything (PROD-07.2: a restore whose
+    /// cancel landed before its Job, or that stopped before its creation
+    /// step).
     Cancelled,
+    /// PROD-07.2: stopped before it finished after it created its target
+    /// topics; nothing was resumed. `interruption` says why and what the
+    /// reconcile found.
+    Interrupted,
     /// A phase this build does not recognise.
     Unknown,
 }
@@ -897,7 +965,7 @@ pub struct Operation {
     pub kind: OperationKind,
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -976,7 +1044,7 @@ pub struct OperationSummary {
 pub struct Backup {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -1000,7 +1068,7 @@ pub struct Backup {
     /// a console renders the destination instead of the URL.
     pub archive: ArchiveView,
     /// The saved `BackupDestination` this run was written to, in this
-    /// namespace.
+    /// workspace.
     ///
     /// ABSENT means the run carries its archive location INLINE in `archive`,
     /// exactly as every run did before saved destinations existed. It is a
@@ -1054,7 +1122,7 @@ pub struct Backup {
     /// The identity the run presented: mode and username, never a password.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_auth: Option<ObservedAuthView>,
-    /// P10: present while this MANUAL run waits for a slot in its namespace's
+    /// P10: present while this MANUAL run waits for a slot in its workspace's
     /// manual-run pool (`operation.state: queued`, reason
     /// `ConcurrencyLimited`) — the ceiling it is queued behind. Absent on
     /// every other run, and on anything an older controller wrote.
@@ -1064,15 +1132,15 @@ pub struct Backup {
     pub operation: OperationSummary,
 }
 
-/// P10: why a manual run has no Job yet — the per-namespace ceiling of its
+/// P10: why a manual run has no Job yet — the per-workspace ceiling of its
 /// manual-run pool, copied from the object's `status.queue`. Nothing that
 /// moves (a count, a place in line) is published: the controller does not
 /// record one.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RunQueueView {
-    /// The ceiling: `runs.maxManualBackupsActivePerNamespace` for a Backup,
-    /// `runs.maxManualRestoresActivePerNamespace` for a Restore.
+    /// The ceiling: `runs.maxManualBackupsActivePerWorkspace` for a Backup,
+    /// `runs.maxManualRestoresActivePerWorkspace` for a Restore.
     pub limit: i64,
     /// A queued Restore's approval deadline — the signed `expires_at` of its
     /// authorization. The queue does not extend it: a restore still queued at
@@ -1118,7 +1186,7 @@ pub struct TriggerView {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleRefView {
-    /// The schedule's name, in this namespace.
+    /// The schedule's name, in this workspace.
     pub name: String,
     /// Its UID. A schedule deleted and recreated under the same name is a
     /// different schedule; a run of the old one is not a run of the new one.
@@ -1145,7 +1213,7 @@ pub struct ScheduleRefView {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupDestinationRefView {
-    /// The destination's name, in this namespace.
+    /// The destination's name, in this workspace.
     pub name: String,
     /// Its `metadata.uid` as the freeze recorded it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1200,7 +1268,7 @@ pub enum RestoreCoverage {
 }
 
 /// **OD-10.** The typed confirmation of a restore under the original topic
-/// names on a one-person-confirmation namespace.
+/// names on a one-person-confirmation workspace.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct OriginalNameConfirmationRequest {
@@ -1233,7 +1301,7 @@ pub struct TopicNamingRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct RestoreTargetRequest {
-    /// The target connection, in this namespace.
+    /// The target connection, in this workspace.
     pub cluster_ref: NameRef,
     /// `scratch` or `newTopic`.
     pub mode: RestoreMode,
@@ -1262,7 +1330,7 @@ pub struct TopicMappingRow {
     pub target: String,
 }
 
-/// `POST /api/v1/namespaces/{ns}/restores`.
+/// `POST /api/v1/workspaces/{ws}/restores`.
 ///
 /// `planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of
 /// exactly these bytes and stores them unchanged. It never parses or
@@ -1274,7 +1342,7 @@ pub struct CreateRestoreRequest {
     pub plan_bytes: String,
     /// `sha256:<lowercase hex>` of `planBytes`, as the client computed it.
     pub plan_hash: String,
-    /// The Approval that will authorise this restore, in this namespace. It
+    /// The Approval that will authorise this restore, in this workspace. It
     /// need not exist yet: the controller holds the restore until it
     /// verifies.
     pub approval_ref: NameRef,
@@ -1307,8 +1375,8 @@ pub struct CreateRestoreRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_mapping: Option<Vec<TopicMappingRow>>,
     /// PLAT-19.2: the change ticket the console signs into the authorization
-    /// document. REQUIRED in a namespace bound to a Governed policy (D0),
-    /// optional under Ordinary, refused in an unbound namespace (which signs
+    /// document. REQUIRED in a workspace bound to a Governed policy (D0),
+    /// optional under Ordinary, refused in an unbound workspace (which signs
     /// nothing; `logweir drill approve --ticket` carries it there). At most
     /// 128 printable characters. Absent keeps the idempotency hash unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1330,7 +1398,7 @@ pub struct CreateRestoreRequest {
     /// **OD-10 (PROD-15.1 review M1).** The original topic names the
     /// requester RE-TYPED to confirm a restore under the ORIGINAL topic names
     /// alone. REQUIRED for a request declaring `target.topicNaming.originalName`
-    /// in a namespace confirmed by one person (`confirm`, internal
+    /// in a workspace confirmed by one person (`confirm`, internal
     /// `Ordinary`), where it must be exactly the plan's `source.topics`
     /// (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere
     /// else (`not_accepted`). The console signs it into the authorization
@@ -1377,7 +1445,7 @@ pub enum ApprovalSubjectView {
 pub struct Restore {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -1435,7 +1503,7 @@ pub struct Restore {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_topics_appeared: Option<CreationStopView>,
     /// P10: present while this admitted MANUAL restore waits for a slot in its
-    /// namespace's manual-restore pool (`operation.state: queued`).
+    /// workspace's manual-restore pool (`operation.state: queued`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue: Option<RunQueueView>,
     /// FX-8 (review M-2): the signed scorecard's `source.time_basis` as the
@@ -1480,6 +1548,10 @@ pub struct Restore {
     /// run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic_configuration: Option<TopicConfigurationView>,
+    /// PROD-07.2: a run that ended without a signed scorecard after it
+    /// created its target topics. ABSENT on every other run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interruption: Option<RestoreInterruptionView>,
     /// The source topics the new ones were restored from
     /// (`status.oldTopics`), at most 100. Nothing here was written to.
     /// Empty when none is recorded.
@@ -1488,6 +1560,34 @@ pub struct Restore {
     pub old_topics: Vec<String>,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// `Restore.interruption` (PROD-07.2), from `status.interruption`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreInterruptionView {
+    /// `Cancelled`, `RunnerStopped` or `RunFailed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
+    /// Who asked for the cancel.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
+    /// `Running`, `Done` or `Failed`: the reconcile of the partial targets.
+    /// Its signed scorecard's counts are this restore's `integrity` and
+    /// `coverage`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification: Option<String>,
+    /// Why the reconcile failed, or what it found when nothing was left.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_reason: Option<String>,
+    /// Whether `cleanup` may be requested now.
+    pub cleanup_offered: bool,
+    /// The cleanup: `Removing`, `Removed` or `RemovalFailed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup: Option<String>,
+    /// Why the cleanup failed, when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cleanup_reason: Option<String>,
 }
 
 /// `Restore.topicPreflight`: the target topic's configuration as phase 0
@@ -1594,6 +1694,25 @@ pub struct RestoreCoverageView {
     /// a scorecard not read), never bound and never unbound.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub positions_mapping: Option<PositionsMappingView>,
+    /// **PROD-03.2.** The schemas the run imported into the target registry
+    /// keeping their IDs, how many were there already, or why none were:
+    /// copied from `status.integrity.schemas`. ABSENT: no registry on either
+    /// side, or not recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<RestoreSchemasView>,
+}
+
+/// `Restore.coverage.schemas` (PROD-03.2).
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSchemasView {
+    /// Subject-versions imported with their source IDs.
+    pub imported: u64,
+    /// Subject-versions the target already held.
+    pub already_present: u64,
+    /// `noTargetRegistry` or `noSnapshot` when nothing was imported.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_imported: Option<String>,
 }
 
 /// **DUI-50.** `Restore.coverage.positionsMapping`: what the signed scorecard
@@ -1736,7 +1855,7 @@ pub struct VerifiedSubjectView {
     pub kind: String,
     /// The subject name.
     pub name: String,
-    /// The subject namespace.
+    /// The subject namespace (the install's).
     pub namespace: String,
     /// The subject UID.
     pub uid: String,
@@ -1749,7 +1868,7 @@ pub struct VerifiedSubjectView {
 pub struct Approval {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -1819,7 +1938,7 @@ pub struct ApprovalProvenanceView {
 pub struct ApprovalPacket {
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -1871,7 +1990,7 @@ pub enum TransportSecurityDto {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum AccessModeDto {
-    /// Keys read from a Secret in this namespace, projected into the Job.
+    /// Keys read from a Secret in this workspace, projected into the Job.
     SecretKeys,
     /// The pod's own ServiceAccount identity; no Secret is projected.
     WorkloadIdentity,
@@ -1941,12 +2060,13 @@ pub struct StorageRequest {
     pub addressing: AddressingDto,
 }
 
-/// A CA bundle in a `ConfigMap` in this namespace. A `ConfigMap` and never a
-/// Secret: a CA certificate is public material.
+/// A CA bundle in a `ConfigMap` in the installation's namespace (ConfigMaps are
+/// not held to a workspace). A `ConfigMap` and never a Secret: a CA certificate
+/// is public material.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CaBundleRequest {
-    /// The `ConfigMap` name, in this namespace.
+    /// The `ConfigMap` name.
     pub config_map_name: String,
     /// The data key holding the PEM bundle. Absent means `ca.crt`.
     #[serde(default)]
@@ -2006,7 +2126,7 @@ impl Serialize for NewCredentialRequest {
     }
 }
 
-/// An existing Secret in this namespace, and the keys inside it.
+/// An existing Secret in this workspace, and the keys inside it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ExistingSecretRequest {
@@ -2090,7 +2210,7 @@ pub struct ReadinessRequest {
     pub write_probe: Option<WriteProbeDto>,
 }
 
-/// `POST /api/v1/namespaces/{ns}/destinations`.
+/// `POST /api/v1/workspaces/{ws}/destinations`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateDestinationRequest {
@@ -2109,8 +2229,8 @@ pub struct CreateDestinationRequest {
     /// Readiness settings.
     #[serde(default)]
     pub readiness: Option<ReadinessRequest>,
-    /// Whether this becomes the namespace's default destination. At most one
-    /// destination per namespace may hold it, and a second request naming
+    /// Whether this becomes the workspace's default destination. At most one
+    /// destination per workspace may hold it, and a second request naming
     /// another default is a conflict rather than a silent takeover.
     #[serde(default)]
     pub default: Option<bool>,
@@ -2278,7 +2398,7 @@ pub struct LastTestView {
 pub struct Destination {
     /// The object name, which is how everything else references it.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -2309,7 +2429,7 @@ pub struct Destination {
     pub location_digest: Option<String>,
     /// The controller's verdict.
     pub status: DestinationStatusView,
-    /// Whether this is the namespace's default destination.
+    /// Whether this is the workspace's default destination.
     pub default: bool,
     /// The most recent explicit access test.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2340,7 +2460,7 @@ pub struct DestinationSummary {
     pub addressing: AddressingDto,
     /// The controller's verdict.
     pub status: DestinationStatusView,
-    /// Whether this is the namespace's default destination.
+    /// Whether this is the workspace's default destination.
     pub default: bool,
 }
 
@@ -2528,7 +2648,7 @@ pub struct CheckErrorView {
 pub struct TopicDiscovery {
     /// The object name, which is the id every other route uses.
     pub id: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -3051,9 +3171,9 @@ pub struct ExecutionOnlyView {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BackupPreflightRequest {
-    /// The source connection, in this namespace.
+    /// The source connection, in this workspace.
     pub source_connection: String,
-    /// The destination, in this namespace.
+    /// The destination, in this workspace.
     #[serde(default)]
     pub destination: Option<String>,
     /// Or a legacy inline archive.
@@ -3084,7 +3204,7 @@ pub struct RecoveryPointRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CatalogPointRequest {
-    /// The catalog, in this namespace.
+    /// The catalog, in this workspace.
     pub catalog: String,
     /// The content-derived point id: `lwp1-` plus 32 lowercase hex.
     pub point_id: String,
@@ -3142,7 +3262,7 @@ pub struct DestinationAccessPreflightRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SourceConnectionPreflightRequest {
-    /// The `KafkaCluster` to dial, in this namespace. REQUIRED: a connectivity
+    /// The `KafkaCluster` to dial, in this workspace. REQUIRED: a connectivity
     /// check with no connection is not a smaller check, it is no check, and
     /// the absence is refused as `422 connectionRef required` rather than
     /// defaulted to anything.
@@ -3164,7 +3284,7 @@ pub struct SwitchoverPreflightGroup {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SwitchoverPreflightRequest {
-    /// The verified `Restore`, in this namespace.
+    /// The verified `Restore`, in this workspace.
     pub restore_name: String,
     /// Its UID, when the caller knows it: a replaced restore is then refused.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3210,7 +3330,7 @@ pub struct CreatePreflightRequest {
 pub struct Preflight {
     /// The object name, which is the id every other route uses.
     pub id: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -3328,7 +3448,7 @@ pub struct CheckOperation {
     pub kind: CheckOperationKind,
     /// The object name.
     pub name: String,
-    /// The namespace.
+    /// The namespace: the install's, for `kubectl`.
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
@@ -3580,7 +3700,7 @@ pub struct RetryPolicy {
     pub delay_seconds: Option<i64>,
 }
 
-/// `PUT /api/v1/namespaces/{ns}/schedules/{name}` — the editable future policy
+/// `PUT /api/v1/workspaces/{ws}/schedules/{name}` — the editable future policy
 /// (D1 §5.1, §5.6).
 ///
 /// THE WHOLE POLICY, NOT A DIFF. Every mutable field is sent; a field omitted
@@ -3620,7 +3740,7 @@ pub struct UpdateSchedulePolicyRequest {
     /// `destinationRef`.
     #[serde(default)]
     pub archive: Option<ArchiveRequest>,
-    /// A saved `BackupDestination` in this namespace. Exactly one of `archive`
+    /// A saved `BackupDestination` in this workspace. Exactly one of `archive`
     /// or `destinationRef`; the sentinel `archive.url` the CRD requires is
     /// built here and is never accepted from a body.
     #[serde(default)]
@@ -3692,7 +3812,7 @@ pub struct LastSlotView {
     /// word a newer controller adds is carried verbatim.
     pub disposition: String,
     /// The `Backup` the disposition is about, when there is one — a name in
-    /// this namespace, which every reader of the schedule may already list.
+    /// this workspace, which every reader of the schedule may already list.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_ref: Option<NameRef>,
     /// The `Ready` reason that accompanied the decision.
@@ -3752,7 +3872,7 @@ pub struct ActiveRunView {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct BackupScheduleRefRequest {
-    /// The `BackupSchedule` name, in this namespace.
+    /// The `BackupSchedule` name, in this workspace.
     pub name: String,
     /// The revision the caller believes it is running. A different current
     /// generation is `409 policy_changed`, with the current generation and
@@ -3780,13 +3900,13 @@ pub enum AcknowledgedReadiness {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ReadinessAcknowledgementRequest {
-    /// The `Preflight` whose verdict was shown, in this namespace.
+    /// The `Preflight` whose verdict was shown, in this workspace.
     pub preflight: String,
     /// What it said.
     pub state: AcknowledgedReadiness,
 }
 
-/// `POST /api/v1/namespaces/{ns}/backups` — "Back up now" and "Run first
+/// `POST /api/v1/workspaces/{ws}/backups` — "Back up now" and "Run first
 /// backup now" (D1 §8.2).
 ///
 /// TWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's
@@ -3801,7 +3921,7 @@ pub struct CreateBackupRequest {
     /// Body A: copy this schedule's current revision.
     #[serde(default)]
     pub schedule_ref: Option<BackupScheduleRefRequest>,
-    /// Body B: the source connection, in this namespace.
+    /// Body B: the source connection, in this workspace.
     #[serde(default)]
     pub source_ref: Option<NameRef>,
     /// Body B: the topic selection.
@@ -3845,7 +3965,7 @@ pub struct ScheduleContextView {
     pub active_runs: Vec<ActiveRunView>,
 }
 
-/// `POST /api/v1/namespaces/{ns}/backups`: the created run, and the schedule
+/// `POST /api/v1/workspaces/{ws}/backups`: the created run, and the schedule
 /// it came from.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -3916,7 +4036,7 @@ pub struct RestoreList {
 /// One `Restore`.
 ///
 /// `authorization` is PLAT-19.2's routing answer and is present exactly on a
-/// create (and its replay): what the Restore needs next under the namespace's
+/// create (and its replay): what the Restore needs next under the workspace's
 /// frozen approval policy. A single read carries none — the operation view and
 /// the Approval are the durable state, and this is the answer to one request.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -3957,11 +4077,11 @@ impl From<logweir_core::approval_policy::ApprovalMode> for ApprovalModeView {
     }
 }
 
-/// PROD-16.1: why a namespace resolves to its policy.
+/// PROD-16.1: why a workspace resolves to its policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum PolicyBasisView {
-    /// An explicit namespace binding in the installation document.
+    /// An explicit workspace binding in the installation document.
     Binding,
     /// Unbound, and the installation document's `defaultMode`.
     Configured,
@@ -3972,14 +4092,14 @@ pub enum PolicyBasisView {
 }
 
 impl PolicyBasisView {
-    /// The basis of `namespace` under `policies`.
+    /// The basis of `workspace` under `policies`.
     #[must_use]
     pub fn of(
         policies: &logweir_core::approval_policy::ApprovalPolicySet,
-        namespace: &str,
+        workspace: &str,
     ) -> Self {
         use logweir_core::approval_policy::UnboundBasis;
-        if policies.is_bound(namespace) {
+        if policies.is_bound(workspace) {
             return Self::Binding;
         }
         match policies.unbound_basis() {
@@ -4005,17 +4125,17 @@ pub enum AuthorizationState {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreRoutingView {
-    /// The mode the namespace's binding requires.
+    /// The mode the workspace's binding requires.
     pub mode: ApprovalModeView,
     /// PROD-16.1: the same mode in the operator's words.
     pub operator_mode: logweir_core::approval_policy::ApprovalRoute,
-    /// The policy name — `legacy-governed-v1` for an unbound namespace.
+    /// The policy name — `legacy-governed-v1` for an unbound workspace.
     pub policy: String,
     /// The policy snapshot digest the console signed; absent for the legacy
     /// synthesis, which accepts only today's v1 approval document.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub policy_digest: Option<String>,
-    /// `true` for an unbound namespace (today's governed behaviour).
+    /// `true` for an unbound workspace (today's governed behaviour).
     pub legacy: bool,
     /// Where the submission goes next.
     pub state: AuthorizationState,
@@ -4034,13 +4154,13 @@ pub struct RestoreRoutingView {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
-/// PLAT-19.2: a namespace's effective approval policy.
+/// PLAT-19.2: a workspace's effective approval policy.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalPolicyView {
-    /// The namespace asked about.
-    pub namespace: String,
-    /// The policy name — `legacy-governed-v1` for an unbound namespace on an
+    /// The workspace asked about.
+    pub workspace: String,
+    /// The policy name — `legacy-governed-v1` for an unbound workspace on an
     /// unmarked install, `default-confirm-v1` for one under a `confirm`
     /// unbound default (PROD-16.1).
     pub name: String,
@@ -4049,9 +4169,9 @@ pub struct ApprovalPolicyView {
     /// PROD-16.1: the same mode in the operator's words: `confirm`,
     /// `two-person` or `strict`.
     pub operator_mode: logweir_core::approval_policy::ApprovalRoute,
-    /// PROD-16.1: why the namespace resolves to this policy.
+    /// PROD-16.1: why the workspace resolves to this policy.
     pub basis: PolicyBasisView,
-    /// `true` when the namespace resolves to `legacy-governed-v1`.
+    /// `true` when the workspace resolves to `legacy-governed-v1`.
     pub legacy: bool,
     /// The policy's `maxAgeSeconds`; absent for the legacy synthesis.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4065,7 +4185,7 @@ pub struct ApprovalPolicyView {
     /// logs at startup too: equal values mean both run the same policies.
     pub installation_digest: String,
     /// The console's `ConsoleConfirmation` key id, when configured — the id an
-    /// administrator must put on this namespace's `TrustPolicy`.
+    /// administrator must put on the install's `TrustPolicy`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirmation_key_id: Option<String>,
     /// Whether THIS console will sign an ordinary confirmation here: `true`
@@ -4106,7 +4226,7 @@ pub struct ApprovalPolicyResponse {
 ///   sidecar `logweir drill countersign` wrote over the console's
 ///   confirmation; the confirmation's exact document bytes are used, so
 ///   `approvalBytes` is refused.
-/// * In an **unbound** namespace (`legacy-governed-v1`, today's flow): both
+/// * In an **unbound** workspace (`legacy-governed-v1`, today's flow): both
 ///   files `logweir drill approve` wrote over the Restore's plan, exactly as
 ///   they arrived.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
@@ -4114,7 +4234,7 @@ pub struct ApprovalPolicyResponse {
 pub struct SubmitApprovalRequest {
     /// The DSSE sidecar. At most 64 KiB.
     pub sidecar_bytes: String,
-    /// `approval.json` from `logweir drill approve` — unbound namespaces only.
+    /// `approval.json` from `logweir drill approve` — unbound workspaces only.
     /// At most 64 KiB.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_bytes: Option<String>,
@@ -4140,7 +4260,7 @@ pub struct ConsoleApprovalRequest {
 #[serde(rename_all = "camelCase")]
 pub enum ApprovalRequestState {
     /// The console's own request, verified, bound to this Restore, this plan
-    /// and the namespace's current policy, inside its window, and not yet
+    /// and the workspace's current policy, inside its window, and not yet
     /// approved.
     Pending,
     /// An Approval already exists under the Restore's `approvalRef`.
@@ -4163,7 +4283,7 @@ pub enum ApproveRefusal {
     NotPending,
     /// This console is the in-cluster administrator console.
     LocalAdmin,
-    /// The session holds no Approver role in this namespace. An Administrator
+    /// The session holds no Approver role in this workspace. An Administrator
     /// is not an Approver unless separately bound as one.
     NotApprover,
     /// The session is the requester.
@@ -4403,8 +4523,8 @@ pub struct ApproveOfferView {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalRequestView {
-    /// The namespace.
-    pub namespace: String,
+    /// The workspace.
+    pub workspace: String,
     /// The Restore the request is for.
     pub restore: String,
     /// That Restore's UID, now.
@@ -4414,7 +4534,7 @@ pub struct ApprovalRequestView {
     pub approval_name: String,
     /// The stored request, `<approvalName>-confirmation`.
     pub confirmation_name: String,
-    /// The namespace's current policy.
+    /// The workspace's current policy.
     pub policy: String,
     /// Its snapshot digest.
     pub policy_digest: String,
@@ -4535,7 +4655,7 @@ pub struct ApprovalPacketResponse {
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SwitchoverRestoreRef {
-    /// The `Restore`'s name, in this namespace.
+    /// The `Restore`'s name, in this workspace.
     pub name: String,
     /// Its UID.
     pub uid: String,
@@ -4556,7 +4676,7 @@ pub struct CreateSwitchoverRequest {
     pub restore_ref: SwitchoverRestoreRef,
     /// The Job's deadline, 60 to 86400 seconds.
     pub deadline_seconds: i64,
-    /// The change ticket, signed beside the plan in a bound namespace.
+    /// The change ticket, signed beside the plan in a bound workspace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
 }
@@ -4697,7 +4817,7 @@ pub struct SwitchoverScopeView {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SwitchoverApprovalRequestView {
-    pub namespace: String,
+    pub workspace: String,
     /// The Switchover the request is for.
     pub switchover: String,
     /// Its UID, now.

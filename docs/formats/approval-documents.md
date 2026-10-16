@@ -9,7 +9,7 @@ scorecard records the approval is in
 | Document | Payload type | Written by | Versions |
 |---|---|---|---|
 | Per-run approval document v1 | `application/vnd.logweir.drill-approval+json;version=1.0.0` | `logweir drill approve` | no version field |
-| Authorization document v2 | `application/vnd.logweir.restore-authorization+json;version=2.0.0` | the console | `2.0.0`, `2.1.0`, `2.2.0` |
+| Authorization document v2 | `application/vnd.logweir.restore-authorization+json;version=2.0.0` | the console | `2.0.0` to `2.3.0`; this build writes `2.3.0` and refuses a document without `subject.workspace` |
 | Standing rehearsal authorization | `application/vnd.logweir.standing-rehearsal-authorization+json;version=1.0.0` | nothing since v1 (withdrawn, release-notes item 73) | `1.0.0`, `1.1.0` |
 
 ## The per-run approval document v1
@@ -29,28 +29,39 @@ an ignored subject authorises nothing.
 
 ## The authorization document v2
 
-PLAT-19.2's per-run authorization under a namespace's approval policy, signed
+PLAT-19.2's per-run authorization under a workspace's approval policy, signed
 by the console. The DSSE payload type names the v2 family and is unchanged by
-every minor. A document is written at the newest minor whose fields it carries:
+every minor. Every document this build writes is 2.3.0:
 
 | Version | Task | Adds | Written for |
 |---|---|---|---|
 | 2.0.0 | PLAT-19.2 | the format | every document that carries none of the fields below, byte for byte what it was |
 | 2.1.0 | PROD-15.1 | `approvalSubject` (only `originalName` is written) and, under an `Ordinary` policy (a one-person confirmation) of an original-name restore, `originalNameConfirmation.typedTopics`: the original topic names the requester re-typed, held to the plan's topics at every boundary (the owner's decision OD-10) | a document that carries either; `originalNameConfirmation` is absent on every other document and refused there |
 | 2.2.0 | PROD-16.2 | `approver {issuer, subject}` and `approvedAt`, both or neither | a run a second person approved in the console (two-person) |
+| 2.3.0 | PROD-19.1 | `subject.workspace`: the subject's `logweir.dev/workspace` label; `subject.namespace` is the install's one namespace | every document |
 
-**This build's readers** (the controller and the runner, through one function)
-accept every minor up to 2.2.0 and REFUSE a field under a version that predates
-it — `AuthorizationDocumentInvalid`, for instance "defined from formatVersion
-2.1.0" — so a 2.0.0 document can never name the original-name subject, and a
-2.1.0 one can never claim a second person approved. A minor adds optional
-fields only, so a 2.1.0 document without the fields is read as a 2.0.0 one.
+**This build's readers** (the Approval controller, Restore and Switchover
+admission and the runner, through one function) REFUSE a field under a version
+that predates it — `AuthorizationDocumentInvalid`, for instance "defined from
+formatVersion 2.1.0" — so a 2.0.0 document can never name the original-name
+subject, and a 2.1.0 one can never claim a second person approved. They
+REQUIRE `subject.workspace` and compare it with the subject's label, beside
+name and UID: a document that names another workspace, or none (any minor
+before 2.3.0), is `AuthorizationSubjectMismatch`. So an approval made in `dev`
+never authorises a `prd` run, even when both workspaces share a policy and
+someone relabels the object. The runner gets the label as
+`LOGWEIR_EXECUTION_SUBJECT_WORKSPACE` (restore) or `--workspace` (switchover).
 
 **A reader built before the fields** reads major 2 and refuses a document that
 carries one as an unknown field (`AuthorizationDocumentInvalid`, exit 3 in a
 runner): the safer verdict, OD-7's third case. It never reads one as an
-ordinary authorization. Every 2.1.0 and 2.2.0 document carries at least one of
-its fields, so every one of them is refused there.
+ordinary authorization. Every 2.1.0, 2.2.0 and 2.3.0 document carries at least
+one of its fields, so every one of them is refused there: a reader built before
+PROD-19.1 refuses every document this build writes. `logweir-core`'s
+`approval_policy::tests::an_older_document_reader_refuses_the_workspace` holds
+that for 2.3.0 on every build: a subject read with the pre-2.3.0 shape
+(`deny_unknown_fields`) refuses ``unknown field `workspace` ``, and the same
+subject without the field is read.
 
 **The approval policy snapshot** gains `approverSignature: Console` as its
 last key, only when set (PROD-16.2): every existing policy's bytes and digest

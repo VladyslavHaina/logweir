@@ -375,7 +375,8 @@ for an execution-time guard.
 
 Rejected alternatives: controller Secret reads, scoped by name or otherwise;
 API-side checks; a single discriminated `Check` kind; destination settings as
-`ConfigMap` conventions. The controller still holds no verb on `secrets`, and the
+`ConfigMap` conventions. The controller still reads no Secret's data (PROD-19.1
+gave it `get` on `secrets` for one metadata read, the workspace label), and the
 signing-oracle residual of Amendment E is unchanged: check Jobs are created under
 the same Job-create authority.
 
@@ -392,7 +393,8 @@ Accepted from 2026-09-16. Adds five kinds to Amendment A's list: `TrustPolicy`
 
 **Withdrawn in v1 (OD-12, 2026-10-11): `RehearsalSchedule`.** Its CRD, its
 controller and the standing-authorization arms of `Restore` admission and the
-`Approval` controller are removed, so v1 ships thirteen kinds.
+`Approval` controller are removed, so v1 ships thirteen kinds (PROD-04.2's
+`Switchover` later makes fourteen).
 `Approval.spec.subjectRef.kind: RehearsalSchedule` and `Restore.spec.authorization`
 stay in the schemas so objects written before v1 still decode, and both are
 refused by name (`StandingAuthorizationRefused`). The rest of this amendment is

@@ -6,15 +6,15 @@
 //!
 //! `mode: localAdmin` is an explicit administrator mode: the listener must be a
 //! loopback address, the actor is the configured local administrator, and the
-//! namespaces are the configured list and nothing discovered. It is not SSO and
+//! workspaces are the configured list and nothing discovered. It is not SSO and
 //! it is not a shared console.
 //!
 //! `mode: shared` is the SSO console. It refuses a non-HTTPS `publicBaseUrl`
 //! outright — TLS at the shared entry point is not a recommendation — derives
 //! the exact OIDC redirect URI from that one administrator value, reads the
 //! client secret and the session and cursor keys from mounted files, and takes
-//! role and namespace bindings as EXACT strings. There is no regex, no
-//! wildcard, no email-domain inference and no default namespace: `*` is refused
+//! role and workspace bindings as EXACT strings. There is no regex, no
+//! wildcard, no email-domain inference and no default workspace: `*` is refused
 //! by name rather than silently matching nothing.
 //!
 //! WHAT `trustedProxyCidrs` IS FOR, AND WHAT IT IS NOT. Forwarded client
@@ -36,9 +36,6 @@ use crate::validate;
 
 /// The smallest cursor key this service accepts, in bytes.
 pub const MIN_CURSOR_KEY_BYTES: usize = 32;
-
-/// The most namespaces one configuration may grant.
-pub const MAX_NAMESPACES: usize = 256;
 
 /// The file as written. Unknown keys are refused.
 #[derive(Debug, Deserialize)]
@@ -69,7 +66,8 @@ struct ConfigFile {
     require_trusted_proxy: Option<bool>,
     #[serde(default)]
     trusted_proxy_service: Option<ServiceRefFile>,
-    namespaces: Vec<String>,
+    namespace: String,
+    workspaces: Vec<String>,
     kubernetes: KubernetesFile,
     #[serde(default)]
     cursor_key_file: Option<PathBuf>,
@@ -214,7 +212,7 @@ struct RolesFile {
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct RoleBindingFile {
     role: String,
-    namespace: String,
+    workspace: String,
     #[serde(default)]
     groups: Vec<String>,
     #[serde(default)]
@@ -404,8 +402,11 @@ pub struct Config {
     pub ui_directory: PathBuf,
     /// The mode and its settings.
     pub mode: Mode,
-    /// The explicitly granted namespaces, in configuration order.
-    pub namespaces: Vec<String>,
+    /// The install's one namespace (the release namespace): every object
+    /// this service reads or writes lives there.
+    pub namespace: String,
+    /// The install's workspaces, in configuration order (PROD-19.1).
+    pub workspaces: Vec<String>,
     /// The Kubernetes client source.
     pub kubernetes: KubeSource,
     /// Where the cursor MAC key comes from.
@@ -418,7 +419,7 @@ pub struct Config {
     /// identity comes from without claiming to know it.
     pub kubernetes_principal: String,
     /// The approval-policy document, when one is configured.
-    /// Absent is every namespace on `legacy-governed-v1`.
+    /// Absent is every workspace on `legacy-governed-v1`.
     pub approval_policy_file: Option<PathBuf>,
     /// The console confirmation key file, when one is configured.
     pub confirmation_key_file: Option<PathBuf>,
@@ -427,7 +428,7 @@ pub struct Config {
     pub confirmation_key_managed: bool,
     /// Where the fresh-install marker is read, when configured.
     pub installation_identity: Option<crate::approval::InstallationIdentityRef>,
-    /// The manual-run create ceilings, per actor, per namespace, per
+    /// The manual-run create ceilings, per actor, per workspace, per
     /// minute. `rateLimits` in the file; absent is
     /// [`crate::routes::RunRateLimits::default`].
     pub run_rate_limits: crate::routes::RunRateLimits,
@@ -585,14 +586,20 @@ impl Config {
         let file: ConfigFile =
             serde_yaml::from_str(text).map_err(|e| ConfigError::Parse(e.to_string()))?;
 
-        let namespaces = check_namespaces(&file.namespaces)?;
+        if !validate::is_dns_label(&file.namespace) {
+            return Err(field(
+                "namespace",
+                format!("`{}` is not a DNS-1123 label", file.namespace),
+            ));
+        }
+        let workspaces = check_workspaces(&file.workspaces)?;
         let kubernetes = kube_source(base, &file.kubernetes)?;
         let kubernetes_principal = kubernetes_principal(&file.kubernetes, &kubernetes)?;
         let run_rate_limits = run_rate_limits(file.rate_limits.as_ref())?;
 
         let config = match file.mode.as_str() {
-            "localAdmin" => Config::local_admin_mode(file, base, namespaces, kubernetes),
-            "shared" => Config::shared_mode(file, base, namespaces, kubernetes),
+            "localAdmin" => Config::local_admin_mode(file, base, workspaces, kubernetes),
+            "shared" => Config::shared_mode(file, base, workspaces, kubernetes),
             other => Err(field(
                 "mode",
                 format!(
@@ -611,7 +618,7 @@ impl Config {
     fn local_admin_mode(
         file: ConfigFile,
         base: &Path,
-        namespaces: Vec<String>,
+        workspaces: Vec<String>,
         kubernetes: KubeSource,
     ) -> Result<Config, ConfigError> {
         let listen = parse_loopback_listen(&file.listen)?;
@@ -681,7 +688,8 @@ impl Config {
             allowed_hosts,
             ui_directory: resolve(base, &file.ui_directory),
             mode: Mode::LocalAdmin(local_admin),
-            namespaces,
+            namespace: file.namespace,
+            workspaces,
             kubernetes,
             cursor_key: CursorKeySource::RawFile(resolve(base, &cursor_key_file)),
             kubernetes_principal: String::new(),
@@ -699,7 +707,7 @@ impl Config {
     fn shared_mode(
         file: ConfigFile,
         base: &Path,
-        namespaces: Vec<String>,
+        workspaces: Vec<String>,
         kubernetes: KubeSource,
     ) -> Result<Config, ConfigError> {
         if file.local_admin.is_some() {
@@ -807,10 +815,10 @@ impl Config {
                 field(
                     "roles",
                     "shared mode requires `roles.revision` and at least one `roles.bindings` \
-                     entry; there is no default namespace and no implicit grant",
+                     entry; there is no default workspace and no implicit grant",
                 )
             })?,
-            &namespaces,
+            &workspaces,
         )?;
 
         let mut trusted_proxy_cidrs = Vec::new();
@@ -904,7 +912,8 @@ impl Config {
                 require_trusted_proxy,
                 trusted_proxy_service,
             })),
-            namespaces,
+            namespace: file.namespace,
+            workspaces,
             kubernetes,
             cursor_key: CursorKeySource::Versioned(KeyRef {
                 file: resolve(base, &cursor_key.file),
@@ -988,33 +997,33 @@ fn refuse_shared_only_fields(file: &ConfigFile) -> Result<(), ConfigError> {
     Ok(())
 }
 
-fn check_namespaces(namespaces: &[String]) -> Result<Vec<String>, ConfigError> {
-    if namespaces.is_empty() {
+fn check_workspaces(workspaces: &[String]) -> Result<Vec<String>, ConfigError> {
+    use weirkeeper::workspace::MAX_WORKSPACES;
+    if workspaces.is_empty() {
         return Err(field(
-            "namespaces",
-            "at least one namespace must be granted explicitly; this service never lists \
-             core Namespace objects",
+            "workspaces",
+            "at least one workspace is required; the chart renders `workspaces: [default]`",
         ));
     }
-    if namespaces.len() > MAX_NAMESPACES {
+    if workspaces.len() > MAX_WORKSPACES {
         return Err(field(
-            "namespaces",
-            format!("at most {MAX_NAMESPACES} namespaces may be granted"),
+            "workspaces",
+            format!("at most {MAX_WORKSPACES} workspaces may be listed"),
         ));
     }
     let mut seen = std::collections::BTreeSet::new();
-    for ns in namespaces {
-        if !validate::is_dns_label(ns) {
+    for ws in workspaces {
+        if !validate::is_dns_label(ws) {
             return Err(field(
-                "namespaces",
-                format!("`{ns}` is not a DNS-1123 label"),
+                "workspaces",
+                format!("`{ws}` is not a DNS-1123 label"),
             ));
         }
-        if !seen.insert(ns.as_str()) {
-            return Err(field("namespaces", format!("`{ns}` is listed twice")));
+        if !seen.insert(ws.as_str()) {
+            return Err(field("workspaces", format!("`{ws}` is listed twice")));
         }
     }
-    Ok(namespaces.to_vec())
+    Ok(workspaces.to_vec())
 }
 
 /// The Kubernetes principal attribution records. See [`Config::kubernetes_principal`].
@@ -1344,7 +1353,7 @@ fn parse_oidc(base: &Path, file: OidcFile) -> Result<OidcConfig, ConfigError> {
     })
 }
 
-fn parse_roles(file: RolesFile, namespaces: &[String]) -> Result<RolesConfig, ConfigError> {
+fn parse_roles(file: RolesFile, workspaces: &[String]) -> Result<RolesConfig, ConfigError> {
     validate::check_single_line(&file.revision, 128)
         .map_err(|code| field("roles.revision", code))?;
     if file.revision.trim().is_empty() {
@@ -1371,13 +1380,13 @@ fn parse_roles(file: RolesFile, namespaces: &[String]) -> Result<RolesConfig, Co
                 )),
             )
         })?;
-        if !namespaces.iter().any(|n| n == &binding.namespace) {
+        if !workspaces.iter().any(|w| w == &binding.workspace) {
             return Err(field(
                 "roles.bindings",
                 at(&format!(
-                    "namespace `{}` is not in `namespaces`; a binding cannot grant a namespace \
-                     this service does not manage",
-                    binding.namespace
+                    "workspace `{}` is not in `workspaces`; a binding cannot grant a workspace \
+                     this install does not have",
+                    binding.workspace
                 )),
             ));
         }
@@ -1404,7 +1413,7 @@ fn parse_roles(file: RolesFile, namespaces: &[String]) -> Result<RolesConfig, Co
         }
         bindings.push(crate::authz::RoleBinding {
             role,
-            namespace: binding.namespace,
+            workspace: binding.workspace,
             groups: binding.groups,
             subjects: binding.subjects,
         });
@@ -1586,7 +1595,7 @@ mod tests {
     fn text(listen: &str, origin: &str) -> String {
         format!(
             "mode: localAdmin\nlisten: \"{listen}\"\npublicOrigin: \"{origin}\"\nuiDirectory: ui\n\
-             localAdmin:\n  subject: admin\nnamespaces: [team-a]\nkubernetes:\n  source: \
+             localAdmin:\n  subject: admin\nnamespace: logweir\nworkspaces: [team-a]\nkubernetes:\n  source: \
              kubeconfig\n  context: docker-desktop\ncursorKeyFile: key\n"
         )
     }
@@ -1641,7 +1650,8 @@ mod tests {
         let config = Config::parse(block, Path::new("/etc/logweir"))
             .expect("the documented example is a configuration this code accepts");
         assert_eq!(config.listen.port(), 8484);
-        assert_eq!(config.namespaces, vec!["team-a".to_string()]);
+        assert_eq!(config.namespace, "logweir");
+        assert_eq!(config.workspaces, vec!["team-a".to_string()]);
         // Relative paths resolve against the CONFIG FILE's directory, as the
         // prose under the block says.
         assert_eq!(
@@ -1823,7 +1833,7 @@ mod tests {
                 "groups: [\"*\"]",
                 "roles.bindings",
             ),
-            ("namespace: team-a", "namespace: team-zzz", "roles.bindings"),
+            ("workspace: team-a", "workspace: team-zzz", "roles.bindings"),
             (
                 "sessionMaxAgeSeconds: 900",
                 "sessionMaxAgeSeconds: 86400",

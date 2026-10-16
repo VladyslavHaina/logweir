@@ -142,7 +142,6 @@ admissionPolicy.enabled|default|-|--set|true
 admissionPolicy.extraPrincipals|admission-policy|-|--set-json|["system:serviceaccount:team-x:fx10-probe"]
 # ---- api.* and api.console.*
 api.enabled|default|-|--set|true
-api.namespaces|demo|-|--set-json|["team-x"]
 api.console.enabled|default|--set api.enabled=true --set-string api.console.mode=localAdmin --set-string api.console.keySecret=fx10-keys|--set|true
 api.console.mode|default|--set api.enabled=true --set api.console.enabled=true --set-string api.console.keySecret=fx10-keys|--set-string|localAdmin
 api.console.image|console|-|--set-string|example.invalid/fx10-probe/logweir-console:probe
@@ -172,7 +171,7 @@ api.console.oidc.systemRoots|console-shared|-|--set|false
 api.console.oidc.scopes|console-shared|-|--set-json|["openid","profile","groups"]
 api.console.oidc.displayNameClaim|console-shared|-|--set-string|name
 api.console.roles.revision|console-shared|-|--set-string|fx10-revision
-api.console.roles.bindings|console-shared|-|--set-json|[{"role":"viewer","namespace":"team-b","groups":["fx10-viewers"]}]
+api.console.roles.bindings|console-shared|-|--set-json|[{"role":"viewer","workspace":"team-b","groups":["fx10-viewers"]}]
 api.console.ingress.enabled|console-shared|--set api.console.ingress.enabled=false|--set|true
 api.console.ingress.className|console-shared|-|--set-string|fx10-class
 api.console.ingress.host|console-shared|--set-string api.console.publicBaseUrl=https://console2.example.com|--set-string|console2.example.com
@@ -193,7 +192,7 @@ api.console.affinity|console|-|--set-json|{"nodeAffinity":{"requiredDuringSchedu
 approvalPolicy.default|approval-policy|-|--set-string|strict
 approvalPolicy.allowOrdinaryConfirmation|approval-policy|--set approvalPolicy.allowOrdinaryConfirmation=false|--set|true
 approvalPolicy.policies|approval-policy|-|--set-json|[{"name":"team-ordinary","mode":"Ordinary","maxAgeSeconds":600},{"name":"prod-governed","mode":"Governed","maxAgeSeconds":86400,"requireDistinctPrincipal":true}]
-approvalPolicy.namespaces|approval-policy|-|--set-json|{"team-c":"prod-governed"}
+approvalPolicy.workspaces|approval-policy|-|--set-json|{"team-b":"team-ordinary"}
 approvalPolicy.confirmationKeySecret|approval-policy|-|--set-string|fx10-confirmation
 # ---- archive.*
 archive.url|msk|-|--set-string|s3://fx10-bucket/logweir
@@ -202,18 +201,18 @@ archive.s3.region|msk|-|--set-string|eu-west-1
 archive.s3.allowHttp|msk|--set archive.s3.allowHttp=false|--set|true
 archive.s3.virtualHostedStyle|msk|-|--set|true
 # ---- the installation policy: checks.*, runs.*, engine.*, evidence.*
-checks.maxActivePerNamespace|default|-|--set|5
+checks.maxActivePerWorkspace|default|-|--set|5
 checks.maxActiveTotal|default|-|--set|21
 checks.maxActiveDiscoveriesPerConnection|default|-|--set|2
-checks.maxEvidenceFetchActivePerNamespace|default|-|--set|5
+checks.maxEvidenceFetchActivePerWorkspace|default|-|--set|5
 checks.discovery.freshSeconds|default|-|--set|901
 checks.discovery.retentionSeconds|default|-|--set|86401
 checks.discovery.keepPerConnection|default|-|--set|6
 checks.discovery.hardMaxTopics|default|-|--set|40000
 checks.discovery.visibilityAttestations|default|-|--set-json|[{"id":"att-fx10","namespace":"team-a","kafkaCluster":"source","clusterId":"M29I2S7FQPyHBEX12Vx7XA","principal":"User:backup","attestedBy":"platform-admin@example.invalid","attestedAt":"2026-09-15T00:00:00Z","expiresAt":"2026-12-15T00:00:00Z","statement":"FX-10 probe"}]
 checks.preflight.retentionSeconds|default|-|--set|3601
-runs.maxManualBackupsActivePerNamespace|default|-|--set|5
-runs.maxManualRestoresActivePerNamespace|default|-|--set|3
+runs.maxManualBackupsActivePerWorkspace|default|-|--set|5
+runs.maxManualRestoresActivePerWorkspace|default|-|--set|3
 engine.allowUnverifiedCustomCa|default|-|--set|true
 evidence.controllerIdentityLocations|default|-|--set-json|[{"endpoint":"","region":"","bucket":"fx10-bucket"}]
 strimzi.readKafkaTopics|default|--set-json strimzi.namespaces=["kafka"]|--set|true
@@ -227,7 +226,6 @@ imagePullSecrets|default|-|--set-json|[{"name":"fx10-regcred"}]
 controller.logLevel|default|-|--set-string|debug
 controller.failFastSeconds|default|-|--set|120
 controller.jobTtlSeconds|default|-|--set|7200
-controller.watchNamespaces|default|-|--set-json|["team-x"]
 controller.resources.requests.cpu|default|-|--set-string|60m
 controller.resources.requests.memory|default|-|--set-string|130Mi
 controller.resources.limits.memory|default|-|--set-string|600Mi
@@ -237,8 +235,7 @@ controller.affinity|default|-|--set-json|{"nodeAffinity":{"requiredDuringSchedul
 retention.enabled|default|-|--set|true
 # ---- identity, environment, placement
 environment|default|-|--set-string|fx10
-kubernetes.namespace|demo|-|--set-string|team-x
-kubernetes.connectionsNamespace|msk|-|--set-string|fx10-connections
+workspaces|default|-|--set-json|["dev","prd"]
 kubernetes.nodeSelector|default|-|--set-json|{"fx10":"probe"}
 kubernetes.tolerations|default|-|--set-json|[{"key":"fx10","operator":"Exists"}]
 kubernetes.affinity|default|-|--set-json|{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"fx10","operator":"Exists"}]}]}}}
@@ -248,7 +245,6 @@ identity.bootstrapImagePullPolicy|default|-|--set-string|Always
 identity.allowMutableBootstrapImageForDevelopment|default|--set-string identity.bootstrapImage=example.invalid/fx10-probe/logweir:probe --set-string identity.bootstrapImagePullPolicy=Never|--set|true
 identity.renderedOffline|default|-|--set|true
 identity.publicConfigMapName|default|-|--set-string|fx10-signing-trust
-identity.authorizedRunnerNamespaces|default|-|--set-json|["team-x"]
 identity.kubernetesApiCIDRs|default|-|--set-json|["10.96.0.1/32"]
 identity.externalSecret.name|default|-|--set-string|fx10-signer
 identity.externalSecret.key|identity-external|-|--set-string|fx10.pem

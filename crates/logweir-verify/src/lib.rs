@@ -36,6 +36,14 @@ use serde::{Deserialize, Serialize};
 pub const PAYLOAD_TYPE_SCORECARD: &str =
     "application/vnd.logweir.drill-scorecard+json;version=1.0.0";
 pub const PAYLOAD_TYPE_TEARDOWN: &str = "application/vnd.logweir.drill-teardown+json;version=1.0.0";
+/// **PROD-07.2: a restore run's targets record**
+/// (`logweir/drills/<run_id>.targets.json`): which topics the run created,
+/// with their IDs, put before its engine starts. Internal: only `logweir
+/// restore reconcile` reads it, and only after its detached signature
+/// verifies, so a planted or edited record chooses nothing the reconcile
+/// verifies and nothing a cleanup deletes.
+pub const PAYLOAD_TYPE_TARGETS_RECORD: &str =
+    "application/vnd.logweir.restore-targets+json;version=1.0.0";
 /// The post-put storage receipt. A scorecard is SIGNED before it is PUT — bytes cannot be
 /// signed before they are serialised — so `evidence.create_only_enforced`,
 /// `immutable`, `retain_until` and `version_id` are unknowable at signing

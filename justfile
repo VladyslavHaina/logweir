@@ -182,19 +182,23 @@ golden:
 # (`the_positions_mapping_minors_are_their_frozen_predecessors_plus_one_block`).
 # This build writes 1.12.0 or 2.4.0 only for a passing complete restore that
 # mapped consumer positions.
+# PROD-03.2 adds `target.schemas` at 1.13.0 and 2.5.0; `-1.12.0.json` and
+# `-2.4.0.json` are frozen beside them
+# (`the_schemas_minors_are_their_frozen_predecessors_plus_one_block`), and
+# the receipt's `schema_registry` (PROD-03.1) at 1.9.0, `-1.8.0.json` frozen.
 #
 # The CURRENT version of each document, in ONE place for these two recipes:
 # each must equal its writer's newest constant
-# (`scorecard::FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING`,
-# `backup_receipt::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`,
-# `catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS`), which also builds the
+# (`scorecard::FORMAT_VERSION_SUBSET_WITH_SCHEMAS`,
+# `backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY`,
+# `catalog::record::FORMAT_VERSION_WITH_SCHEMA_REGISTRY`), which also builds the
 # schema's `$id`. A renumber moves the constant and this line, and keeps the old
 # file frozen beside the new. The scorecard's format-1 file is named by
-# `scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING` the same way.
-scorecard_schema_version := "2.4.0"
-scorecard_format_1_schema_version := "1.12.0"
-receipt_schema_version := "1.8.0"
-catalog_schema_version := "1.7.0"
+# `scorecard::FORMAT_VERSION_WITH_SCHEMAS` the same way.
+scorecard_schema_version := "2.5.0"
+scorecard_format_1_schema_version := "1.13.0"
+receipt_schema_version := "1.9.0"
+catalog_schema_version := "1.8.0"
 
 schema:
     cargo run -p logweir-core --example emit_schema > schemas/logweir-drill-scorecard-{{scorecard_schema_version}}.json
@@ -755,14 +759,15 @@ check-org-root runner="logweir:check" controller="weirkeeper:check":
 
 
 # Task 35: THE CHART, WALKED END TO END ON A REAL CLUSTER. The release must be
-# installed first with all three optional components on (the README's
-# five-minute path); the walk then mints the keypairs, creates the five
-# Secrets, probes two KafkaClusters, fires a BackupSchedule, restores from its
-# Backup with an approval minted on the host, verifies the scorecard with both
-# readers, fetches the in-cluster UI through a port-forward and tears
-# everything down. Parameterised by LOGWEIR_KUBE_CONTEXT (default
-# docker-desktop), LOGWEIR_HELM_RELEASE (logweir) and LOGWEIR_HELM_NAMESPACE
-# (logweir-system). `.github/workflows/helm-demo.yml` runs the same script on
+# installed first with all three optional components on and two workspaces
+# (examples/demo.values.yaml); the walk then works in the release namespace,
+# workspace default: it binds the chart's archive credential, probes two
+# KafkaClusters, fires a BackupSchedule, sees a Backup in workspace other
+# refused, restores from the Backup with an approval minted on the host,
+# verifies the scorecard with both readers, fetches the console through a
+# port-forward and tears everything down. Parameterised by
+# LOGWEIR_KUBE_CONTEXT (default docker-desktop), LOGWEIR_HELM_RELEASE (logweir)
+# and LOGWEIR_HELM_NAMESPACE (logweir-system). `.github/workflows/helm-demo.yml` runs the same script on
 # a kind cluster. Outside `just gate` — it needs a cluster — and in
 # docs/gates.md's stack/cluster table.
 helm-demo:

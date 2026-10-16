@@ -488,7 +488,7 @@ async fn drive(
     csrf: &str,
     key: &str,
 ) -> TestResponse {
-    let uri = format!("/api/v1/namespaces/{namespace}{}", probe.path);
+    let uri = format!("/api/v1/workspaces/{namespace}{}", probe.path);
     let mut builder = Request::builder()
         .method(probe.method)
         .uri(&uri)
@@ -510,12 +510,15 @@ async fn drive(
         .await
 }
 
-/// A cluster holding one object of every kind in both namespaces, so that an
-/// ALLOWED read answers 200 rather than 404 and the matrix's allow column is
-/// not satisfied by "the object happens not to exist".
+/// An install holding one object of every kind in team-a, so that an ALLOWED
+/// read answers 200 rather than 404 and the matrix's allow column is not
+/// satisfied by "the object happens not to exist". Names are unique per
+/// install, so a team-b probe by the same name names an object that exists,
+/// in another workspace.
 fn seeded() -> FakeKube {
     let fake = FakeKube::new();
-    for namespace in [NS_A, NS_B] {
+    {
+        let namespace = NS_A;
         fake.seed(
             "kafkaclusters",
             namespace,
@@ -608,7 +611,7 @@ fn counts(fake: &FakeKube) -> Vec<(String, usize)> {
 /// team-a (where the role's table decides) and in team-b (where the actor has
 /// no binding at all and must get the nonexistent-resource answer).
 #[tokio::test]
-async fn the_matrix_holds_over_http_in_two_namespaces() {
+async fn the_matrix_holds_over_http_in_two_workspaces() {
     let fake = seeded();
     let app = SharedApp::new(
         fake.clone(),
@@ -693,12 +696,12 @@ async fn the_matrix_holds_over_http_in_two_namespaces() {
         let session = app.get("/api/v1/session", &cookie).await.json();
         assert_eq!(session["bindingRevision"], "matrix-1");
         assert_eq!(
-            session["namespaces"].as_array().unwrap().len(),
+            session["workspaces"].as_array().unwrap().len(),
             1,
             "{role:?} sees only its bound namespace"
         );
-        assert_eq!(session["namespaces"][0]["name"], NS_A);
-        assert_eq!(session["namespaces"][0]["roles"][0], role.as_str());
+        assert_eq!(session["workspaces"][0]["name"], NS_A);
+        assert_eq!(session["workspaces"][0]["roles"][0], role.as_str());
     }
     app.app.fake.assert_strict();
 }
@@ -706,7 +709,7 @@ async fn the_matrix_holds_over_http_in_two_namespaces() {
 /// **The cadence preview is a product feature, not a public calculator.**
 ///
 /// D1 §4.4 says "viewer role and above". `GET /api/v1/cadence-previews` has no
-/// `{ns}` — it reads nothing, so there is no namespace to scope it to — which
+/// `{ws}` — it reads nothing, so there is no namespace to scope it to — which
 /// is why the probe table above cannot reach it and why it needs its own row
 /// per role here.
 ///
@@ -716,7 +719,7 @@ async fn the_matrix_holds_over_http_in_two_namespaces() {
 /// this actor bound anywhere" would admit it and still pass every other test
 /// in this crate; these four rows are what kill it.
 ///
-/// KILLS: `authorize_any` relaxed to `!authorizer.namespaces(actor).is_empty()`
+/// KILLS: `authorize_any` relaxed to `!authorizer.workspaces(actor).is_empty()`
 /// (the approver arm answers 200 and this fails); the `ReadSchedules` check
 /// renamed or dropped in a refactor; the route registered outside the
 /// authenticated router (the unauthenticated arm answers 200).
@@ -814,7 +817,7 @@ async fn the_cadence_preview_needs_permission_to_read_schedules_somewhere() {
 /// **An unbound namespace and a nonexistent object are the same answer, byte
 /// for byte apart from the request id.**
 #[tokio::test]
-async fn an_unbound_namespace_is_indistinguishable_from_a_missing_object() {
+async fn an_unbound_workspace_is_indistinguishable_from_a_missing_object() {
     let fake = seeded();
     let app = SharedApp::new(
         fake.clone(),
@@ -830,16 +833,16 @@ async fn an_unbound_namespace_is_indistinguishable_from_a_missing_object() {
     let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
 
     let unbound = app
-        .get("/api/v1/namespaces/team-b/schedules/sched-1", &cookie)
+        .get("/api/v1/workspaces/team-b/schedules/sched-1", &cookie)
         .await;
     let missing = app
         .get(
-            "/api/v1/namespaces/team-a/schedules/no-such-object",
+            "/api/v1/workspaces/team-a/schedules/no-such-object",
             &cookie,
         )
         .await;
     let nonexistent_namespace = app
-        .get("/api/v1/namespaces/team-zzz/schedules/sched-1", &cookie)
+        .get("/api/v1/workspaces/team-zzz/schedules/sched-1", &cookie)
         .await;
 
     let normalize = |response: &TestResponse| {
@@ -855,7 +858,7 @@ async fn an_unbound_namespace_is_indistinguishable_from_a_missing_object() {
     // the actor may not see.
     fake.clear_requests();
     let _ = app
-        .get("/api/v1/namespaces/team-b/schedules/sched-1", &cookie)
+        .get("/api/v1/workspaces/team-b/schedules/sched-1", &cookie)
         .await;
     assert!(
         fake.requests().is_empty(),
@@ -864,7 +867,7 @@ async fn an_unbound_namespace_is_indistinguishable_from_a_missing_object() {
     );
     // The bound one does.
     let _ = app
-        .get("/api/v1/namespaces/team-a/schedules/sched-1", &cookie)
+        .get("/api/v1/workspaces/team-a/schedules/sched-1", &cookie)
         .await;
     assert!(!fake.requests().is_empty());
     app.app.fake.assert_strict();
@@ -873,7 +876,7 @@ async fn an_unbound_namespace_is_indistinguishable_from_a_missing_object() {
 /// **Bindings union: two roles in one namespace grant the union, and a role in
 /// each of two namespaces grants each one separately.**
 #[tokio::test]
-async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
+async fn bindings_union_within_a_workspace_and_stay_separate_across_them() {
     let fake = seeded();
     let app = SharedApp::new(
         fake.clone(),
@@ -899,7 +902,7 @@ async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
     let csrf = app.csrf_for("u-both");
 
     let session = app.get("/api/v1/session", &cookie).await.json();
-    let grants: Vec<(String, Vec<String>)> = session["namespaces"]
+    let grants: Vec<(String, Vec<String>)> = session["workspaces"]
         .as_array()
         .unwrap()
         .iter()
@@ -930,7 +933,7 @@ async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
     // a viewer's, and neither role alone has both.
     assert_ne!(
         app.get(
-            "/api/v1/namespaces/team-a/approvals/approval-1/packet",
+            "/api/v1/workspaces/team-a/approvals/approval-1/packet",
             &cookie
         )
         .await
@@ -940,7 +943,7 @@ async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
         "the approver half of the union was lost"
     );
     assert_ne!(
-        app.get("/api/v1/namespaces/team-a/connections", &cookie)
+        app.get("/api/v1/workspaces/team-a/connections", &cookie)
             .await
             .status
             .as_u16(),
@@ -950,7 +953,7 @@ async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
     // But the union of viewer and approver is still not an operator.
     let refused = app
         .post(
-            "/api/v1/namespaces/team-a/schedules",
+            "/api/v1/workspaces/team-a/schedules",
             &cookie,
             Some(&csrf),
             Some("union-schedule-00001"),
@@ -958,14 +961,13 @@ async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
         )
         .await;
     refused.assert_problem(403, "forbidden");
-    // The seed put one schedule in each namespace; the refused create added
-    // none.
+    // The seed put one schedule in team-a; the refused create added none.
     assert_eq!(fake.count("backupschedules", NS_A), 1);
 
     // The operator binding is in team-b and does not leak into team-a.
     let created = app
         .post(
-            "/api/v1/namespaces/team-b/schedules",
+            "/api/v1/workspaces/team-b/schedules",
             &cookie,
             Some(&csrf),
             Some("union-schedule-00002"),
@@ -973,11 +975,7 @@ async fn bindings_union_within_a_namespace_and_stay_separate_across_them() {
         )
         .await;
     assert_eq!(created.status.as_u16(), 201, "{}", created.code());
-    assert_eq!(
-        fake.count("backupschedules", NS_B),
-        2,
-        "the seed plus one create"
-    );
+    assert_eq!(fake.count("backupschedules", NS_B), 1, "the one create");
     assert_eq!(
         fake.count("backupschedules", NS_A),
         1,
@@ -1008,7 +1006,7 @@ async fn subject_bindings_are_exact_strings() {
 
     let named = app.session_cookie("u-named", &[]);
     assert_eq!(
-        app.get("/api/v1/namespaces/team-a/schedules", &named)
+        app.get("/api/v1/workspaces/team-a/schedules", &named)
             .await
             .status
             .as_u16(),
@@ -1019,7 +1017,7 @@ async fn subject_bindings_are_exact_strings() {
     for other in ["u-name", "u-namedx", "U-NAMED", "u-named "] {
         let cookie = app.session_cookie(other, &[]);
         let response = app
-            .get("/api/v1/namespaces/team-a/schedules", &cookie)
+            .get("/api/v1/workspaces/team-a/schedules", &cookie)
             .await;
         assert_eq!(
             (response.status.as_u16(), response.code().as_str()),
@@ -1050,7 +1048,7 @@ async fn changing_the_role_configuration_takes_effect_on_the_next_request() {
 
     let created = app
         .post(
-            "/api/v1/namespaces/team-a/schedules",
+            "/api/v1/workspaces/team-a/schedules",
             &cookie,
             Some(&csrf),
             Some("rollconfig-00000001"),
@@ -1067,15 +1065,15 @@ async fn changing_the_role_configuration_takes_effect_on_the_next_request() {
 
     let session = app.get("/api/v1/session", &cookie).await.json();
     assert_eq!(session["bindingRevision"], "after");
-    assert_eq!(session["namespaces"][0]["roles"][0], "viewer");
+    assert_eq!(session["workspaces"][0]["roles"][0], "viewer");
     assert_eq!(
-        session["namespaces"][0]["capabilities"]["scheduleCreate"],
+        session["workspaces"][0]["capabilities"]["scheduleCreate"],
         false
     );
 
     let refused = app
         .post(
-            "/api/v1/namespaces/team-a/schedules",
+            "/api/v1/workspaces/team-a/schedules",
             &cookie,
             Some(&csrf),
             Some("rollconfig-00000002"),
@@ -1095,8 +1093,8 @@ async fn changing_the_role_configuration_takes_effect_on_the_next_request() {
         bindings: vec![support::binding(Role::Viewer, NS_B, &["someone-else"])],
     });
     let session = app.get("/api/v1/session", &cookie).await.json();
-    assert_eq!(session["namespaces"].as_array().unwrap().len(), 0);
-    app.get("/api/v1/namespaces/team-a/schedules", &cookie)
+    assert_eq!(session["workspaces"].as_array().unwrap().len(), 0);
+    app.get("/api/v1/workspaces/team-a/schedules", &cookie)
         .await
         .assert_problem(404, "not_found");
     app.app.fake.assert_strict();
@@ -1225,9 +1223,9 @@ async fn the_governed_approval_route_is_the_approvers_and_nothing_else_is_stubbe
     let csrf = app.csrf_for("u-approver");
 
     for path in [
-        "/api/v1/namespaces/team-a/approvals",
-        "/api/v1/namespaces/team-a/approvals/approval-1:submit",
-        "/api/v1/namespaces/team-a/approvals/approval-1/submit",
+        "/api/v1/workspaces/team-a/approvals",
+        "/api/v1/workspaces/team-a/approvals/approval-1:submit",
+        "/api/v1/workspaces/team-a/approvals/approval-1/submit",
     ] {
         let response = app
             .post(
@@ -1244,7 +1242,7 @@ async fn the_governed_approval_route_is_the_approvers_and_nothing_else_is_stubbe
             response.status
         );
     }
-    let submit = "/api/v1/namespaces/team-a/restores/no-such-restore/approval";
+    let submit = "/api/v1/workspaces/team-a/restores/no-such-restore/approval";
     let body = r#"{"sidecarBytes":"{\"payloadType\":\"x\",\"signatures\":[]}"}"#;
     let approver = app.post(submit, &cookie, Some(&csrf), None, body).await;
     assert_eq!(
@@ -1265,12 +1263,12 @@ async fn the_governed_approval_route_is_the_approvers_and_nothing_else_is_stubbe
     );
     let session = app.get("/api/v1/session", &cookie).await.json();
     assert_eq!(
-        session["namespaces"][0]["capabilities"]["approvalSubmit"],
+        session["workspaces"][0]["capabilities"]["approvalSubmit"],
         true
     );
     let operator_session = app.get("/api/v1/session", &operator_cookie).await.json();
     assert_eq!(
-        operator_session["namespaces"][0]["capabilities"]["approvalSubmit"],
+        operator_session["workspaces"][0]["capabilities"]["approvalSubmit"],
         false
     );
 }
@@ -1304,7 +1302,7 @@ async fn an_approver_reads_restore_readiness_and_nothing_else() {
 
     let restore = app
         .get(
-            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-1"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights/pf-1"),
             &approver,
         )
         .await;
@@ -1313,21 +1311,21 @@ async fn an_approver_reads_restore_readiness_and_nothing_else() {
 
     let backup = app
         .get(
-            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-backup"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights/pf-backup"),
             &approver,
         )
         .await;
     backup.assert_problem(404, "not_found");
     let details = app
         .get(
-            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-backup/details"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights/pf-backup/details"),
             &approver,
         )
         .await;
     details.assert_problem(404, "not_found");
     let operation = app
         .get(
-            &format!("/api/v1/namespaces/{NS_A}/operations/preflight/pf-backup"),
+            &format!("/api/v1/workspaces/{NS_A}/operations/preflight/pf-backup"),
             &approver,
         )
         .await;
@@ -1338,7 +1336,7 @@ async fn an_approver_reads_restore_readiness_and_nothing_else() {
     let both = app.session_cookie("u-both", &["lw-a-approvers", "lw-a-viewers"]);
     let backup = app
         .get(
-            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-backup"),
+            &format!("/api/v1/workspaces/{NS_A}/preflights/pf-backup"),
             &both,
         )
         .await;
@@ -1378,7 +1376,7 @@ async fn one_operator_cannot_cancel_another_operators_check() {
 
     let started = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/connections/conn-1/topic-discoveries"),
+            &format!("/api/v1/workspaces/{NS_A}/connections/conn-1/topic-discoveries"),
             &first,
             Some(&app.csrf_for("u-op-1")),
             Some("owner-key-000001"),
@@ -1396,7 +1394,7 @@ async fn one_operator_cannot_cancel_another_operators_check() {
     // The other operator holds the same role and is refused anyway.
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/topic-discoveries/{id}:cancel"),
+            &format!("/api/v1/workspaces/{NS_A}/topic-discoveries/{id}:cancel"),
             &second,
             Some(&app.csrf_for("u-op-2")),
             None,
@@ -1412,7 +1410,7 @@ async fn one_operator_cannot_cancel_another_operators_check() {
     // The one who started it may stop it.
     let allowed = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/topic-discoveries/{id}:cancel"),
+            &format!("/api/v1/workspaces/{NS_A}/topic-discoveries/{id}:cancel"),
             &first,
             Some(&app.csrf_for("u-op-1")),
             None,

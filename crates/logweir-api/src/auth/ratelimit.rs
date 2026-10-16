@@ -126,7 +126,7 @@
 //! client may be served up to N times its allowance.
 //!
 //! STREAM SLOTS BOUND THE EVENT STREAM. `routes::operations::events` takes one
-//! per open stream, keyed by principal and namespace, and answers `429` when
+//! per open stream, keyed by principal and workspace, and answers `429` when
 //! the principal already holds its share; the slot is released when the
 //! stream ends.
 
@@ -394,10 +394,10 @@ impl std::fmt::Debug for RateLimiter {
     }
 }
 
-/// The most concurrent streams one actor may hold, per namespace.
-pub const STREAMS_PER_ACTOR_NAMESPACE: usize = 4;
+/// The most concurrent streams one actor may hold, per workspace.
+pub const STREAMS_PER_ACTOR_WORKSPACE: usize = 4;
 
-/// Concurrent-stream accounting, keyed by `(actor id, namespace)`.
+/// Concurrent-stream accounting, keyed by `(actor id, workspace)`.
 #[derive(Default)]
 pub struct StreamSlots {
     held: Mutex<HashMap<(String, String), usize>>,
@@ -433,7 +433,7 @@ impl StreamSlots {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             held: Mutex::new(HashMap::new()),
-            per_key: STREAMS_PER_ACTOR_NAMESPACE,
+            per_key: STREAMS_PER_ACTOR_WORKSPACE,
         })
     }
 
@@ -446,9 +446,9 @@ impl StreamSlots {
         })
     }
 
-    /// Take a slot for one actor in one namespace, or `None` at the ceiling.
-    pub fn acquire(self: &Arc<Self>, actor_id: &str, namespace: &str) -> Option<StreamSlot> {
-        let key = (actor_id.to_string(), namespace.to_string());
+    /// Take a slot for one actor in one workspace, or `None` at the ceiling.
+    pub fn acquire(self: &Arc<Self>, actor_id: &str, workspace: &str) -> Option<StreamSlot> {
+        let key = (actor_id.to_string(), workspace.to_string());
         let mut held = self.held.lock().expect("the stream lock is never poisoned");
         let count = held.entry(key.clone()).or_insert(0);
         if *count >= self.per_key {
@@ -464,13 +464,13 @@ impl StreamSlots {
         })
     }
 
-    /// How many slots one actor holds in one namespace.
+    /// How many slots one actor holds in one workspace.
     #[must_use]
-    pub fn held(&self, actor_id: &str, namespace: &str) -> usize {
+    pub fn held(&self, actor_id: &str, workspace: &str) -> usize {
         self.held
             .lock()
             .expect("the stream lock is never poisoned")
-            .get(&(actor_id.to_string(), namespace.to_string()))
+            .get(&(actor_id.to_string(), workspace.to_string()))
             .copied()
             .unwrap_or(0)
     }
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn stream_slots_are_per_actor_and_namespace_and_are_released_on_drop() {
+    fn stream_slots_are_per_actor_and_workspace_and_are_released_on_drop() {
         let slots = StreamSlots::with_limit(2);
         let a1 = slots.acquire("actor#1", "team-a").unwrap();
         let a2 = slots.acquire("actor#1", "team-a").unwrap();
@@ -525,7 +525,7 @@ mod tests {
             slots.acquire("actor#1", "team-a").is_none(),
             "the ceiling holds"
         );
-        // The same actor in another namespace, and another actor here, are
+        // The same actor in another workspace, and another actor here, are
         // separate.
         assert!(slots.acquire("actor#1", "team-b").is_some());
         assert!(slots.acquire("actor#2", "team-a").is_some());

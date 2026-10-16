@@ -1,4 +1,4 @@
-// An empty namespace: the four steps from nothing to a proven restore.
+// An empty workspace: the four steps from nothing to a proven restore.
 import {
   Button,
   Card,
@@ -44,16 +44,16 @@ const STEPS = [
   },
 ];
 
-export function GettingStarted({ ns }: { ns: string }) {
+export function GettingStarted({ ws }: { ws: string }) {
   return (
     <PageSection>
       <Card>
         <CardHeader>
-          <CardTitle component="h2">Get {ns} protected</CardTitle>
+          <CardTitle component="h2">Get {ws} protected</CardTitle>
         </CardHeader>
         <CardBody>
           <Content component="p" className="lw-subtle">
-            Nothing is set up in this namespace yet. These four steps take you from no backups to a restore you have
+            Nothing is set up in this workspace yet. These four steps take you from no backups to a restore you have
             seen work. Each one opens the page that does it.
           </Content>
           <ProgressStepper isVertical aria-label="Getting started" className="lw-getting-started">
@@ -70,7 +70,7 @@ export function GettingStarted({ ns }: { ns: string }) {
                     <FlexItem>
                       <Button
                         component="a"
-                        href={`#/${ns}/${step.to}`}
+                        href={`#/${ws}/${step.to}`}
                         variant={i === 0 ? "primary" : "secondary"}
                         size="sm"
                         isDisabled={i !== 0}

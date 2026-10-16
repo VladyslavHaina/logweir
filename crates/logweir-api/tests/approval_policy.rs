@@ -44,7 +44,7 @@ fn console(binding: &str) -> Console {
     let key = SigningKey::generate_ed25519();
     let public = key.verifying_key();
     let policies =
-        ApprovalPolicySet::parse(&format!("{POLICIES}namespaces:\n  {NS_A}: {binding}\n"))
+        ApprovalPolicySet::parse(&format!("{POLICIES}workspaces:\n  {NS_A}: {binding}\n"))
             .expect("valid");
     Console {
         settings: Arc::new(ApprovalSettings {
@@ -94,7 +94,7 @@ async fn create_with(
     ticket: Option<&str>,
 ) -> support::TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{ns}/restores"),
+        &format!("/api/v1/workspaces/{ns}/restores"),
         Some(key),
         &body_with(ticket).to_string(),
     )
@@ -233,7 +233,7 @@ async fn a_replay_completes_an_interrupted_confirmation_and_signs_once() {
         2,
         "one failed attempt and one success; the second replay reads, it does not sign again"
     );
-    let listed = oget(&app, &format!("/api/v1/namespaces/{NS_A}/restores")).await;
+    let listed = oget(&app, &format!("/api/v1/workspaces/{NS_A}/restores")).await;
     assert_eq!(
         listed["items"].as_array().map(Vec::len),
         Some(1),
@@ -438,7 +438,7 @@ async fn a_governed_approval_name_must_leave_room_for_its_confirmation() {
     body["approvalRef"]["name"] = json!("a".repeat(250));
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("governed-long-01"),
             &body.to_string(),
         )
@@ -490,7 +490,7 @@ async fn a_local_admin_console_confirms_as_the_local_administrator() {
         "urn:logweir:local-admin#admin"
     );
     let policy = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/approval-policy"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/approval-policy"))
         .await
         .json();
     assert_eq!(policy["item"]["ordinaryConfirmationAvailable"], true);
@@ -587,7 +587,7 @@ async fn a_governed_approval_name_may_not_end_in_the_confirmation_suffix() {
     body["approvalRef"]["name"] = json!("approval-1234abcd-confirmation");
     let refused = governed
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("suffix-01"),
             &body.to_string(),
         )
@@ -607,7 +607,7 @@ async fn the_effective_policy_is_readable_per_namespace() {
     let console = console("prod-governed");
     let app = app(&console);
     let bound = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/approval-policy"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/approval-policy"))
         .await;
     assert_eq!(
         bound.status,
@@ -634,7 +634,7 @@ async fn the_effective_policy_is_readable_per_namespace() {
             .expect("key")
     );
     let unbound = app
-        .get(&format!("/api/v1/namespaces/{NS_B}/approval-policy"))
+        .get(&format!("/api/v1/workspaces/{NS_B}/approval-policy"))
         .await
         .json();
     assert_eq!(unbound["item"]["name"], "legacy-governed-v1");
@@ -687,7 +687,7 @@ async fn the_requester_cannot_approve_their_own_request() {
     let sidecar = countersigned(&app, NS_A, &SigningKey::generate_ed25519());
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{name}/approval"),
             None,
             &json!({"sidecarBytes": sidecar}).to_string(),
         )
@@ -767,7 +767,7 @@ async fn an_unbound_namespace_records_todays_approval_files_exactly() {
         .expect("approvalRef")
         .to_string();
     let (document, sidecar) = v1_files(&hash);
-    let route = format!("/api/v1/namespaces/{NS_B}/restores/{name}/approval");
+    let route = format!("/api/v1/workspaces/{NS_B}/restores/{name}/approval");
     let body = json!({"approvalBytes": document, "sidecarBytes": sidecar}).to_string();
     let recorded = app.post(&route, None, &body).await;
     assert_eq!(
@@ -823,7 +823,7 @@ async fn a_recorded_approval_must_be_this_restores_v1_document() {
         .as_str()
         .expect("hash")
         .to_string();
-    let route = format!("/api/v1/namespaces/{NS_B}/restores/{name}/approval");
+    let route = format!("/api/v1/workspaces/{NS_B}/restores/{name}/approval");
 
     let (other_plan, other_sig) = v1_files(&format!("sha256:{}", "0".repeat(64)));
     let wrong_plan = app
@@ -902,7 +902,7 @@ async fn a_recorded_approval_must_be_this_restores_v1_document() {
     let (document, sidecar) = v1_files(&hash);
     let refused = governed
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{name}/approval"),
             None,
             &json!({"approvalBytes": document, "sidecarBytes": sidecar}).to_string(),
         )
@@ -944,7 +944,7 @@ async fn the_approval_route_refuses_private_key_text() {
     ] {
         let refused = app
             .post(
-                &format!("/api/v1/namespaces/{NS_B}/restores/{name}/approval"),
+                &format!("/api/v1/workspaces/{NS_B}/restores/{name}/approval"),
                 None,
                 &body.to_string(),
             )
@@ -1007,7 +1007,7 @@ async fn shared_create_with(
     let cookie = app.session_cookie(subject, &[group]);
     let csrf = app.csrf_for(subject);
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/restores"),
+        &format!("/api/v1/workspaces/{NS_A}/restores"),
         &cookie,
         Some(&csrf),
         Some(key),
@@ -1065,7 +1065,7 @@ async fn shared_submit(
     let cookie = app.session_cookie(subject, &[group]);
     let csrf = app.csrf_for(subject);
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/restores/{restore}/approval"),
+        &format!("/api/v1/workspaces/{NS_A}/restores/{restore}/approval"),
         &cookie,
         Some(&csrf),
         None,
@@ -1199,7 +1199,7 @@ fn a_bound_namespace_without_a_console_key_refuses_to_start() {
     let path = dir.join("policy.yaml");
     std::fs::write(
         &path,
-        format!("{POLICIES}namespaces:\n  {NS_A}: team-ordinary\n"),
+        format!("{POLICIES}workspaces:\n  {NS_A}: team-ordinary\n"),
     )
     .expect("write");
     let err =
@@ -1227,7 +1227,7 @@ async fn a_confirmation_from_before_a_policy_change_cannot_be_approved() {
 
     // The same cluster, a console restarted under an EDITED Governed policy.
     let edited = ApprovalPolicySet::parse(&format!(
-        "{}  - name: prod-governed\n    mode: Governed\n    maxAgeSeconds: 7200\nnamespaces:\n  {NS_A}: prod-governed\n",
+        "{}  - name: prod-governed\n    mode: Governed\n    maxAgeSeconds: 7200\nworkspaces:\n  {NS_A}: prod-governed\n",
         "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: Ordinary\n"
     ))
     .expect("valid");

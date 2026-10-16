@@ -78,6 +78,7 @@ fn spec_in(mode: TargetMode, topic_naming: Option<TopicNaming>) -> DrillSpec {
             default_replication_factor: 1,
             teardown: "delete".into(),
             topic_configuration: None,
+            schema_registry: None,
         },
         sample: SampleSpec {
             window_start: ts("2026-09-07T12:00:00Z"),
@@ -94,6 +95,7 @@ fn spec_in(mode: TargetMode, topic_naming: Option<TopicNaming>) -> DrillSpec {
             window_start: None,
             partitions: std::collections::BTreeMap::new(),
             allow_transaction_markers: false,
+            rate_limit_bytes_per_sec: None,
         },
         objectives: ObjectivesSpec {
             rto_seconds: None,

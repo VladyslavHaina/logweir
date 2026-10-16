@@ -244,7 +244,7 @@ async fn a_complete_sign_in_issues_a_session_and_leaks_no_provider_token() {
     assert_eq!(body["bindingRevision"], "rev-1");
     assert!(body["csrfToken"].is_string());
     assert!(body["expiresAt"].is_string());
-    let grants: Vec<(String, Vec<String>)> = body["namespaces"]
+    let grants: Vec<(String, Vec<String>)> = body["workspaces"]
         .as_array()
         .unwrap()
         .iter()
@@ -1452,7 +1452,7 @@ async fn a_session_carries_only_bindable_group_claims() {
 
     // The bound group still decides the role.
     let session = app.get("/api/v1/session", &cookie).await.json();
-    assert_eq!(session["namespaces"][0]["roles"][0], "operator");
+    assert_eq!(session["workspaces"][0]["roles"][0], "operator");
 
     // And the three unbindable ones are gone: the claims the cookie carries are
     // exactly what the authorizer sees.

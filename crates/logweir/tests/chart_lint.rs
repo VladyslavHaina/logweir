@@ -992,13 +992,19 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
             "every bootstrap permission is resourceNames-scoped"
         );
     }
-    let controller_rules = find(&docs, "ClusterRole", "weirkeeper").value["rules"]
+    let controller_rules = find(&docs, "Role", "weirkeeper").value["rules"]
         .as_sequence()
         .expect("controller rules");
+    // PROD-19.1: the controller's one rule on Secrets is `get`, for the
+    // workspace gate's metadata read; the bootstrap's key is never written by
+    // it (`manifest_lint::weirkeeper_reads_secret_metadata_only`).
     assert!(controller_rules.iter().all(|rule| {
-        rule["resources"]
-            .as_sequence()
-            .is_none_or(|resources| resources.iter().all(|r| r.as_str() != Some("secrets")))
+        rule["resources"].as_sequence().is_none_or(|resources| {
+            resources.iter().all(|r| r.as_str() != Some("secrets"))
+                || rule["verbs"]
+                    .as_sequence()
+                    .is_some_and(|v| v.len() == 1 && v[0].as_str() == Some("get"))
+        })
     }));
 
     let singleton = find(&docs, "ClusterRole", "logweir-identity-singleton");
@@ -1035,83 +1041,6 @@ fn chart_lint_identity_bootstrap_is_persistent_public_and_least_privilege() {
             "bootstrap must have no port-only destination rule"
         );
     }
-}
-
-#[test]
-fn chart_lint_authorized_namespace_receives_the_same_identity_distribution_contract() {
-    let docs = rendered("identity-multinamespace");
-    let target = docs
-        .iter()
-        .find(|doc| {
-            doc.kind == "Secret"
-                && doc.name() == "logweir-signing-key"
-                && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
-        })
-        .expect("retained target signing Secret");
-    assert_eq!(
-        Some("recoveries"),
-        target.value["metadata"]["namespace"].as_str()
-    );
-    assert_eq!(
-        Some("pre-install,pre-upgrade"),
-        target.value["metadata"]["annotations"]["helm.sh/hook"].as_str()
-    );
-    assert!(target.value["data"]
-        .as_mapping()
-        .is_some_and(|data| data.is_empty()));
-    assert!(docs.iter().any(|doc| {
-        doc.kind == "ServiceAccount"
-            && doc.name() == "logweir-runner"
-            && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
-    }));
-    let job = docs
-        .iter()
-        .find(|doc| {
-            doc.kind == "Job"
-                && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
-                && doc.name().starts_with("logweir-identity-distribute-")
-        })
-        .expect("distribution Job in the authorized namespace");
-    let args: Vec<&str> = container(job)["args"]
-        .as_sequence()
-        .expect("distribution args")
-        .iter()
-        .map(|value| value.as_str().expect("string arg"))
-        .collect();
-    assert!(args
-        .windows(2)
-        .any(|pair| pair == ["--source-namespace", "logweir-system"]));
-    assert!(args
-        .windows(2)
-        .any(|pair| pair == ["--target-namespace", "recoveries"]));
-    assert!(!args.contains(&"bootstrap"));
-
-    let source_role = find(&docs, "Role", "logweir-identity-distribution-source");
-    assert_eq!(
-        Some("logweir-system"),
-        source_role.value["metadata"]["namespace"].as_str()
-    );
-    assert_eq!(
-        Some("get"),
-        source_role.value["rules"][0]["verbs"][0].as_str()
-    );
-    let target_role = docs
-        .iter()
-        .find(|doc| {
-            doc.kind == "Role"
-                && doc.name() == "logweir-identity-distributor"
-                && doc.value["metadata"]["namespace"].as_str() == Some("recoveries")
-        })
-        .expect("target distributor role");
-    assert_eq!(
-        vec!["get", "patch"],
-        target_role.value["rules"][0]["verbs"]
-            .as_sequence()
-            .unwrap()
-            .iter()
-            .map(|value| value.as_str().unwrap())
-            .collect::<Vec<_>>()
-    );
 }
 
 #[test]
@@ -1458,7 +1387,7 @@ fn console_sealed(trait_name: &str) -> BTreeSet<String> {
 fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends() {
     let docs = rendered("demo");
     find(&docs, "ServiceAccount", "logweir-api");
-    let role = find(&docs, "ClusterRole", "logweir-api");
+    let role = find(&docs, "Role", "logweir-api");
     let cluster_role = find(&docs, "ClusterRole", "logweir-api-trustpolicies");
 
     // --- the exact table ---------------------------------------------------
@@ -1492,6 +1421,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
                 "backupdestinations",
                 "backupschedules",
                 "preflights",
+                "restores",
                 "topicdiscoveries",
             ]
             .iter()
@@ -1535,8 +1465,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
     assert_eq!(
         want,
         rules_of(role),
-        "the console principal's namespaced ClusterRole carries exactly the sealed adapter's \
-         pairs"
+        "the console principal's Role carries exactly the sealed adapter's pairs"
     );
     assert_eq!(
         BTreeSet::from([(
@@ -1600,7 +1529,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
             assert!(
                 granted(role, plural, verb),
                 "`crates/logweir-api/src/kube.rs` seals `{plural}` into `ProductResource`, so \
-                 every route may `{verb}` one, and the console's ClusterRole grants no such \
+                 every route may `{verb}` one, and the console's Role grants no such \
                  verb. A sealed kind with no rule is a route that 403s in production while \
                  every route-table test stays green"
             );
@@ -1610,7 +1539,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         assert!(
             granted(role, &plural, "patch"),
             "`{plural}` is a `CancellableCheck` — its `spec.cancelRequested` may be raised — and \
-             the console's ClusterRole grants no `patch` on it"
+             the console's Role grants no `patch` on it"
         );
     }
     for plural in console_sealed("ClusterResource") {
@@ -1695,8 +1624,8 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
     }
     assert!(
         checked >= 30,
-        "only {checked} (resource, verb) pairs were examined across the console's two \
-         ClusterRoles; the walk has gone quiet"
+        "only {checked} (resource, verb) pairs were examined across the console's Role and \
+         ClusterRole; the walk has gone quiet"
     );
 
     // --- the negatives, by name --------------------------------------------
@@ -1722,105 +1651,36 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         }
     }
 
-    // --- the bindings, AND THE NAMESPACES THEY ARE IN ----------------------
+    // --- the binding: ONE RoleBinding, in the release namespace -------------
     //
-    // A console binding in a namespace no value names is a console read the
-    // installation never granted: the authorizer would refuse it, but the
-    // binding shape exists so that a defect in the authorizer cannot reach
-    // beyond the configured set. SO THE EXPECTATION IS DERIVED, NOT RESTATED:
-    // the set is computed from the example's own values the way
-    // `logweir.api.namespaces` computes it (the release namespace, plus
-    // `api.namespaces`, or `kubernetes.namespace` when that list is empty), so
-    // a helper that widens it fails here and a widened EXAMPLE does not move
-    // the goalposts.
-    for (example, release_namespace) in [
-        (Some("demo"), "logweir-system"),
-        (Some("identity-multinamespace"), "logweir-system"),
-    ] {
-        let name = example.expect("an example name");
-        let values: Value = serde_yaml::from_str(&read(&format!(
-            "charts/logweir/examples/{name}.values.yaml"
-        )))
-        .expect("the example values parse");
-        if values["api"]["enabled"].as_bool() != Some(true) {
-            continue;
-        }
-        let mut want: BTreeSet<String> = BTreeSet::from([release_namespace.to_string()]);
-        let listed: Vec<String> = values["api"]["namespaces"]
-            .as_sequence()
-            .map(|s| {
-                s.iter()
-                    .map(|v| v.as_str().expect("a namespace name").to_string())
-                    .collect()
-            })
-            .unwrap_or_default();
-        if listed.is_empty() {
-            if let Some(fallback) = values["kubernetes"]["namespace"].as_str() {
-                if !fallback.is_empty() {
-                    want.insert(fallback.to_string());
-                }
-            }
-        } else {
-            want.extend(listed);
-        }
-
-        let rendered_docs = rendered(name);
-        let bindings: Vec<&Doc> = rendered_docs
-            .iter()
-            .filter(|d| {
-                d.kind == "RoleBinding"
-                    && d.value["roleRef"]["name"].as_str() == Some("logweir-api")
-            })
-            .collect();
-        let got: BTreeSet<String> = bindings
-            .iter()
-            .map(|d| {
-                d.value["metadata"]["namespace"]
-                    .as_str()
-                    .unwrap_or("<no namespace>")
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(
-            want, got,
-            "rendered/{name}.yaml binds the console's namespaced role in {got:?}, and \
-             `api.namespaces` (plus the release namespace) says {want:?}. A binding in a \
-             namespace no value names is a console grant the installation never asked for, and \
-             it is exactly what the per-namespace RoleBinding shape exists to make visible"
-        );
-        assert_eq!(
-            want.len(),
-            bindings.len(),
-            "rendered/{name}.yaml carries {} RoleBindings for {} namespaces — one of them is a \
-             duplicate, which Helm refuses at install time rather than at render time",
-            bindings.len(),
-            want.len()
-        );
-        for rb in bindings {
-            assert_eq!(Some("ClusterRole"), rb.value["roleRef"]["kind"].as_str());
-            assert_eq!(
-                Some("logweir-api"),
-                rb.value["subjects"][0]["name"].as_str()
-            );
-            assert_eq!(
-                Some("logweir-system"),
-                rb.value["subjects"][0]["namespace"].as_str(),
-                "every binding names the ONE ServiceAccount, in the release namespace"
-            );
-        }
-    }
+    // OD-23: the install is one namespace and the console serves it alone;
+    // workspaces are the console's own boundary (`KubeAdapter`). The Role is
+    // bound once, there, and never cluster-wide.
     let bindings: Vec<&Doc> = docs
         .iter()
         .filter(|d| {
             d.kind == "RoleBinding" && d.value["roleRef"]["name"].as_str() == Some("logweir-api")
         })
         .collect();
-    assert!(
-        !bindings.is_empty(),
-        "the namespaced role is bound by a RoleBinding and never by a ClusterRoleBinding: the \
-         console's own authorizer refuses an ungranted namespace, and a cluster-wide binding \
-         would mean a defect in that check reaches every namespace instead of the configured \
-         ones"
+    assert_eq!(
+        bindings.len(),
+        1,
+        "the console's Role is bound exactly once, in the release namespace"
+    );
+    let rb = bindings[0];
+    assert_eq!(Some("Role"), rb.value["roleRef"]["kind"].as_str());
+    assert_eq!(
+        Some("logweir-system"),
+        rb.value["metadata"]["namespace"].as_str()
+    );
+    assert_eq!(
+        Some("logweir-api"),
+        rb.value["subjects"][0]["name"].as_str()
+    );
+    assert_eq!(
+        Some("logweir-system"),
+        rb.value["subjects"][0]["namespace"].as_str(),
+        "the binding names the ONE ServiceAccount, in the release namespace"
     );
     for crb in docs.iter().filter(|d| d.kind == "ClusterRoleBinding") {
         let name = crb.value["roleRef"]["name"].as_str().unwrap_or_default();
@@ -1919,11 +1779,11 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
 /// `-n logweir-system`).
 const RENDER_NAMESPACE: &str = "logweir-system";
 
-/// The console account's grants in EACH namespace it is bound in, as
+/// The console account's grants in the release namespace, as
 /// `verb group/resource[@name]` (core is `core`). The sealed adapter's pairs:
 /// `chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends`
 /// derives them from `kube.rs`; this list pins what is REACHABLE.
-const API_NAMESPACED_GRANTS: [&str; 40] = [
+const API_NAMESPACED_GRANTS: [&str; 41] = [
     "get logweir.dev/approvals",
     "list logweir.dev/approvals",
     "create logweir.dev/approvals",
@@ -1948,6 +1808,8 @@ const API_NAMESPACED_GRANTS: [&str; 40] = [
     "get logweir.dev/restores",
     "list logweir.dev/restores",
     "create logweir.dev/restores",
+    // PROD-07.2: the cancel and clean-up annotations.
+    "patch logweir.dev/restores",
     "get logweir.dev/topicdiscoveries",
     "list logweir.dev/topicdiscoveries",
     "create logweir.dev/topicdiscoveries",
@@ -1975,10 +1837,8 @@ const API_CLUSTER_GRANTS: [&str; 3] = [
     "get logweir.dev/trustrosters@default",
 ];
 
-/// The controller's CLUSTER-WIDE grants when `controller.watchNamespaces` is
-/// set (D0 stage 5): the two cluster-scoped trust kinds and nothing
-/// namespaced. `chart_lint_the_shared_console_is_outside_the_controllers_job_authority`
-/// explains each.
+/// The controller's CLUSTER-WIDE grants: the two cluster-scoped trust kinds
+/// and nothing namespaced (`ClusterRole/weirkeeper-cluster-scope`).
 const CONTROLLER_SCOPED_CLUSTER_GRANTS: [&str; 8] = [
     "get logweir.dev/trustrosters",
     "list logweir.dev/trustrosters",
@@ -2163,24 +2023,6 @@ fn string_list(v: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `logweir.api.namespaces`, recomputed from an example's values: the release
-/// namespace, plus `api.namespaces`, or `kubernetes.namespace` when that list
-/// is empty (the chart default of both is empty).
-fn api_namespaces(values: &Value) -> BTreeSet<String> {
-    let mut want = BTreeSet::from([RENDER_NAMESPACE.to_string()]);
-    let listed = string_list(&values["api"]["namespaces"]);
-    if listed.is_empty() {
-        if let Some(fallback) = values["kubernetes"]["namespace"].as_str() {
-            if !fallback.is_empty() {
-                want.insert(fallback.to_string());
-            }
-        }
-    } else {
-        want.extend(listed);
-    }
-    want
-}
-
 fn pinned(atoms: &[&str]) -> BTreeSet<String> {
     atoms.iter().map(|s| (*s).to_string()).collect()
 }
@@ -2234,7 +2076,7 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
         renders.len()
     );
     let controller_role = rendered("default");
-    let controller_grants = grant_atoms(find(&controller_role, "ClusterRole", "weirkeeper"));
+    let controller_grants = grant_atoms(find(&controller_role, "Role", "weirkeeper"));
     assert!(
         controller_grants.len() >= 30,
         "the default render's weirkeeper role flattened to {} grants",
@@ -2250,9 +2092,7 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
         if values["api"]["enabled"].as_bool() == Some(true) {
             api_variants += 1;
             want.insert("cluster".to_string(), pinned(&API_CLUSTER_GRANTS));
-            for ns in api_namespaces(&values) {
-                want.insert(ns, pinned(&API_NAMESPACED_GRANTS));
-            }
+            want.insert(RENDER_NAMESPACE.to_string(), pinned(&API_NAMESPACED_GRANTS));
             // CHART GAP G6: a shared console that names the ingress
             // controller's Service holds ONE more atom, in THAT namespace
             // only — the `list_page endpointslices` pair `logweir-api`'s
@@ -2290,36 +2130,16 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
              spends the grant",
         );
 
-        // THE CONTROLLER ACCOUNT. Its role is the default render's,
-        // which `manifest_lint` holds call for call; this row holds what is
-        // BOUND to it to that role and nothing more.
-        let watched = string_list(&values["controller"]["watchNamespaces"]);
+        // THE CONTROLLER ACCOUNT. Its Role is the default render's, which
+        // `manifest_lint` holds call for call; this row holds what is BOUND to
+        // it: that Role in the release namespace (OD-23: the one namespace it
+        // watches), the two cluster-scoped trust kinds, and nothing more.
         let mut want: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        if watched.is_empty() {
-            want.insert("cluster".to_string(), controller_grants.clone());
-        } else {
-            want.insert(
-                "cluster".to_string(),
-                pinned(&CONTROLLER_SCOPED_CLUSTER_GRANTS),
-            );
-            for ns in watched {
-                want.insert(ns, controller_grants.clone());
-            }
-            // With a console over the managed identity, also the
-            // public identity ConfigMap the marker poller reads.
-            let marker = fresh_install_confirm(&values);
-            want.insert(
-                RENDER_NAMESPACE.to_string(),
-                if marker {
-                    pinned(&[
-                        "get core/configmaps@weirkeeper-policy",
-                        "get core/configmaps@logweir-signing-trust",
-                    ])
-                } else {
-                    pinned(&["get core/configmaps@weirkeeper-policy"])
-                },
-            );
-        }
+        want.insert(
+            "cluster".to_string(),
+            pinned(&CONTROLLER_SCOPED_CLUSTER_GRANTS),
+        );
+        want.insert(RENDER_NAMESPACE.to_string(), controller_grants.clone());
         // PROD-05.1a: `get`/`list` on Strimzi KafkaTopics, in each namespace
         // `strimzi.namespaces` lists, only with `strimzi.readKafkaTopics`.
         if values["strimzi"]["readKafkaTopics"].as_bool() == Some(true) {
@@ -2336,8 +2156,8 @@ fn chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned() {
             "weirkeeper",
             &want,
             &reached,
-            "The controller holds the weirkeeper role — cluster-wide, or \
-             per watched namespace when `controller.watchNamespaces` is set — and nothing else",
+            "The controller holds Role/weirkeeper in the release namespace and \
+             weirkeeper-cluster-scope, and nothing else",
         );
         // EVERY JOB-OWNING RECONCILER READS ITS JOBS' `FailedCreate`
         // EVENTS, so wherever the controller may create a Job it must also be
@@ -2995,64 +2815,54 @@ fn chart_lint_the_console_mode_has_no_default_and_only_shared_is_exposed() {
     );
 }
 
-/// **The shared console is rendered outside the controller's Job-create
-/// authority (D0 stage 5), and never beside the legacy proxy.**
+/// **One namespace per install (OD-23, PROD-19.1 C1).**
 ///
-/// WHAT THE SCOPED RENDER MUST SAY. In `console-shared`, which sets
-/// `controller.watchNamespaces: [team-a, team-b]`:
+/// * the default values name one workspace, `default`, and the controller gets
+///   it as `LOGWEIR_WORKSPACES=default` and no `LOGWEIR_WATCH_NAMESPACES`;
+/// * no `ClusterRole` or `ClusterRoleBinding` named `weirkeeper`: the
+///   controller's namespaced rules are `Role/weirkeeper`, bound by one
+///   RoleBinding in the release namespace, and `weirkeeper-cluster-scope`
+///   holds the two cluster-scoped trust kinds and nothing else;
+/// * in EVERY render, every namespaced object is in the release namespace,
+///   except the two opt-in Roles and their bindings: Strimzi's `KafkaTopic`
+///   read (`strimzi.namespaces`) and the trusted-proxy EndpointSlice read (the
+///   ingress namespace);
+/// * the console's configuration names the release namespace and the
+///   example's workspaces, and its principal.
 ///
-/// * no `ClusterRoleBinding/weirkeeper` — the cluster-wide grant that put every
-///   namespace, the key namespace included, inside the controller's authority;
-/// * one `RoleBinding/weirkeeper` to the unchanged `weirkeeper` ClusterRole in
-///   EXACTLY the watched namespaces, and none in the release namespace;
-/// * `ClusterRole/weirkeeper-cluster-scope`, bound cluster-wide, naming the two
-///   cluster-scoped trust kinds and nothing else — no Job, Pod, ConfigMap,
-///   Secret or namespaced kind;
-/// * in the release namespace, `get` on the one policy ConfigMap by name and
-///   nothing else;
-/// * the controller's `LOGWEIR_WATCH_NAMESPACES` equal to the bound set, so
-///   the watch it starts is one the API server allows;
-/// * the console's configuration naming the Kubernetes principal it writes as
-///   and requiring its trusted proxy.
-///
-/// And the default render keeps the cluster-wide binding and renders no
-/// variable.
+/// NEGATIVE CONTROL: the per-namespace loops this replaced (one RoleBinding per
+/// watched namespace, one runner account per authorized namespace) render an
+/// object outside the release namespace and fail the third bullet.
 #[test]
-fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
+fn chart_lint_one_namespace_per_install() {
     const RELEASE_NS: &str = "logweir-system";
-    let shared = rendered("console-shared");
-    assert!(
-        !names_of(&shared, "ClusterRoleBinding").contains("weirkeeper"),
-        "console-shared renders ClusterRoleBinding/weirkeeper: the controller would hold Job \
-         create in the release namespace, where the console's keys live (D0 stage 5)"
-    );
-    let bound: BTreeSet<String> = shared
-        .iter()
-        .filter(|d| {
-            d.kind == "RoleBinding"
-                && d.value["roleRef"]["kind"] == "ClusterRole"
-                && d.value["roleRef"]["name"] == "weirkeeper"
-        })
-        .map(|d| {
-            assert_eq!(
-                d.value["subjects"][0]["name"], "weirkeeper",
-                "a weirkeeper RoleBinding binds someone else"
-            );
-            assert_eq!(d.value["subjects"][0]["namespace"], RELEASE_NS);
-            d.value["metadata"]["namespace"]
-                .as_str()
-                .expect("a namespaced RoleBinding")
-                .to_string()
-        })
-        .collect();
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
     assert_eq!(
-        bound,
-        BTreeSet::from(["team-a".to_string(), "team-b".to_string()]),
-        "the weirkeeper ClusterRole must be bound in exactly the watched namespaces"
+        string_list(&values["workspaces"]),
+        vec!["default".to_string()],
+        "the chart default is one workspace, `default`"
     );
-    assert!(!bound.contains(RELEASE_NS));
+    let default = rendered("default");
+    let env = env_of(container(find(&default, "Deployment", "weirkeeper")));
+    assert_eq!(
+        env.get("LOGWEIR_WORKSPACES")
+            .and_then(|e| e["value"].as_str()),
+        Some("default")
+    );
+    assert!(!env.contains_key("LOGWEIR_WATCH_NAMESPACES"));
+    assert!(!names_of(&default, "ClusterRoleBinding").contains("weirkeeper"));
+    assert!(!names_of(&default, "ClusterRole").contains("weirkeeper"));
+    let role = find(&default, "Role", "weirkeeper");
+    assert_eq!(role.value["metadata"]["namespace"], RELEASE_NS);
+    let binding = find(&default, "RoleBinding", "weirkeeper");
+    assert_eq!(binding.value["metadata"]["namespace"], RELEASE_NS);
+    assert_eq!(binding.value["roleRef"]["kind"], "Role");
+    assert_eq!(binding.value["roleRef"]["name"], "weirkeeper");
+    assert_eq!(binding.value["subjects"][0]["name"], "weirkeeper");
+    assert_eq!(binding.value["subjects"][0]["namespace"], RELEASE_NS);
 
-    let cluster_scope = find(&shared, "ClusterRole", "weirkeeper-cluster-scope");
+    let cluster_scope = find(&default, "ClusterRole", "weirkeeper-cluster-scope");
     let resources: BTreeSet<String> = rules_of(cluster_scope)
         .into_iter()
         .flat_map(|(groups, resources, _)| {
@@ -3070,56 +2880,50 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
         ]),
         "weirkeeper-cluster-scope must hold the two cluster-scoped trust kinds and nothing else"
     );
-    let binding = find(&shared, "ClusterRoleBinding", "weirkeeper-cluster-scope");
-    assert_eq!(binding.value["roleRef"]["name"], "weirkeeper-cluster-scope");
-    assert_eq!(binding.value["subjects"][0]["name"], "weirkeeper");
+    let crb = find(&default, "ClusterRoleBinding", "weirkeeper-cluster-scope");
+    assert_eq!(crb.value["roleRef"]["name"], "weirkeeper-cluster-scope");
+    assert_eq!(crb.value["subjects"][0]["name"], "weirkeeper");
 
-    let policy_role = find(&shared, "Role", "weirkeeper-installation-policy");
-    assert_eq!(policy_role.value["metadata"]["namespace"], RELEASE_NS);
-    let rules = policy_role.value["rules"].as_sequence().expect("rules");
-    assert_eq!(rules.len(), 1, "one rule in the release namespace");
-    // The public identity ConfigMap the fresh-install marker is
-    // read from joins this rule only where the hook can write a marker
-    // (`logweir.freshInstallConfirm`: the bootstrap feature, which this shared
-    // example leaves off until the re-pin; `chart_lint_every_grant_reaching_
-    // the_api_and_controller_accounts_is_pinned` holds both shapes).
-    assert_eq!(
-        serde_yaml::to_string(&rules[0]).unwrap(),
-        if fresh_install_confirm(&variant_values("console-shared")) {
-            "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\n- logweir-signing-trust\nverbs:\n- get\n"
-        } else {
-            "apiGroups:\n- ''\nresources:\n- configmaps\nresourceNames:\n- weirkeeper-policy\nverbs:\n- get\n"
+    let cluster_kinds = [
+        "ClusterRole",
+        "ClusterRoleBinding",
+        "ValidatingAdmissionPolicy",
+        "ValidatingAdmissionPolicyBinding",
+    ];
+    let mut walked = 0usize;
+    for render in files_under("charts/logweir/rendered") {
+        let name = render
+            .strip_prefix("charts/logweir/rendered/")
+            .and_then(|f| f.strip_suffix(".yaml"))
+            .expect("a rendered file")
+            .to_string();
+        for doc in rendered(&name) {
+            if cluster_kinds.contains(&doc.kind.as_str()) {
+                continue;
+            }
+            walked += 1;
+            let ns = doc.value["metadata"]["namespace"].as_str().unwrap_or("");
+            let opt_in = matches!(doc.kind.as_str(), "Role" | "RoleBinding")
+                && (doc.name() == "weirkeeper-strimzi-kafkatopics"
+                    || doc.name() == "logweir-api-trusted-proxy");
+            assert!(
+                ns == RELEASE_NS || opt_in,
+                "rendered/{name}.yaml puts {}/{} in namespace `{ns}`; an install is ONE \
+                 namespace (OD-23), and only the two opt-in Roles reach outside it",
+                doc.kind,
+                doc.name()
+            );
         }
-    );
-    // Nothing else in the render grants the controller anything in the
-    // release namespace.
-    for doc in shared.iter().filter(|d| {
-        d.kind == "RoleBinding"
-            && d.value["metadata"]["namespace"] == RELEASE_NS
-            && d.value["subjects"]
-                .as_sequence()
-                .is_some_and(|s| s.iter().any(|x| x["name"] == "weirkeeper"))
-    }) {
-        assert_eq!(
-            doc.name(),
-            "weirkeeper-installation-policy",
-            "an unexpected grant to weirkeeper in the release namespace"
-        );
     }
-
-    let controller = find(&shared, "Deployment", "weirkeeper");
-    let env = env_of(container(controller));
-    let watched = env
-        .get("LOGWEIR_WATCH_NAMESPACES")
-        .and_then(|e| e["value"].as_str())
-        .expect("the scoped controller carries LOGWEIR_WATCH_NAMESPACES");
-    let watched: BTreeSet<String> = watched.split(',').map(str::to_string).collect();
-    assert_eq!(
-        watched, bound,
-        "the watch and the grant must be the same list"
-    );
+    assert!(walked >= 200, "only {walked} namespaced objects walked");
 
     let (_, config) = console_config("console-shared");
+    assert_eq!(config["namespace"], RELEASE_NS);
+    assert_eq!(
+        string_list(&config["workspaces"]),
+        vec!["team-a".to_string(), "team-b".to_string()]
+    );
+    assert!(config.get("namespaces").is_none());
     assert_eq!(
         config["kubernetes"]["principal"],
         "system:serviceaccount:logweir-system:logweir-api"
@@ -3138,20 +2942,11 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
         );
     }
 
-    // THE DEFAULT RENDER IS UNCHANGED: the cluster-wide binding, no variable.
-    let default = rendered("default");
-    assert!(names_of(&default, "ClusterRoleBinding").contains("weirkeeper"));
-    assert!(!names_of(&default, "ClusterRole").contains("weirkeeper-cluster-scope"));
-    assert!(
-        !env_of(container(find(&default, "Deployment", "weirkeeper")))
-            .contains_key("LOGWEIR_WATCH_NAMESPACES")
-    );
-
     let template = read("charts/logweir/templates/_validate.tpl");
     for needle in [
-        "api.console.mode=shared requires controller.watchNamespaces (D0 stage 5).",
-        "includes the release namespace %q, which holds the shared console's keys",
-        "which is not in controller.watchNamespaces",
+        "is removed (OD-23: one namespace per install, workspaces inside it)",
+        "which is not in workspaces (%s)",
+        "binds a workspace that is not in workspaces",
         "api.console.requireTrustedProxy needs api.console.trustedProxyService",
         "or api.console.trustedProxyCidrs: with nothing to trust",
         "With requireTrustedProxy a range this wide trusts the pods the gate exists to refuse",
@@ -3159,9 +2954,57 @@ fn chart_lint_the_shared_console_is_outside_the_controllers_job_authority() {
         assert!(
             template.contains(needle),
             "templates/_validate.tpl must still refuse at render time with `{needle}` \
-             (scripts/check-chart.sh arm 8 runs it)"
+             (scripts/check-chart.sh runs it)"
         );
     }
+}
+
+/// **No key Secret the chart renders carries a workspace label.**
+///
+/// The controller mounts a Secret a Logweir object names only when the Secret
+/// carries `logweir.dev/workspace` equal to the referrer's (PROD-19.1, the
+/// console path of residual O1), so an unlabelled Secret in the namespace can
+/// never be mounted into a runner Job. The signing key, the console's
+/// confirmation key and the demo MinIO's root pair must stay unlabelled; the
+/// one Secret the chart labels is `logweir-s3`, the demo archive credential a
+/// destination names.
+///
+/// NEGATIVE CONTROL: labelling `logweir-signing-key` (the workspace label
+/// helper added to `identity.yaml`) fails the first assertion.
+#[test]
+fn chart_lint_no_key_secret_carries_a_workspace_label() {
+    let mut labelled = BTreeSet::new();
+    let mut keys_seen = 0usize;
+    for render in files_under("charts/logweir/rendered") {
+        let name = render
+            .strip_prefix("charts/logweir/rendered/")
+            .and_then(|f| f.strip_suffix(".yaml"))
+            .expect("a rendered file")
+            .to_string();
+        for doc in rendered(&name).iter().filter(|d| d.kind == "Secret") {
+            if ["logweir-signing-key", "logweir-console-confirmation"]
+                .contains(&doc.name().as_str())
+            {
+                keys_seen += 1;
+            }
+            if doc.value["metadata"]["labels"]
+                .get("logweir.dev/workspace")
+                .is_some()
+            {
+                labelled.insert(doc.name());
+            }
+        }
+    }
+    assert!(
+        labelled.iter().all(|n| n == "logweir-s3"),
+        "the chart renders a workspace label on Secret(s) {labelled:?}; only `logweir-s3` may \
+         carry one, because a labelled Secret is one a runner Job may mount"
+    );
+    assert!(
+        labelled.contains("logweir-s3"),
+        "the demo archive credential carries its workspace label"
+    );
+    assert!(keys_seen >= 4, "only {keys_seen} key Secrets walked");
 }
 
 /// A tiny matcher for the ONE anchored alternation shape this schema uses
@@ -3251,46 +3094,23 @@ fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
         }
     }
 
-    // AND IT EXISTS IN EVERY NAMESPACE THAT RUNS A JOB. `RetentionPolicy`s
-    // live with the workload they protect, and `controllers::retention_policy`
-    // creates the Job in the policy's namespace, so the account follows
-    // `identity.authorizedRunnerNamespaces` (the shape `templates/identity.yaml`
-    // uses for `logweir-runner`, for the same reason). DERIVED FROM THE
-    // EXAMPLE'S OWN VALUES, like the console binding set above.
-    for name in ["demo", "identity-multinamespace"] {
-        let values: Value = serde_yaml::from_str(&read(&format!(
-            "charts/logweir/examples/{name}.values.yaml"
-        )))
-        .expect("the example values parse");
-        if values["retention"]["enabled"].as_bool() != Some(true) {
-            continue;
-        }
-        let mut want: BTreeSet<String> = BTreeSet::from(["logweir-system".to_string()]);
-        if let Some(extra) = values["identity"]["authorizedRunnerNamespaces"].as_sequence() {
-            want.extend(
-                extra
-                    .iter()
-                    .map(|v| v.as_str().expect("a namespace name").to_string()),
-            );
-        }
-        let got: BTreeSet<String> = rendered(name)
-            .iter()
-            .filter(|d| d.kind == "ServiceAccount" && d.name() == "logweir-retention")
-            .map(|d| {
-                d.value["metadata"]["namespace"]
-                    .as_str()
-                    .unwrap_or("<no namespace>")
-                    .to_string()
-            })
-            .collect();
-        assert_eq!(
-            want, got,
-            "rendered/{name}.yaml puts the enforcement account in {got:?}, and the namespaces \
-             this installation runs Jobs in are {want:?}. A namespace that runs a \
-             `RetentionPolicy` and has no `logweir-retention` is enforcement that fails closed \
-             with nothing in any status saying which gate was shut"
-        );
-    }
+    // AND IT EXISTS WHERE EVERY JOB RUNS: the release namespace (OD-23), once.
+    let got: Vec<String> = docs
+        .iter()
+        .filter(|d| d.kind == "ServiceAccount" && d.name() == "logweir-retention")
+        .map(|d| {
+            d.value["metadata"]["namespace"]
+                .as_str()
+                .unwrap_or("<no namespace>")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        got,
+        vec!["logweir-system".to_string()],
+        "rendered/demo.yaml puts the enforcement account in {got:?}; every Job runs in the \
+         release namespace"
+    );
 
     // AND THE LOW-LEVEL PATH HAS A FRAGMENT, so the two documents that point at
     // one are not pointing at nothing. It carries no namespace, exactly as
@@ -3634,10 +3454,10 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
             .cloned()
             .collect::<BTreeSet<String>>(),
         BTreeSet::from([
-            "maxActivePerNamespace".to_string(),
+            "maxActivePerWorkspace".to_string(),
             "maxActiveTotal".to_string(),
             "maxActiveDiscoveriesPerConnection".to_string(),
-            "maxEvidenceFetchActivePerNamespace".to_string(),
+            "maxEvidenceFetchActivePerWorkspace".to_string(),
         ])
     );
     assert_eq!(
@@ -3675,8 +3495,8 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
         serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
     for (json_path, yaml_path) in [
         (
-            "checks.maxActivePerNamespace",
-            "checks.maxActivePerNamespace",
+            "checks.maxActivePerWorkspace",
+            "checks.maxActivePerWorkspace",
         ),
         ("checks.maxActiveTotal", "checks.maxActiveTotal"),
         (
@@ -3684,8 +3504,8 @@ fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points
             "checks.maxActiveDiscoveriesPerConnection",
         ),
         (
-            "checks.maxEvidenceFetchActivePerNamespace",
-            "checks.maxEvidenceFetchActivePerNamespace",
+            "checks.maxEvidenceFetchActivePerWorkspace",
+            "checks.maxEvidenceFetchActivePerWorkspace",
         ),
         ("discovery.freshSeconds", "checks.discovery.freshSeconds"),
         (
@@ -3974,7 +3794,6 @@ fn chart_lint_the_admission_policy_renders_only_when_enabled_and_names_both_cred
         "author-only",
         "msk",
         "identity-external",
-        "identity-multinamespace",
     ] {
         let docs = rendered(name);
         assert!(
@@ -4427,7 +4246,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // here is a knob that exists in a template and nowhere a reader can find it.
     for path in [
         "environment",
-        "kubernetes.namespace",
+        "workspaces",
         "kubernetes.nodeSelector",
         "kubernetes.tolerations",
         "kubernetes.affinity",
@@ -4441,7 +4260,6 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "identity.bootstrapImagePullPolicy",
         "identity.allowMutableBootstrapImageForDevelopment",
         "identity.publicConfigMapName",
-        "identity.authorizedRunnerNamespaces",
         "identity.kubernetesApiCIDRs",
         "identity.externalSecret.name",
         "identity.externalSecret.key",
@@ -4496,10 +4314,10 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "demoKafka.affinity",
         // D2 §4.4 / §10 — the installation policy, rendered by
         // `templates/policy.yaml` into the `weirkeeper-policy` ConfigMap.
-        "checks.maxActivePerNamespace",
+        "checks.maxActivePerWorkspace",
         "checks.maxActiveTotal",
         "checks.maxActiveDiscoveriesPerConnection",
-        "checks.maxEvidenceFetchActivePerNamespace",
+        "checks.maxEvidenceFetchActivePerWorkspace",
         "checks.discovery.freshSeconds",
         "checks.discovery.retentionSeconds",
         "checks.discovery.keepPerConnection",
@@ -4507,8 +4325,8 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "checks.discovery.visibilityAttestations",
         "checks.preflight.retentionSeconds",
         // P10 — the manual-run pool, in the same ConfigMap.
-        "runs.maxManualBackupsActivePerNamespace",
-        "runs.maxManualRestoresActivePerNamespace",
+        "runs.maxManualBackupsActivePerWorkspace",
+        "runs.maxManualRestoresActivePerWorkspace",
         "engine.allowUnverifiedCustomCa",
         "evidence.controllerIdentityLocations",
         // D2 §7.3 — the console credential admission policy.
@@ -4521,7 +4339,6 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "controller.jobTtlSeconds",
         "retention.enabled",
         "api.enabled",
-        "api.namespaces",
         "api.console.enabled",
         "api.console.image",
         "api.console.imagePullPolicy",
@@ -4548,7 +4365,6 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "api.console.oidc.scopes",
         "api.console.oidc.displayNameClaim",
         "api.console.networkPolicy.oidcPeers",
-        "kubernetes.connectionsNamespace",
         "api.console.oidc.clientId",
         "api.console.oidc.clientSecret",
         "api.console.roles.revision",
@@ -4590,7 +4406,7 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     );
     // AND THE DEFAULTS ARE TODAY'S BEHAVIOUR: each new key renders nothing.
     assert_eq!(Some(""), values["environment"].as_str());
-    assert_eq!(Some(""), values["kubernetes"]["namespace"].as_str());
+    assert!(values["kubernetes"]["namespace"].is_null());
     assert_eq!(Some(false), values["kafka"]["enabled"].as_bool());
     let oidc = &values["api"]["console"]["oidc"];
     assert_eq!(oidc["scopes"].as_sequence().map(Vec::len), Some(0));
@@ -4606,10 +4422,10 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // silent drift between the document and the controller's compiled-in
     // `Policy::defaults()` is a diff here.
     for (path, want) in [
-        ("checks.maxActivePerNamespace", 4u64),
+        ("checks.maxActivePerWorkspace", 4u64),
         ("checks.maxActiveTotal", 20),
         ("checks.maxActiveDiscoveriesPerConnection", 1),
-        ("checks.maxEvidenceFetchActivePerNamespace", 4),
+        ("checks.maxEvidenceFetchActivePerWorkspace", 4),
         ("checks.discovery.freshSeconds", 900),
         ("checks.discovery.retentionSeconds", 86_400),
         ("checks.discovery.keepPerConnection", 5),
@@ -4617,8 +4433,8 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         ("checks.preflight.retentionSeconds", 3_600),
         // P10: `RunsPolicy::default()`'s and `RunRateLimits::default()`'s
         // numbers — the ones the templates render NOTHING for.
-        ("runs.maxManualBackupsActivePerNamespace", 4),
-        ("runs.maxManualRestoresActivePerNamespace", 2),
+        ("runs.maxManualBackupsActivePerWorkspace", 4),
+        ("runs.maxManualRestoresActivePerWorkspace", 2),
         ("api.console.rateLimits.manualBackupsPerMinute", 10),
         ("api.console.rateLimits.manualRestoresPerMinute", 5),
     ] {
@@ -4710,12 +4526,23 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // longer shows it. An open map (`resources`, `nodeSelector`, annotations: a
     // schema object with no `properties`) is compared by its own key, not its
     // contents.
-    const WITHDRAWN: [&str; 5] = [
+    const WITHDRAWN: [&str; 15] = [
         "notify",
         "ui",
         "kafka.markerTopic",
         "checks.discovery.defaultMaxTopics",
         "checks.preflight.defaultTimeoutSeconds",
+        // OD-23: refused at render by name (`_validate.tpl`).
+        "kubernetes.namespace",
+        "kubernetes.connectionsNamespace",
+        "controller.watchNamespaces",
+        "identity.authorizedRunnerNamespaces",
+        "api.namespaces",
+        "approvalPolicy.namespaces",
+        "checks.maxActivePerNamespace",
+        "checks.maxEvidenceFetchActivePerNamespace",
+        "runs.maxManualBackupsActivePerNamespace",
+        "runs.maxManualRestoresActivePerNamespace",
     ];
     let schema: serde_json::Value =
         serde_json::from_str(&read("charts/logweir/values.schema.json"))
@@ -4856,38 +4683,26 @@ fn chart_lint_kafka_renders_the_cluster_objects_with_the_mapped_auth() {
         find(&docs, "KafkaCluster", "source").value["spec"]["markerTopic"].is_null(),
         "a SOURCE has no marker topic — that field is what authorises a scratch RESTORE target"
     );
-    // RENDERED INTO THE RELEASE NAMESPACE, with the chart's labels. The release
-    // namespace is `helm -n`'s — `logweir-system`, what `scripts/check-chart.sh`
-    // renders every example with, and what every other template in this chart
-    // writes. It is NOT `kubernetes.namespace`, which this example sets to
-    // `kafka` and which ruling 11 says does not move the install: a template
-    // that reached for `.Values.kubernetes.namespace` here would put the cluster
-    // objects in a namespace Helm never installed into, where neither the
-    // operator nor the runner ServiceAccount is.
-    let key_namespace =
-        serde_yaml::from_str::<Value>(&read("charts/logweir/examples/msk.values.yaml"))
-            .expect("the example parses")["kubernetes"]["namespace"]
-            .as_str()
-            .expect("examples/msk.values.yaml sets kubernetes.namespace")
-            .to_string();
-    assert_ne!(
-        "logweir-system", key_namespace,
-        "examples/msk.values.yaml's kubernetes.namespace must differ from the release namespace, \
-         or the assertion below cannot tell the two sources apart"
-    );
+    // RENDERED INTO THE RELEASE NAMESPACE, with the chart's labels and the
+    // first workspace's label (OD-23): the controller refuses an object without
+    // one (`WorkspaceUnknown`), and the console lists a workspace by it.
     for name in ["source", "target"] {
         let doc = find(&docs, "KafkaCluster", name);
         assert_eq!(
             Some("logweir-system"),
             doc.value["metadata"]["namespace"].as_str(),
             "{name} must render into the RELEASE namespace (these files are rendered with \
-             `helm template -n logweir-system`), never into `kubernetes.namespace: \
-             {key_namespace}` — that key feeds ui.namespaces and nothing else"
+             `helm template -n logweir-system`)"
         );
         assert_eq!(
             Some("logweir"),
             doc.value["metadata"]["labels"]["app.kubernetes.io/name"].as_str(),
             "{name} carries the chart's labels"
+        );
+        assert_eq!(
+            Some("default"),
+            doc.value["metadata"]["labels"]["logweir.dev/workspace"].as_str(),
+            "{name} carries the first workspace's label"
         );
     }
 }
@@ -5416,7 +5231,7 @@ fn chart_lint_constraints_show_before_install() {
 fn approval_policy_document(values: &Value) -> String {
     let block = values.get("approvalPolicy").cloned().unwrap_or(Value::Null);
     let mut document = serde_yaml::Mapping::new();
-    for field in ["allowOrdinaryConfirmation", "policies", "namespaces"] {
+    for field in ["allowOrdinaryConfirmation", "policies", "workspaces"] {
         if let Some(v) = block.get(field) {
             document.insert(Value::String(field.to_string()), v.clone());
         }
@@ -5522,7 +5337,6 @@ fn chart_lint_a_default_render_carries_neither_manual_run_block() {
         "approval-policy",
         "admission-policy",
         "identity-external",
-        "identity-multinamespace",
     ] {
         let policy = policy_json(render);
         assert!(
@@ -5953,7 +5767,7 @@ fn chart_lint_the_operator_mode_names_render_as_the_internal_ones() {
             "the chart maps {operator} to {internal}"
         );
         let parsed = logweir_core::approval_policy::ApprovalPolicySet::parse(&format!(
-            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: {operator}\nnamespaces:\n  team-a: p\n"
+            "allowOrdinaryConfirmation: true\npolicies:\n  - name: p\n    mode: {operator}\nworkspaces:\n  team-a: p\n"
         ))
         .expect("the binary reads the operator name too");
         let effective = parsed.resolve("team-a");

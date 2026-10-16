@@ -1,6 +1,6 @@
 // Pieces the Backups, Recovery catalog and Trust pages share: the run's status
 // word, the verdict label, a command block with copy, a description-list row,
-// and the session's flags for this namespace.
+// and the session's flags for this workspace.
 import { useState, type ReactNode } from "react";
 import {
   ClipboardCopyButton,
@@ -20,9 +20,9 @@ import { StatusLabel } from "../../components/Status";
 import { Prose } from "../../components/Prose";
 import { CASE_WORDS, listVerdict, progressWord, type Verdict } from "./verdict";
 
-/** The session's capability flags in `ns` (`implemented && allowed`), or null without a grant there. */
-export function useFlags(ns: string): Capabilities | null {
-  return grantOf(useSessionDoc(), ns)?.capabilities ?? null;
+/** The session's capability flags in `ws` (`implemented && allowed`), or null without a grant there. */
+export function useFlags(ws: string): Capabilities | null {
+  return grantOf(useSessionDoc(), ws)?.capabilities ?? null;
 }
 
 /** The union of every grant's flags: how a cluster-scoped read (trust) is gated. */

@@ -42,6 +42,9 @@ pub const SUBJECT_API_VERSION_ENV: &str = "LOGWEIR_EXECUTION_SUBJECT_API_VERSION
 pub const SUBJECT_KIND_ENV: &str = "LOGWEIR_EXECUTION_SUBJECT_KIND";
 pub const SUBJECT_NAME_ENV: &str = "LOGWEIR_EXECUTION_SUBJECT_NAME";
 pub const SUBJECT_NAMESPACE_ENV: &str = "LOGWEIR_EXECUTION_SUBJECT_NAMESPACE";
+/// The subject's `logweir.dev/workspace` label, which the runner holds to the
+/// signed document's `subject.workspace`.
+pub const SUBJECT_WORKSPACE_ENV: &str = "LOGWEIR_EXECUTION_SUBJECT_WORKSPACE";
 pub const SUBJECT_UID_ENV: &str = "LOGWEIR_EXECUTION_SUBJECT_UID";
 pub const APPROVAL_NAME_ENV: &str = "LOGWEIR_EXECUTION_APPROVAL_NAME";
 pub const APPROVAL_UID_ENV: &str = "LOGWEIR_EXECUTION_APPROVAL_UID";
@@ -54,24 +57,25 @@ pub const ALLOWED_CLUSTERS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_ALLOWED_CLUSTER
 /// The MANDATORY core of an APPROVAL-authorized run, unchanged from v1 and
 /// all-or-nothing in both versions.
 ///
-/// It stays thirteen on purpose. A v2 variable added here would make every v1
-/// Job's environment "incomplete" the moment this binary shipped, which is the
-/// opposite of additive — the v2 additions live in [`V2_ENV`] and are
-/// conditional by block.
+/// [`SUBJECT_WORKSPACE_ENV`] joined it with workspaces (PROD-19.1): a Job of
+/// an older controller is incomplete to this runner, which is the fail-closed
+/// side, and a fresh install has none. The other v2 additions live in
+/// [`V2_ENV`] and are conditional by block.
 ///
-/// **Two of the thirteen are the per-run approval's.**
+/// **Two of the fourteen are the per-run approval's.**
 /// [`APPROVAL_SHA256_ENV`] and [`APPROVAL_SIDECAR_SHA256_ENV`] pin a bundle
 /// member a standing rehearsal has no slot for, so a `standing` contract omits
-/// them and a `standing` contract that pins them is refused. The eleven a run
+/// them and a `standing` contract that pins them is refused. The twelve a run
 /// carries WHATEVER authorized it are [`STANDING_MANDATORY_ENV`]; this array
 /// stays the approval path's complete list, which is what every v1 Job and
 /// every ordinary Restore still emits.
-pub const ALL_ENV: [&str; 13] = [
+pub const ALL_ENV: [&str; 14] = [
     VERSION_ENV,
     SUBJECT_API_VERSION_ENV,
     SUBJECT_KIND_ENV,
     SUBJECT_NAME_ENV,
     SUBJECT_NAMESPACE_ENV,
+    SUBJECT_WORKSPACE_ENV,
     SUBJECT_UID_ENV,
     APPROVAL_NAME_ENV,
     APPROVAL_UID_ENV,
@@ -89,12 +93,13 @@ pub const ALL_ENV: [&str; 13] = [
 /// `Approval`, which is a real object a human signed and the one an auditor
 /// looks up. What goes is only the pair that pins bundle members a rehearsal
 /// does not have.
-pub const STANDING_MANDATORY_ENV: [&str; 11] = [
+pub const STANDING_MANDATORY_ENV: [&str; 12] = [
     VERSION_ENV,
     SUBJECT_API_VERSION_ENV,
     SUBJECT_KIND_ENV,
     SUBJECT_NAME_ENV,
     SUBJECT_NAMESPACE_ENV,
+    SUBJECT_WORKSPACE_ENV,
     SUBJECT_UID_ENV,
     APPROVAL_NAME_ENV,
     APPROVAL_UID_ENV,
@@ -162,12 +167,13 @@ pub const V2_ENV: [&str; 8] = [
 /// variables — a controller bug, or a partially applied template — must be
 /// diagnosed as an incomplete contract, not treated as a credential-free
 /// standalone invocation that runs with no contract checks whatsoever.
-pub const ALL_ENV_ANY: [&str; 21] = [
+pub const ALL_ENV_ANY: [&str; 22] = [
     VERSION_ENV,
     SUBJECT_API_VERSION_ENV,
     SUBJECT_KIND_ENV,
     SUBJECT_NAME_ENV,
     SUBJECT_NAMESPACE_ENV,
+    SUBJECT_WORKSPACE_ENV,
     SUBJECT_UID_ENV,
     APPROVAL_NAME_ENV,
     APPROVAL_UID_ENV,
@@ -2164,7 +2170,7 @@ mod tests {
     /// **`STANDING_MANDATORY_ENV` is a hand-written list, and this is
     /// what binds it to [`ALL_ENV`].**
     ///
-    /// Without this row a fourteenth mandatory name added to `ALL_ENV` would
+    /// Without this row a fifteenth mandatory name added to `ALL_ENV` would
     /// silently escape the standing contract's completeness assertion in
     /// `weirkeeper`, because that row loops the standing list. The rule is the
     /// one sentence the constant's doc comment states: `ALL_ENV` minus exactly

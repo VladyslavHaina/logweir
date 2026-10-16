@@ -50,7 +50,7 @@ ingressClass:
 # `logweir.localtest.me` paths — with longer path rules outranking the owner's —
 # behind the owner's own certificate. The console's OIDC back-channel no longer
 # passes through Traefik at all (dex.values.yaml), but browsers do, so Traefik
-# reads Ingresses from `dex` and `logweir-system` only, and its CRDs (the HSTS
+# reads Ingresses from `dex` and `logweir` only, and its CRDs (the HSTS
 # Middleware, the default TLS store) from `traefik` only.
 providers:
   kubernetesCRD:
@@ -61,7 +61,7 @@ providers:
   kubernetesIngress:
     enabled: true
     allowExternalNameServices: false
-    namespaces: [dex, logweir-system]
+    namespaces: [dex, logweir]
 ports:
   web:
     http:

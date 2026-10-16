@@ -195,7 +195,7 @@ fn assert_nothing_is_empty(d: &Digests) {
 #[tokio::test]
 async fn no_stored_or_logged_digest_moves_when_only_the_credential_moves() {
     // Connections: the SASL password.
-    let path = format!("/api/v1/namespaces/{NS_A}/connections");
+    let path = format!("/api/v1/workspaces/{NS_A}/connections");
     let (one, kc) = create(
         &path,
         "/kafkaclusters",
@@ -264,7 +264,7 @@ async fn no_stored_or_logged_digest_moves_when_only_the_credential_moves() {
     );
 
     // Destinations: the S3 secret access key.
-    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let path = format!("/api/v1/workspaces/{NS_A}/destinations");
     let first = concat!("wJalrXUtnFEMI", "K7MDENGbPxRfiCYEXAMPLEKEYONE");
     let second = concat!("wJalrXUtnFEMI", "K7MDENGbPxRfiCYEXAMPLEKEYTWO");
     let (one, dest) = create(

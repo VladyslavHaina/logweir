@@ -245,6 +245,7 @@ pub fn is_unknown_code(code: CheckCode) -> bool {
             | CheckCode::SignerKeyIdNotObserved
             | CheckCode::ApiVersionsNotObserved
             | CheckCode::TimestampBoundNotReported
+            | CheckCode::RegistryUnreachable
     )
 }
 
@@ -521,6 +522,28 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              not), or select no consumer group here and export the positions with the endpoint's \
              own tooling. A group this endpoint cannot type is recorded as excluded, never as \
              captured and never as offset 0."
+        }
+        // -- Schema Registry (PROD-03.1/03.2) ------------------------------
+        CheckCode::RegistryUnauthorized => {
+            "The registry refused the connection's registry username and password. A connection \
+             is immutable: create a new one with the right credential (or rotate the password in \
+             its Secret's registry-password key). A backup still runs and records the registry \
+             as not captured."
+        }
+        CheckCode::RegistryUnreachable => {
+            "Check that the registry URL resolves from the install's namespace, that egress \
+             allows it, and that its TLS certificate is signed by a public root or the \
+             connection's auth.tlsCa."
+        }
+        CheckCode::SchemaConflict => {
+            "The target registry already holds one of the restored records' schema IDs, or one \
+             of their subject-versions, with other content. Logweir never rewrites record bytes, \
+             so restore into a registry that holds none of these schemas, or the source's own."
+        }
+        CheckCode::SchemaSnapshotInvalid => {
+            "The recovery point's schema snapshot is missing from the archive or is not the one \
+             its signed receipt names. Restore another point, or restore into a connection \
+             without a registry (the schemas are then not imported)."
         }
         // -- switchoverReadiness (PROD-04.2 §3.8) --------------------------
         CheckCode::RestoreEvidenceRefused => switchover::EVIDENCE_REMEDY,

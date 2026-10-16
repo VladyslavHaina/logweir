@@ -940,7 +940,7 @@ async fn the_operations_route_serves_the_normalized_status() {
     app.fake.seed("backups", support::NS_A, backup);
 
     let r = app
-        .get("/api/v1/namespaces/team-a/operations/restore/orders-drill-d")
+        .get("/api/v1/workspaces/team-a/operations/restore/orders-drill-d")
         .await;
     assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
     let item = &r.json()["item"];
@@ -952,7 +952,7 @@ async fn the_operations_route_serves_the_normalized_status() {
     assert_eq!(item["verifiedSuccess"], false);
 
     let b = app
-        .get("/api/v1/namespaces/team-a/operations/backup/orders-hourly-20260911-124000")
+        .get("/api/v1/workspaces/team-a/operations/backup/orders-hourly-20260911-124000")
         .await;
     let item = &b.json()["item"];
     assert_eq!(item["state"], "succeeded");
@@ -964,7 +964,7 @@ async fn the_operations_route_serves_the_normalized_status() {
     assert_eq!(item["verifiedSuccess"], true);
 
     // The list rows carry the same summary.
-    let list = app.get("/api/v1/namespaces/team-a/restores").await.json();
+    let list = app.get("/api/v1/workspaces/team-a/restores").await.json();
     assert_eq!(
         list["items"][0]["operation"]["verificationState"],
         "notAttempted"
@@ -978,11 +978,11 @@ async fn the_operations_route_serves_the_normalized_status() {
         "backups",
         "kafkacluster",
     ] {
-        app.get(&format!("/api/v1/namespaces/team-a/operations/{bad}/x"))
+        app.get(&format!("/api/v1/workspaces/team-a/operations/{bad}/x"))
             .await
             .assert_problem(404, "not_found");
     }
-    app.get("/api/v1/namespaces/team-a/operations/backup/absent")
+    app.get("/api/v1/workspaces/team-a/operations/backup/absent")
         .await
         .assert_problem(404, "not_found");
     app.fake.assert_strict();

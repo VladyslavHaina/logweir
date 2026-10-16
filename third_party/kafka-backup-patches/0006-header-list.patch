@@ -1,0 +1,502 @@
+Reason: PROD-00.3e (C13), a repeated header key collapses to one entry on capture and on restore (kafka-protocol's Record.headers is an IndexMap); read and write headers as a list through the crate's compression hooks; oracle: the header_list and fetch unit tests in this patch and record_semantics' shapes row (EN-3)
+
+diff --git a/crates/kafka-backup-core/src/kafka/fetch.rs b/crates/kafka-backup-core/src/kafka/fetch.rs
+index 32c9ede..9968c86 100644
+--- a/crates/kafka-backup-core/src/kafka/fetch.rs
++++ b/crates/kafka-backup-core/src/kafka/fetch.rs
+@@ -6,7 +6,7 @@ use kafka_protocol::messages::{
+     TopicName,
+ };
+ use kafka_protocol::protocol::StrBytes;
+-use kafka_protocol::records::{Record, RecordBatchDecoder};
++use kafka_protocol::records::Record;
+ use tracing::debug;
+ 
+ use super::KafkaClient;
+@@ -200,12 +200,14 @@ fn decode_fetch_data(
+         }
+ 
+         let mut batch_buf = data.slice(pos..pos + batch_total);
+-        let record_set = RecordBatchDecoder::decode(&mut batch_buf).map_err(|e| {
+-            crate::Error::from(KafkaError::Protocol(format!(
+-                "Failed to decode records: {:?}",
+-                e
+-            )))
+-        })?;
++        // Logweir patch 0006: every header in order, repeated keys included.
++        let (record_set, header_lists) =
++            super::header_list::decode_batch(&mut batch_buf).map_err(|e| {
++                crate::Error::from(KafkaError::Protocol(format!(
++                    "Failed to decode records: {:?}",
++                    e
++                )))
++            })?;
+ 
+         let last_offset_delta = i32::from_be_bytes(
+             data[pos + LAST_OFFSET_DELTA_RANGE.start..pos + LAST_OFFSET_DELTA_RANGE.end]
+@@ -247,9 +249,9 @@ fn decode_fetch_data(
+                 aborted_producers.remove(&producer_id);
+             }
+         } else if !(transactional && aborted_producers.contains(&producer_id)) {
+-            for record in &record_set.records {
++            for (record, headers) in record_set.records.iter().zip(header_lists) {
+                 if record.offset >= fetch_offset {
+-                    records.push(convert_record(record));
++                    records.push(convert_record(record, headers));
+                 }
+             }
+         }
+@@ -262,19 +264,10 @@ fn decode_fetch_data(
+     Ok((records, next_offset))
+ }
+ 
+-/// Convert a kafka-protocol Record to our BackupRecord
+-fn convert_record(record: &Record) -> BackupRecord {
+-    let headers: Vec<_> = record
+-        .headers
+-        .iter()
+-        .map(|(key, value)| crate::manifest::RecordHeader {
+-            key: key.to_string(),
+-            // Preserve Kafka's null-vs-empty distinction (issue #155): a
+-            // null header value must not be flattened into an empty one.
+-            value: value.as_ref().map(|v| v.to_vec()),
+-        })
+-        .collect();
+-
++/// Convert a kafka-protocol Record to our BackupRecord, with the headers read
++/// as a list from the wire (`header_list`): every occurrence of a repeated
++/// key, in order, and Kafka's null-vs-empty distinction (issue #155).
++fn convert_record(record: &Record, headers: Vec<crate::manifest::RecordHeader>) -> BackupRecord {
+     BackupRecord {
+         key: record.key.as_ref().map(|k| k.to_vec()),
+         value: record.value.as_ref().map(|v| v.to_vec()),
+@@ -730,6 +723,31 @@ mod tests {
+         assert!(records[1].timestamp - records[0].timestamp > i32::MAX as i64);
+     }
+ 
++    /// Logweir patch 0006 (PROD-00.3e, C13): a repeated header key reaches
++    /// the archive record as often, and in the order, it was written.
++    #[test]
++    fn repeated_header_keys_are_kept_in_order() {
++        use crate::manifest::RecordHeader;
++        let h = |k: &str, v: &[u8]| RecordHeader {
++            key: k.to_string(),
++            value: Some(v.to_vec()),
++        };
++        let headers = vec![h("h", b"a"), h("x", b"1"), h("h", b"b"), h("h", b"c")];
++        let mut buf = BytesMut::new();
++        crate::kafka::header_list::encode_batch(
++            &mut buf,
++            &[make_record(9)],
++            std::slice::from_ref(&headers),
++            &RecordEncodeOptions {
++                version: 2,
++                compression: Compression::Zstd,
++            },
++        )
++        .expect("encode failed");
++        let (records, _) = parse(buf.to_vec(), 9);
++        assert_eq!(records[0].headers, headers);
++    }
++
+     // ------------------------------------------------------------------
+     // Logweir patch 0004 (PROD-00.3a, C1): committed records only.
+     // ------------------------------------------------------------------
+diff --git a/crates/kafka-backup-core/src/kafka/header_list.rs b/crates/kafka-backup-core/src/kafka/header_list.rs
+new file mode 100644
+index 0000000..2f3e682
+--- /dev/null
++++ b/crates/kafka-backup-core/src/kafka/header_list.rs
+@@ -0,0 +1,338 @@
++//! Record headers as an ordered list on the wire (Logweir patch 0006,
++//! PROD-00.3e, C13).
++//!
++//! `kafka-protocol`'s `Record.headers` is an `IndexMap`, so a repeated header
++//! key collapses to one entry (the first position, the last value) when a
++//! fetch is decoded and when a produce is encoded. Kafka's record format keeps
++//! every header in order. Both of the crate's compression hooks are used to
++//! keep them, without forking it:
++//!
++//! * decode: the decompressor keeps a copy of the decompressed records, and
++//!   [`header_lists`] reads each record's headers from it as a list;
++//! * encode: the compressor ignores the crate's encoding of the records and
++//!   writes this module's own, headers as a list, compressed with the batch's
++//!   codec; the crate fills the batch's size and CRC afterwards.
++
++use std::cell::{Cell, RefCell};
++
++use anyhow::{anyhow, bail, Result};
++use bytes::{BufMut, Bytes, BytesMut};
++use kafka_protocol::compression::{Compressor, Decompressor, Gzip, Lz4, Snappy, Zstd};
++use kafka_protocol::records::{
++    Compression, Record, RecordBatchDecoder, RecordBatchEncoder, RecordEncodeOptions, RecordSet,
++};
++
++use crate::manifest::RecordHeader;
++
++/// Decode one record batch, and each record's headers as an ordered list.
++pub(crate) fn decode_batch(batch: &mut Bytes) -> Result<(RecordSet, Vec<Vec<RecordHeader>>)> {
++    let raw = RefCell::new(Bytes::new());
++    let set = RecordBatchDecoder::decode_with_custom_compression(
++        batch,
++        Some(
++            |buf: &mut Bytes, compression: Compression| -> Result<Bytes> {
++                let records = decompress(buf, compression)?;
++                *raw.borrow_mut() = records.clone();
++                Ok(records)
++            },
++        ),
++    )?;
++    let headers = header_lists(&raw.borrow(), set.records.len())?;
++    Ok((set, headers))
++}
++
++/// Encode `records` as ONE record batch whose records carry `headers[i]` in
++/// order instead of `records[i].headers`.
++pub(crate) fn encode_batch(
++    out: &mut BytesMut,
++    records: &[Record],
++    headers: &[Vec<RecordHeader>],
++    options: &RecordEncodeOptions,
++) -> Result<()> {
++    if records.len() != headers.len() {
++        bail!(
++            "{} records but {} header lists",
++            records.len(),
++            headers.len()
++        );
++    }
++    let batches = Cell::new(0usize);
++    RecordBatchEncoder::encode_with_custom_compression(
++        out,
++        records.iter(),
++        options,
++        Some(
++            |_crate_encoded: &mut BytesMut, out: &mut BytesMut, compression: Compression| {
++                batches.set(batches.get() + 1);
++                if batches.get() > 1 {
++                    bail!("the records do not form one batch");
++                }
++                compress(out, compression, &encode_records(records, headers)?)
++            },
++        ),
++    )
++}
++
++fn decompress(buf: &mut Bytes, compression: Compression) -> Result<Bytes> {
++    let keep = |b: &mut Bytes| Ok(b.clone());
++    match compression {
++        Compression::None => keep(buf),
++        Compression::Gzip => Gzip::decompress(buf, keep),
++        Compression::Snappy => Snappy::decompress(buf, keep),
++        Compression::Lz4 => Lz4::decompress(buf, keep),
++        Compression::Zstd => Zstd::decompress(buf, keep),
++    }
++}
++
++fn compress(out: &mut BytesMut, compression: Compression, raw: &[u8]) -> Result<()> {
++    let write = |b: &mut BytesMut| {
++        b.extend_from_slice(raw);
++        Ok(())
++    };
++    match compression {
++        Compression::None => write(out),
++        Compression::Gzip => Gzip::compress(out, write),
++        Compression::Snappy => Snappy::compress(out, write),
++        Compression::Lz4 => Lz4::compress(out, write),
++        Compression::Zstd => Zstd::compress(out, write),
++    }
++}
++
++/// The records of one batch in record format v2, the deltas taken from the
++/// batch's smallest offset and timestamp as the crate's header states them.
++fn encode_records(records: &[Record], headers: &[Vec<RecordHeader>]) -> Result<Vec<u8>> {
++    let min_offset = records.iter().map(|r| r.offset).min().unwrap_or(0);
++    let min_timestamp = records.iter().map(|r| r.timestamp).min().unwrap_or(0);
++    let mut out = Vec::new();
++    for (r, hs) in records.iter().zip(headers) {
++        let mut body = vec![0u8]; // attributes
++        put_varint(&mut body, r.timestamp - min_timestamp);
++        put_varint(&mut body, r.offset - min_offset);
++        put_bytes(&mut body, r.key.as_deref());
++        put_bytes(&mut body, r.value.as_deref());
++        put_varint(&mut body, hs.len() as i64);
++        for h in hs {
++            put_bytes(&mut body, Some(h.key.as_bytes()));
++            put_bytes(&mut body, h.value.as_deref());
++        }
++        put_varint(&mut out, body.len() as i64);
++        out.put_slice(&body);
++    }
++    Ok(out)
++}
++
++/// Each of `count` records' headers, in order, from decompressed records.
++fn header_lists(mut b: &[u8], count: usize) -> Result<Vec<Vec<RecordHeader>>> {
++    let mut lists = Vec::with_capacity(count);
++    for _ in 0..count {
++        let len = usize::try_from(get_varint(&mut b)?)?;
++        let mut r = take(&mut b, len)?;
++        take(&mut r, 1)?; // attributes
++        get_varint(&mut r)?; // timestamp delta
++        get_varint(&mut r)?; // offset delta
++        get_bytes(&mut r)?; // key
++        get_bytes(&mut r)?; // value
++        let n = usize::try_from(get_varint(&mut r)?)?;
++        let mut headers = Vec::with_capacity(n.min(1024));
++        for _ in 0..n {
++            let key = get_bytes(&mut r)?.ok_or_else(|| anyhow!("a null header key"))?;
++            headers.push(RecordHeader {
++                key: String::from_utf8(key.to_vec())?,
++                value: get_bytes(&mut r)?.map(<[u8]>::to_vec),
++            });
++        }
++        lists.push(headers);
++    }
++    Ok(lists)
++}
++
++fn put_varint(out: &mut Vec<u8>, v: i64) {
++    let mut z = ((v << 1) ^ (v >> 63)) as u64;
++    while z >= 0x80 {
++        out.push((z as u8) | 0x80);
++        z >>= 7;
++    }
++    out.push(z as u8);
++}
++
++fn put_bytes(out: &mut Vec<u8>, b: Option<&[u8]>) {
++    match b {
++        None => put_varint(out, -1),
++        Some(b) => {
++            put_varint(out, b.len() as i64);
++            out.extend_from_slice(b);
++        }
++    }
++}
++
++fn get_varint(b: &mut &[u8]) -> Result<i64> {
++    let mut z = 0u64;
++    for i in 0..10 {
++        let byte = *take(b, 1)?.first().expect("one byte");
++        z |= u64::from(byte & 0x7f) << (7 * i);
++        if byte & 0x80 == 0 {
++            return Ok((z >> 1) as i64 ^ -((z & 1) as i64));
++        }
++    }
++    bail!("a varint longer than 10 bytes")
++}
++
++fn get_bytes<'a>(b: &mut &'a [u8]) -> Result<Option<&'a [u8]>> {
++    match get_varint(b)? {
++        -1 => Ok(None),
++        n => Ok(Some(take(b, usize::try_from(n)?)?)),
++    }
++}
++
++fn take<'a>(b: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
++    if b.len() < n {
++        bail!("a record ends early");
++    }
++    let (head, tail) = b.split_at(n);
++    *b = tail;
++    Ok(head)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use indexmap::IndexMap;
++    use kafka_protocol::protocol::StrBytes;
++    use kafka_protocol::records::{
++        TimestampType, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
++    };
++
++    fn h(key: &str, value: Option<&[u8]>) -> RecordHeader {
++        RecordHeader {
++            key: key.to_string(),
++            value: value.map(<[u8]>::to_vec),
++        }
++    }
++
++    fn record(offset: i64, timestamp: i64, key: Option<&[u8]>, value: Option<&[u8]>) -> Record {
++        Record {
++            transactional: false,
++            control: false,
++            delete_horizon: false,
++            partition_leader_epoch: NO_PARTITION_LEADER_EPOCH,
++            producer_id: NO_PRODUCER_ID,
++            producer_epoch: NO_PRODUCER_EPOCH,
++            timestamp_type: TimestampType::Creation,
++            offset,
++            sequence: offset as i32,
++            timestamp,
++            key: key.map(Bytes::copy_from_slice),
++            value: value.map(Bytes::copy_from_slice),
++            headers: IndexMap::new(),
++        }
++    }
++
++    fn fixture() -> (Vec<Record>, Vec<Vec<RecordHeader>>) {
++        let records = vec![
++            record(0, 1_000, Some(b"k"), Some(b"v")),
++            record(1, 999, None, None),
++            record(2, 1_000 + (1 << 40), Some(b""), Some(&[0, 0xff])),
++        ];
++        let headers = vec![
++            vec![
++                h("h", Some(b"a")),
++                h("x", Some(b"1")),
++                h("h", Some(b"b")),
++                h("h", Some(b"c")),
++            ],
++            vec![],
++            vec![h("n", None), h("e", Some(b"")), h("n", Some(b"2"))],
++        ];
++        (records, headers)
++    }
++
++    /// Every codec: the headers come back as written, every occurrence in
++    /// order; the stock decoder reads the same batch (size, CRC, keys, values,
++    /// timestamps intact) and collapses the repeated keys, which is what this
++    /// module exists to avoid.
++    #[test]
++    fn repeated_header_keys_survive_an_encode_and_a_decode() {
++        let (records, headers) = fixture();
++        for compression in [
++            Compression::None,
++            Compression::Gzip,
++            Compression::Snappy,
++            Compression::Lz4,
++            Compression::Zstd,
++        ] {
++            let mut buf = BytesMut::new();
++            let options = RecordEncodeOptions {
++                version: 2,
++                compression,
++            };
++            encode_batch(&mut buf, &records, &headers, &options).unwrap();
++            let bytes = buf.freeze();
++
++            let (set, lists) = decode_batch(&mut bytes.clone()).unwrap();
++            assert_eq!(lists, headers, "{compression:?}");
++            assert_eq!(set.records.len(), 3);
++
++            let stock = RecordBatchDecoder::decode(&mut bytes.clone()).unwrap();
++            for (got, want) in stock.records.iter().zip(&records) {
++                assert_eq!(
++                    (got.offset, got.timestamp, &got.key, &got.value),
++                    (want.offset, want.timestamp, &want.key, &want.value),
++                    "{compression:?}"
++                );
++            }
++            let collapsed: Vec<_> = stock.records[0].headers.keys().cloned().collect();
++            assert_eq!(
++                collapsed,
++                vec![
++                    StrBytes::from_static_str("h"),
++                    StrBytes::from_static_str("x")
++                ],
++                "{compression:?}"
++            );
++        }
++    }
++
++    /// A batch the crate encoded itself (one header per key) reads the same
++    /// through this module.
++    #[test]
++    fn a_batch_without_repeated_keys_reads_as_the_crate_wrote_it() {
++        let mut r = record(5, 7, Some(b"k"), Some(b"v"));
++        r.headers.insert(
++            StrBytes::from_static_str("a"),
++            Some(Bytes::from_static(b"1")),
++        );
++        r.headers.insert(StrBytes::from_static_str("b"), None);
++        let mut buf = BytesMut::new();
++        RecordBatchEncoder::encode(
++            &mut buf,
++            std::iter::once(&r),
++            &RecordEncodeOptions {
++                version: 2,
++                compression: Compression::Zstd,
++            },
++        )
++        .unwrap();
++        let (_, lists) = decode_batch(&mut buf.freeze()).unwrap();
++        assert_eq!(lists, vec![vec![h("a", Some(b"1")), h("b", None)]]);
++    }
++
++    #[test]
++    fn varints_round_trip() {
++        for v in [
++            0i64,
++            1,
++            -1,
++            63,
++            -64,
++            64,
++            300,
++            i32::MAX as i64,
++            i64::MAX,
++            i64::MIN,
++        ] {
++            let mut out = Vec::new();
++            put_varint(&mut out, v);
++            assert_eq!(get_varint(&mut out.as_slice()).unwrap(), v);
++        }
++    }
++}
+diff --git a/crates/kafka-backup-core/src/kafka/mod.rs b/crates/kafka-backup-core/src/kafka/mod.rs
+index 1fd9cc4..89df8a9 100644
+--- a/crates/kafka-backup-core/src/kafka/mod.rs
++++ b/crates/kafka-backup-core/src/kafka/mod.rs
+@@ -5,6 +5,7 @@ mod client;
+ pub mod connection_error;
+ pub mod consumer_groups;
+ mod fetch;
++mod header_list;
+ mod metadata;
+ mod partition_router;
+ mod produce;
+diff --git a/crates/kafka-backup-core/src/kafka/produce.rs b/crates/kafka-backup-core/src/kafka/produce.rs
+index a07beea..8f2b12f 100644
+--- a/crates/kafka-backup-core/src/kafka/produce.rs
++++ b/crates/kafka-backup-core/src/kafka/produce.rs
+@@ -8,8 +8,8 @@ use kafka_protocol::messages::{
+ };
+ use kafka_protocol::protocol::StrBytes;
+ use kafka_protocol::records::{
+-    Compression, Record, RecordBatchEncoder, RecordEncodeOptions, TimestampType,
+-    NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
++    Compression, Record, RecordEncodeOptions, TimestampType, NO_PARTITION_LEADER_EPOCH,
++    NO_PRODUCER_EPOCH, NO_PRODUCER_ID,
+ };
+ use tracing::{debug, trace};
+ 
+@@ -264,6 +264,9 @@ pub async fn produce(
+             base_sequence: sequence_after(p.base_sequence, total_produced),
+             ..p
+         });
++        // Logweir patch 0006: the headers as a list, repeated keys included,
++        // which `Record.headers` (an `IndexMap`) would collapse.
++        let header_lists: Vec<_> = sub_batch.iter().map(|r| r.headers.clone()).collect();
+         let kafka_records = build_kafka_records(sub_batch, identity);
+ 
+         let options = RecordEncodeOptions {
+@@ -272,7 +275,7 @@ pub async fn produce(
+         };
+ 
+         let mut records_buf = BytesMut::new();
+-        RecordBatchEncoder::encode(&mut records_buf, kafka_records.iter(), &options)
++        super::header_list::encode_batch(&mut records_buf, &kafka_records, &header_lists, &options)
+             .map_err(|e| KafkaError::Protocol(format!("Failed to encode records: {:?}", e)))?;
+ 
+         let records_bytes = records_buf.freeze();
+@@ -362,6 +365,7 @@ fn parse_produce_response(
+ mod tests {
+     use super::*;
+     use crate::manifest::RecordHeader;
++    use kafka_protocol::records::RecordBatchEncoder;
+ 
+     fn make_record(timestamp: i64) -> BackupRecord {
+         BackupRecord {

@@ -14,7 +14,8 @@ from is recorded in that file's history (`git log --follow console/fixtures/READ
   the goldens byte for byte; `crates/logweir/tests/console_plan.rs` deserialises each golden
   into the runner's `RestoreSpec`. `plan-clone.golden.yaml` is theme A's clone, which a runner
   from before theme A refuses; `plan-owners.golden.yaml` states the topics' declarative owners
-  for the source's topic configuration.
+  for the source's topic configuration; `plan-registry.golden.yaml` names the target connection's Schema
+  Registry and a byte-rate limit (OD-23).
 - `legacy-console.json` records what the retired console produced for the inputs the new
   console's differential rows used, so those rows still compare the two.
 

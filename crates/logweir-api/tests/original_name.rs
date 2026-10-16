@@ -107,7 +107,7 @@ fn bound_app(binding: &str) -> TestApp {
     let key = SigningKey::generate_ed25519();
     let policies = ApprovalPolicySet::parse(&format!(
         "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: \
-         Ordinary\n  - name: prod-governed\n    mode: Governed\nnamespaces:\n  {NS_A}: {binding}\n"
+         Ordinary\n  - name: prod-governed\n    mode: Governed\nworkspaces:\n  {NS_A}: {binding}\n"
     ))
     .expect("valid");
     TestApp::with(
@@ -140,7 +140,7 @@ fn errors_of(response: &support::TestResponse) -> Vec<(String, String, String)> 
 
 async fn post(app: &TestApp, ns: &str, key: &str, body: &Value) -> support::TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{ns}/restores"),
+        &format!("/api/v1/workspaces/{ns}/restores"),
         Some(key),
         &body.to_string(),
     )
@@ -196,13 +196,19 @@ async fn an_original_name_restore_is_stored_shown_and_signed_with_its_own_subjec
     )
     .expect("a v2 document");
     assert_eq!(doc.approval_subject.as_deref(), Some("originalName"));
-    // A document that carries the subject is format 2.1.0, never 2.0.0: a
-    // reader that predates the subject refuses it.
-    assert_eq!(doc.format_version, "2.1.0");
+    // Every document this build writes is its one format (2.3.0 since
+    // PROD-19.1 named the workspace): a reader that predates it refuses it.
+    assert_eq!(
+        doc.format_version,
+        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+    );
     assert!(approval["spec"]["approvalBytes"]
         .as_str()
         .unwrap()
-        .starts_with("{\"formatVersion\":\"2.1.0\","));
+        .starts_with(&format!(
+            "{{\"formatVersion\":\"{}\",",
+            logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+        )));
     // The declared coverage is stored beside the declaration.
     assert_eq!(stored["spec"]["coverage"], "complete");
     // What the requester typed is signed beside the subject.
@@ -339,17 +345,18 @@ async fn a_strict_namespace_still_needs_the_second_person_for_an_original_name_r
         "only the confirmation, which authorises nothing"
     );
     // **That confirmation carries the SUBJECT ALONE (no typed
-    // names: a strict namespace has a second person), and a document that
-    // carries the subject is format 2.1.0.** Written 2.0.0 it would be
-    // refused by every reader, and the strict path would never verify.
-    // KILLS: the version taken from the typed names only.
+    // names: a strict workspace has a second person), in this build's one
+    // format.**
     let confirmation = last_approval_posted(&app.fake);
     let bytes = confirmation["spec"]["approvalBytes"]
         .as_str()
         .expect("the document's bytes");
     assert!(
-        bytes.starts_with("{\"formatVersion\":\"2.1.0\","),
-        "a subject-only document is 2.1.0: {bytes}"
+        bytes.starts_with(&format!(
+            "{{\"formatVersion\":\"{}\",",
+            logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+        )),
+        "a subject-only document is this build's format: {bytes}"
     );
     let doc: Value = serde_json::from_str(bytes).expect("json");
     assert_eq!(doc["approvalSubject"], "originalName", "{doc}");
@@ -399,15 +406,21 @@ async fn an_ordinary_restore_carries_no_subject_anywhere() {
     let approval = last_approval_posted(&app.fake);
     let bytes = approval["spec"]["approvalBytes"].as_str().unwrap();
     assert!(!bytes.contains("approvalSubject"), "{bytes}");
-    // ... and stays format 2.0.0, byte for byte: the bytes are exactly a
-    // document with neither field, re-serialised.
+    // ... in this build's format: the bytes are exactly a document with
+    // neither field, re-serialised.
     assert!(
-        bytes.starts_with("{\"formatVersion\":\"2.0.0\",\"kind\":\"RestoreAuthorization\","),
+        bytes.starts_with(&format!(
+            "{{\"formatVersion\":\"{}\",\"kind\":\"RestoreAuthorization\",",
+            logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+        )),
         "{bytes}"
     );
     assert!(!bytes.contains("originalNameConfirmation"), "{bytes}");
     let doc = RestoreAuthorization::from_bytes(bytes.as_bytes()).expect("a v2 document");
-    assert_eq!(doc.format_version, "2.0.0");
+    assert_eq!(
+        doc.format_version,
+        logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+    );
     assert_eq!(doc.approval_subject, None);
     assert_eq!(doc.original_name_confirmation, None);
     assert_eq!(String::from_utf8(doc.to_bytes()).unwrap(), bytes);
@@ -584,7 +597,7 @@ async fn the_approval_view_shows_the_signed_subject() {
             }),
         );
         let view = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/approvals/{name}"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/approvals/{name}"))
             .await
             .json();
         assert_eq!(view["item"]["approvalSubject"], want, "{name}");
@@ -612,7 +625,7 @@ async fn a_legacy_approval_for_the_wrong_subject_is_refused_before_it_is_stored(
     let ordinary = json!({"plan_hash": plan_hash, "subject_kind": "Restore"}).to_string();
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{name}/approval"),
             None,
             &json!({"approvalBytes": ordinary, "sidecarBytes": sidecar}).to_string(),
         )
@@ -631,7 +644,7 @@ async fn a_legacy_approval_for_the_wrong_subject_is_refused_before_it_is_stored(
     .to_string();
     let recorded = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{name}/approval"),
             None,
             &json!({"approvalBytes": matching, "sidecarBytes": sidecar}).to_string(),
         )
@@ -934,7 +947,7 @@ async fn the_approval_view_reads_a_v2_document_through_the_version_rule() {
             }),
         );
         let view = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/approvals/{name}"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/approvals/{name}"))
             .await
             .json();
         assert_eq!(view["item"]["approvalSubject"], want, "{name}");

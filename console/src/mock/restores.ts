@@ -43,17 +43,17 @@ async function sha256(text: string): Promise<string> {
 
 export type MockMode = "confirm" | "two-person" | "strict" | "legacy";
 
-/** The mode each namespace is under. The walk switches it through `__lwMockApprovalMode`
+/** The mode each workspace is under. The walk switches it through `__lwMockApprovalMode`
  *  (mock builds only) to draw the two-person and strict review steps. */
 const modes: Record<string, MockMode> = { "team-a": "confirm", "team-b": "two-person" };
 (globalThis as { __lwMockApprovalMode?: Record<string, MockMode> }).__lwMockApprovalMode = modes;
 
 const POLICY_DIGEST = `sha256:${hex(501, 64)}`;
-export function policyFor(ns: string): S["ApprovalPolicyView"] {
-  const mode = modes[ns] ?? "confirm";
+export function policyFor(ws: string): S["ApprovalPolicyView"] {
+  const mode = modes[ws] ?? "confirm";
   const governed = mode === "two-person" || mode === "strict";
   return {
-    namespace: ns,
+    workspace: ws,
     name: mode === "legacy" ? "legacy-governed-v1" : mode === "confirm" ? "default-confirm-v1" : mode === "two-person" ? "prod-pair" : "prod-strict",
     mode: mode === "confirm" ? "ordinary" : "governed",
     operatorMode: mode === "legacy" ? "strict" : mode,
@@ -86,9 +86,9 @@ for (const b of backups) {
   }
 }
 
-function destination(name: string, ns: string): S["Destination"] | null {
+function destination(name: string, ws: string): S["Destination"] | null {
   const base = {
-    namespace: ns,
+    workspace: ws,
     resourceVersion: "61500",
     generation: 3,
     createdAt: iso(NOW - 34 * DAY),
@@ -216,17 +216,139 @@ interface Kept {
   awaiting?: boolean;
   requester?: string;
   ticket?: string;
+  /** PROD-07.2: when the run stopped (a cancel, or its runner stopping), why, and when Clean up was asked. */
+  stoppedMs?: number;
+  cause?: string;
+  requestedBy?: string;
+  cleanupMs?: number;
+}
+
+// ------------------------------------------------------------- PROD-07.2
+
+const STOP_MS = 3000;
+const RECONCILE_MS = 4000;
+const CLEANUP_MS = 3000;
+
+/** A run stopped after it created its targets, its runner gone for a day: the partial targets verified, Clean up offered. */
+const interrupted: Restore = {
+  ...baseRestores[2]!,
+  name: "orders-drill-stopped-m3t8q",
+  uid: "4d8a2c6e-0b5f-4e19-8a37-5c1e9d3b7f02",
+  createdAt: iso(NOW - 22 * HOUR),
+  newTopics: ["drill3-orders", "drill3-orders-dlq", "drill3-payments"],
+  coverage: { requested: "complete", recorded: "complete", covered: true },
+  target: { clusterRef: { name: "orders-dr" }, mode: "newTopic", originalName: false, topicPrefix: "drill3-" },
+  pointInTime: iso(NOW - 23 * HOUR),
+};
+
+/** The Restore as a stop leaves it: Cancelled before it created anything, Stopping, then Interrupted. */
+function stoppedNow(k: Kept): Restore | null {
+  if (k.stoppedMs === undefined) return null;
+  const ran = k.stoppedMs - k.createdMs;
+  if (k.awaiting || (k.key !== undefined && ran < 2000)) {
+    return { ...k.item, operation: { state: "cancelled", stateReason: "Cancelled", terminal: true, verificationState: "notAttempted", verifiedSuccess: false } };
+  }
+  const t = Date.now() - k.stoppedMs;
+  if (t < STOP_MS) return { ...k.item, operation: { state: "running", stateReason: "Stopping", terminal: false, verificationState: "pending", verifiedSuccess: false } };
+  const verification = t < STOP_MS + RECONCILE_MS ? "Running" : "Done";
+  const cleanup = k.cleanupMs === undefined ? null : Date.now() - k.cleanupMs < CLEANUP_MS ? "Removing" : "Removed";
+  const interruption: S["RestoreInterruptionView"] = {
+    cause: k.cause ?? "Cancelled",
+    ...(k.requestedBy ? { requestedBy: k.requestedBy } : {}),
+    verification,
+    cleanupOffered: verification === "Done" && cleanup === null,
+    ...(cleanup ? { cleanup } : {}),
+  };
+  return {
+    ...k.item,
+    operation: { state: "interrupted", stateReason: k.cause ?? "Cancelled", terminal: false, verificationState: "pending", verifiedSuccess: false },
+    interruption,
+  };
+}
+
+/** The operation view of a stopped run: the reconcile's signed counts once it is done. */
+function stoppedOperation(k: Kept, r: Restore): OperationView {
+  const intr = r.interruption ?? null;
+  const done = intr?.verification === "Done";
+  const at = k.stoppedMs!;
+  const conditions: S["ConditionView"][] = [
+    { type: "Admitted", status: "True", reason: "ApprovalVerified", message: "Plan approved; the approval verified.", lastTransitionTime: iso(k.createdMs) },
+  ];
+  if (r.operation.state !== "cancelled") {
+    conditions.push({ type: "Preparing", status: "True", reason: "CreatingTopics", message: `Created ${r.newTopics.length} topics on ${r.target.clusterRef.name}.`, lastTransitionTime: iso(k.createdMs + 2000) });
+    conditions.push({ type: "Running", status: "True", reason: "Replaying", message: "Replaying records from the archive.", lastTransitionTime: iso(k.createdMs + 6000) });
+  }
+  if (r.operation.stateReason === "Stopping") conditions.push({ type: "Running", status: "True", reason: "Stopping", message: "The run's Job is suspended; waiting for its pod to go.", lastTransitionTime: iso(at) });
+  if (intr) {
+    conditions.push({ type: "Interrupted", status: "True", reason: intr.cause ?? "Cancelled", message: "The run ended without a signed scorecard after it created its targets; nothing was resumed.", lastTransitionTime: iso(at + STOP_MS) });
+    if (done) conditions.push({ type: "Reconciled", status: "True", reason: "PartialTargetsVerified", message: "The partial targets were verified against the archive and the scorecard signed.", lastTransitionTime: iso(at + STOP_MS + RECONCILE_MS) });
+  }
+  if (r.operation.state === "cancelled") conditions.push({ type: "Failed", status: "True", reason: "Cancelled", message: "Cancelled before its run started; nothing was created.", lastTransitionTime: iso(at) });
+  // The first topic was part-way when the writer stopped: partition 0 whole, 1 part-way, the rest not reached.
+  const rows = done ? partitionRows(k.topics, PARTS, (t, p) => (t !== k.topics[0] ? 0 : p === 0 ? 118_241 : p === 1 ? 61_208 : 0), () => 118_241) : null;
+  const sum = (f: (x: { replay: { expected: number; matching: number; missing: number } }) => number) => (rows ?? []).reduce((a, b) => a + f(b), 0);
+  const complete: S["CompleteVerificationView"] | undefined = rows
+    ? { covered: true, partitionCount: rows.length, partitions: rows, recordsDecoded: sum((x) => x.replay.expected), offsetHoles: 0, segments: rows.length * 4, segmentsVerified: rows.length * 4, segmentsFailed: 0, segmentsUnverified: 0, replay: { expected: sum((x) => x.replay.expected), restored: sum((x) => x.replay.matching), matching: sum((x) => x.replay.matching), missing: sum((x) => x.replay.missing), unexpected: 0, duplicates: 0, outOfOrder: 0, mismatched: 0 } }
+    : undefined;
+  const signedAt = at + STOP_MS + RECONCILE_MS;
+  return {
+    kind: "restore",
+    name: r.name,
+    namespace: r.namespace,
+    uid: r.uid,
+    resourceVersion: String(71000 + Math.floor((Date.now() - at) / 1000)),
+    createdAt: r.createdAt,
+    lastUpdatedAt: iso(Math.min(Date.now(), signedAt)),
+    state: r.operation.state,
+    stateReason: r.operation.stateReason,
+    message: conditions[conditions.length - 1]?.message,
+    terminal: r.operation.terminal,
+    stale: false,
+    awaitingApproval: false,
+    verifiedSuccess: false,
+    targetMode: r.target.mode,
+    conditions,
+    diagnostics: [],
+    progress: { message: "" },
+    readiness: { state: "unknown", basis: "notImplemented" },
+    result: done ? { status: "notPass", exitCode: 2, exitReason: "fail-integrity", outcome: "fail-integrity", lastPhaseCompleted: 7 } : { status: r.operation.terminal ? "notPass" : "pending" },
+    verification: done ? { state: "valid", verifiedAt: iso(signedAt), matchedKeyId: SIGNER, payloadType: "application/vnd.logweir.scorecard+json" } : { state: r.operation.terminal ? "noEvidence" : "pending" },
+    trust: done ? { state: "verified", basis: "Current", signedAt: iso(signedAt - 1000), keyState: "Active", policy: { name: "team-a", generation: 2 } } : { state: "pending", basis: "None" },
+    evidence: done ? { payloadKey: `logweir/drills/${r.uid.slice(0, 8)}-reconcile.scorecard.json`, payloadSha256: `sha256:${hex(r.uid.charCodeAt(1) + 9, 64)}`, sidecarKey: `logweir/drills/${r.uid.slice(0, 8)}-reconcile.scorecard.sig` } : {},
+    verificationScope: complete ? { level: "sampled", coverage: "complete", complete } : { level: "none" },
+    ...(intr?.cleanup === "Removed" ? { teardown: { deleted: r.newTopics, deletedTruncated: false } } : {}),
+  } as OperationView;
+}
+
+/** PROD-03.2: what the scorecard says about schemas, for a restore into a connection with a registry or without one. */
+function schemasFor(r: Restore): S["RestoreSchemasView"] {
+  const target = connections.find((c) => c.namespace === r.namespace && c.name === r.target.clusterRef.name);
+  if (!target?.schemaRegistry) return { imported: 0, alreadyPresent: 0, notImported: "noTargetRegistry" };
+  return {
+    imported: 4,
+    alreadyPresent: 0,
+  };
 }
 
 const store: Kept[] = [];
 const ready: Promise<void> = (async () => {
-  for (const r of [...baseRestores, failed, uncovered, subset]) {
+  for (const r of [...baseRestores, failed, uncovered, subset, interrupted]) {
     const topics = r === subset ? ["orders"] : ORDERS;
     const planBytes = mockPlan(r, topics, r === uncovered ? { completeMaxRecords: 2_000_000 } : {});
+    const passed = r.operation.state === "succeeded";
     store.push({
-      item: { ...r, planBytes, planBytesLength: new TextEncoder().encode(planBytes).length, planHash: await sha256(planBytes), sourceDestinationRef: { name: "primary" }, evidenceDestinationRef: { name: "primary" } },
+      item: {
+        ...r,
+        planBytes,
+        planBytesLength: new TextEncoder().encode(planBytes).length,
+        planHash: await sha256(planBytes),
+        sourceDestinationRef: { name: "primary" },
+        evidenceDestinationRef: { name: "primary" },
+        ...(passed && r !== interrupted ? { coverage: { ...r.coverage, schemas: schemasFor(r) } } : {}),
+      },
       topics,
       createdMs: Date.parse(String(r.createdAt)),
+      ...(r === interrupted ? { stoppedMs: Date.parse(String(r.createdAt)) + 10 * MINUTE, cause: "RunnerStopped" } : {}),
     });
   }
 })();
@@ -241,6 +363,8 @@ const RECORDS = 1_182_410;
 
 /** A new restore moves through its stages once admitted; one waiting for approval does not. */
 function live(k: Kept): Restore {
+  const stopped = stoppedNow(k);
+  if (stopped) return stopped;
   if (k.key === undefined) return k.item;
   if (k.awaiting) return { ...k.item, operation: { state: "pending", stateReason: "ApprovalNotVerified", terminal: false, verificationState: "pending", verifiedSuccess: false } };
   const e = (Date.now() - k.createdMs) / 1000;
@@ -248,7 +372,7 @@ function live(k: Kept): Restore {
   if (stage) return { ...k.item, operation: { state: stage.state, terminal: false, verificationState: "pending", verifiedSuccess: false } };
   return {
     ...k.item,
-    coverage: { ...k.item.coverage, recorded: k.item.coverage.requested, ...(k.item.coverage.requested === "complete" ? { covered: true } : {}) },
+    coverage: { ...k.item.coverage, recorded: k.item.coverage.requested, ...(k.item.coverage.requested === "complete" ? { covered: true } : {}), schemas: schemasFor(k.item) },
     operation: { state: "succeeded", stateReason: "Ok", terminal: true, verificationState: "valid", verifiedSuccess: true, exitCode: 0, outcome: "pass" },
   };
 }
@@ -260,7 +384,7 @@ function withThemeA(k: Kept): Restore {
   return tc ? { ...r, topicConfiguration: tc } : r;
 }
 
-const list = (ns: string) => store.filter((k) => k.item.namespace === ns).sort((a, b) => b.createdMs - a.createdMs);
+const list = (ws: string) => store.filter((k) => k.item.namespace === ws).sort((a, b) => b.createdMs - a.createdMs);
 const SIGNER = "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe";
 
 function partitionRows(topics: string[], parts: Record<string, number>, matching: (t: string, p: number) => number, expected: (t: string, p: number) => number) {
@@ -282,6 +406,7 @@ const PARTS: Record<string, number> = { orders: 3, "orders-dlq": 1, payments: 6 
 
 function operationOf(k: Kept): OperationView {
   const r = live(k);
+  if (k.stoppedMs !== undefined) return stoppedOperation(k, r);
   const since = k.createdMs;
   const e = (Date.now() - since) / 1000;
   const done = r.operation.terminal;
@@ -389,12 +514,12 @@ let serial = 0;
 /** One request per key at a time, as the API's idempotency record serialises them. */
 const inflight = new Map<string, Promise<unknown>>();
 
-async function create(ns: string, request: Request): Promise<Response> {
+async function create(ws: string, request: Request): Promise<Response> {
   const key = request.headers.get("Idempotency-Key") ?? "";
   if (key.length < 8) return problem(400, "idempotency_key_required", "A durable create carries an Idempotency-Key.");
-  const full = `${ns}/${key}`;
+  const full = `${ws}/${key}`;
   while (inflight.has(full)) await inflight.get(full);
-  const run = createOnce(ns, full, request);
+  const run = createOnce(ws, full, request);
   inflight.set(full, run.catch(() => null));
   try {
     return await run;
@@ -403,11 +528,11 @@ async function create(ns: string, request: Request): Promise<Response> {
   }
 }
 
-async function createOnce(ns: string, full: string, request: Request): Promise<Response> {
+async function createOnce(ws: string, full: string, request: Request): Promise<Response> {
   await ready;
   const body = (await request.json()) as S["CreateRestoreRequest"];
   const seen = store.find((k) => k.key === full);
-  if (seen) return json(200, { item: live(seen), replayed: true, authorization: routing(ns, seen), requestId: requestId() });
+  if (seen) return json(200, { item: live(seen), replayed: true, authorization: routing(ws, seen), requestId: requestId() });
   const errors: { field: string; code: string; message: string }[] = [];
   if ((await sha256(body.planBytes)) !== body.planHash) errors.push({ field: "planHash", code: "hash_mismatch", message: "is not the sha256 of planBytes" });
   const naming = body.target.topicNaming;
@@ -415,7 +540,7 @@ async function createOnce(ns: string, full: string, request: Request): Promise<R
   (body.topicMapping ?? []).forEach((row, i) => {
     if (row.target !== prefix + row.source) errors.push({ field: `topicMapping[${i}].target`, code: "mapping_mismatch", message: `is not ${prefix + row.source}, the prefix and the source` });
   });
-  const mode = modes[ns] ?? "confirm";
+  const mode = modes[ws] ?? "confirm";
   const sources = (body.topicMapping ?? []).map((r) => r.source);
   if (naming.originalName && mode === "confirm") {
     const typed = body.originalNameConfirmation?.typedTopics;
@@ -424,7 +549,7 @@ async function createOnce(ns: string, full: string, request: Request): Promise<R
   } else if (body.originalNameConfirmation) {
     errors.push({ field: "originalNameConfirmation", code: "not_accepted", message: "is accepted only for a restore under the original names confirmed by one person" });
   }
-  if ((mode === "two-person" || mode === "strict") && !body.ticket) errors.push({ field: "ticket", code: "required", message: "a governed namespace requires a change ticket" });
+  if ((mode === "two-person" || mode === "strict") && !body.ticket) errors.push({ field: "ticket", code: "required", message: "a governed workspace requires a change ticket" });
   if (errors.length) return problem(422, "validation_failed", "One or more fields are invalid.", errors);
 
   serial += 1;
@@ -432,7 +557,7 @@ async function createOnce(ns: string, full: string, request: Request): Promise<R
   const connection = body.target.clusterRef.name;
   const item: Restore = {
     name,
-    namespace: ns,
+    namespace: ws,
     uid: crypto.randomUUID(),
     resourceVersion: String(63000 + serial),
     createdAt: iso(Date.now()),
@@ -455,11 +580,11 @@ async function createOnce(ns: string, full: string, request: Request): Promise<R
   if (body.target.mode === "scratch") item.newTopics = sources.map((s) => (planBlockValue(body.planBytes, "target", "topic_mapping_prefix") ?? "") + s);
   const kept: Kept = { item, topics: sources, key: full, createdMs: Date.now(), awaiting: mode !== "confirm", requester: "https://dex.logweir.localtest.me#alice", ticket: body.ticket ?? undefined };
   store.push(kept);
-  return json(201, { item: live(kept), replayed: false, authorization: routing(ns, kept), requestId: requestId() });
+  return json(201, { item: live(kept), replayed: false, authorization: routing(ws, kept), requestId: requestId() });
 }
 
-function routing(ns: string, k: Kept): S["RestoreRoutingView"] {
-  const p = policyFor(ns);
+function routing(ws: string, k: Kept): S["RestoreRoutingView"] {
+  const p = policyFor(ws);
   return {
     state: k.awaiting ? "awaitingApproval" : "confirmed",
     mode: p.mode,
@@ -472,10 +597,10 @@ function routing(ns: string, k: Kept): S["RestoreRoutingView"] {
   };
 }
 
-function approvalRequest(ns: string, k: Kept): S["ApprovalRequestView"] {
-  const p = policyFor(ns);
+function approvalRequest(ws: string, k: Kept): S["ApprovalRequestView"] {
+  const p = policyFor(ws);
   return {
-    namespace: ns,
+    workspace: ws,
     restore: k.item.name,
     restoreUid: k.item.uid,
     approvalName: k.item.approvalRef.name,
@@ -510,7 +635,7 @@ function existingTopics(cluster: string): Set<string> {
   return new Set(names);
 }
 
-function restoreChecks(ns: string, body: S["RestorePreflightRequest"]): { checks: S["CheckEntryView"][]; aggregate: S["Preflight"]["state"] } {
+function restoreChecks(ws: string, body: S["RestorePreflightRequest"]): { checks: S["CheckEntryView"][]; aggregate: S["Preflight"]["state"] } {
   const now = iso(Date.now());
   const row = (id: string, code: string, state: S["CheckEntryView"]["state"], extra: Partial<S["CheckEntryView"]> = {}): S["CheckEntryView"] => ({
     id,
@@ -537,7 +662,7 @@ function restoreChecks(ns: string, body: S["RestorePreflightRequest"]): { checks
     row("plan.bindings", "PlanBound", "ready"),
     row("destination.resolved", "DestinationValid", "ready", { scope: { kind: "BackupDestination", name: body.sourceDestination ?? "primary" } }),
     row("archive.coverage", "PointInWindow", "ready"),
-    row("target.resolved", "ConnectionResolved", connections.some((c) => c.namespace === ns && c.name === target) ? "ready" : "notReady"),
+    row("target.resolved", "ConnectionResolved", connections.some((c) => c.namespace === ws && c.name === target) ? "ready" : "notReady"),
     row("target.authenticated", "Authenticated", "ready"),
     taken.length
       ? row("target.mappedTopics", "MappedTopicExists", "notReady", { message: `${taken.join(", ")} already exist on ${target}`, remedy: "Choose another prefix, or remove the topics if nothing uses them." })
@@ -546,6 +671,10 @@ function restoreChecks(ns: string, body: S["RestorePreflightRequest"]): { checks
       ? row("target.topicCreate", "ReplicationFactorExceedsBrokers", "notReady", { message: `${target} has ${brokers} brokers and the plan asks for ${rf} replicas`, remedy: `Set the replication factor to ${brokers} or fewer.` })
       : row("target.topicCreate", "TopicCreateAllowed", "ready"),
     row("approval.state", "SubjectNotCreated", "skipped", { message: "No Restore exists for this plan yet, so no approval can be checked." }),
+    // PROD-03.2: the target connection names a registry, so the check previews the import.
+    ...(connections.some((c) => c.namespace === ws && c.name === target && c.schemaRegistry)
+      ? [row("target.schemas", "SchemasImportable", "ready", { message: "will import 3 subjects (4 versions) with the source's IDs; none conflict. The run recomputes the set from every record." })]
+      : []),
   ];
   const blocking = out.filter((c) => c.state !== "ready");
   const aggregate = blocking.some((c) => c.state === "notReady") ? "notReady" : blocking.length ? "unknown" : "ready";
@@ -573,7 +702,7 @@ function preflightNow(k: KeptCheck, planHash: string | null): Preflight {
 
 let checkSerial = 0;
 
-async function startCheck(ns: string, request: Request): Promise<Response | null> {
+async function startCheck(ws: string, request: Request): Promise<Response | null> {
   const body = (await request.json()) as S["CreatePreflightRequest"];
   if (body.operation !== "restore" || !body.restore) return null;
   const r = body.restore;
@@ -582,10 +711,10 @@ async function startCheck(ns: string, request: Request): Promise<Response | null
   }
   checkSerial += 1;
   const id = `pf-r5${(NOW / MINUTE + checkSerial).toString(36).slice(-4)}${hex(checkSerial + 700, 6)}`;
-  const { checks: rows, aggregate } = restoreChecks(ns, r);
+  const { checks: rows, aggregate } = restoreChecks(ws, r);
   const item: Preflight = {
     id,
-    namespace: ns,
+    namespace: ws,
     uid: crypto.randomUUID(),
     resourceVersion: String(64000 + checkSerial),
     createdAt: iso(Date.now()),
@@ -603,7 +732,7 @@ async function startCheck(ns: string, request: Request): Promise<Response | null
     conditions: [],
     detailsAvailable: false,
   };
-  checks.set(`${ns}/${id}`, { item, createdMs: Date.now(), checks: rows, aggregate });
+  checks.set(`${ws}/${id}`, { item, createdMs: Date.now(), checks: rows, aggregate });
   return json(201, { item, replayed: false, requestId: requestId() });
 }
 
@@ -617,32 +746,48 @@ export async function restoresMock(request: Request): Promise<Response | null> {
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   const method = request.method;
   let m: RegExpMatchArray | null;
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/approval-policy$/))) return json(200, { item: policyFor(m[1]!), requestId: requestId() });
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/restores$/))) {
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/approval-policy$/))) return json(200, { item: policyFor(m[1]!), requestId: requestId() });
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/restores$/))) {
     await ready;
     if (method === "GET") return json(200, page(list(m[1]!).map(live).map((x) => ({ ...x, planBytes: undefined }))));
     if (method === "POST") return create(m[1]!, request);
   }
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/restores\/([^/:]+)$/))) {
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/restores\/([^/:]+)$/))) {
     await ready;
     const k = list(m[1]!).find((x) => x.item.name === m![2]);
     return k ? json(200, { item: withThemeA(k), requestId: requestId() }) : problem(404, "not_found", `No Restore named ${m[2]} in ${m[1]}.`);
   }
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/restores\/([^/]+)\/approval-request$/))) {
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/restores\/([^/]+)\/approval-request$/))) {
     await ready;
     const k = list(m[1]!).find((x) => x.item.name === m![2]);
     if (!k || !k.awaiting || modes[m[1]!] !== "two-person") return problem(404, "not_found", "No two-person request exists for this restore.");
     return json(200, { item: approvalRequest(m[1]!, k), requestId: requestId() });
   }
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/operations\/restore\/([^/]+)$/))) {
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/operations\/restore\/([^/]+)$/))) {
     await ready;
     const k = list(m[1]!).find((x) => x.item.name === m![2]);
     return k ? json(200, { item: operationOf(k), requestId: requestId() }) : problem(404, "not_found", `No restore named ${m[2]}.`);
   }
-  if (method === "POST" && (m = at(path, /^\/namespaces\/([^/]+)\/preflights$/))) {
+  if (method === "POST" && (m = at(path, /^\/workspaces\/([^/]+)\/restores\/([^/]+)\/(cancel|cleanup)$/))) {
+    await ready;
+    const k = list(m[1]!).find((x) => x.item.name === m![2]);
+    if (!k) return problem(404, "not_found", `No Restore named ${m[2]} in ${m[1]}.`);
+    const now = live(k);
+    if (m[3] === "cancel") {
+      if (now.operation.terminal || now.interruption) return problem(409, "state_conflict", `Restore ${k.item.name} has ended; there is nothing to cancel.`);
+      if (k.stoppedMs === undefined) Object.assign(k, { stoppedMs: Date.now(), cause: "Cancelled", requestedBy: "https://dex.logweir.localtest.me#alice" });
+    } else {
+      if (k.cleanupMs === undefined && !now.interruption?.cleanupOffered) {
+        return problem(409, "state_conflict", "Clean up is offered only on an Interrupted restore whose partial topics were verified and signed.");
+      }
+      k.cleanupMs ??= Date.now();
+    }
+    return json(200, { item: live(k), requestId: requestId() });
+  }
+  if (method === "POST" && (m = at(path, /^\/workspaces\/([^/]+)\/preflights$/))) {
     return startCheck(m[1]!, request.clone());
   }
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/preflights\/([^/:]+)(:cancel)?$/))) {
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/preflights\/([^/:]+)(:cancel)?$/))) {
     const k = checks.get(`${m[1]}/${m[2]}`);
     if (!k) return null;
     if (method === "POST" && m[3]) {
@@ -660,19 +805,19 @@ export async function restoresFallback(request: Request): Promise<Response | nul
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   if (request.method !== "GET") return null;
   let m: RegExpMatchArray | null;
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/destinations$/))) {
-    const ns = m[1]!;
-    return json(200, page(ns === "team-a" ? [destination("primary", ns), destination("evidence-vault", ns)] : []));
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/destinations$/))) {
+    const ws = m[1]!;
+    return json(200, page(ws === "team-a" ? [destination("primary", ws), destination("evidence-vault", ws)] : []));
   }
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/destinations\/([^/]+)$/))) {
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/destinations\/([^/]+)$/))) {
     const d = m[1] === "team-a" ? destination(m[2]!, m[1]!) : null;
     return d ? json(200, { item: d, requestId: requestId() }) : problem(404, "not_found", `No destination named ${m[2]}.`);
   }
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/catalogs$/))) {
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/catalogs$/))) {
     return json(200, page(m[1] === "team-a" ? [catalog(m[1]!)] : []));
   }
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/catalogs\/primary$/))) return json(200, { item: catalog(m[1]!), requestId: requestId() });
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/operations\/backup\/([^/]+)$/))) {
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/catalogs\/primary$/))) return json(200, { item: catalog(m[1]!), requestId: requestId() });
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/operations\/backup\/([^/]+)$/))) {
     const b = backups.find((x) => x.namespace === m![1] && x.name === m![2]);
     if (!b) return problem(404, "not_found", `No backup named ${m[2]}.`);
     // The receipt digest a finished run reports; the base mock's live run finishes as the page watches.
@@ -682,7 +827,7 @@ export async function restoresFallback(request: Request): Promise<Response | nul
       requestId: requestId(),
     });
   }
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/connections\/([^/]+)\/topic-discoveries$/)) && url.searchParams.get("latest") === "true") {
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/connections\/([^/]+)\/topic-discoveries$/)) && url.searchParams.get("latest") === "true") {
     const c = connections.find((x) => x.namespace === m![1] && x.name === m![2]);
     if (!c || c.role !== "target") return json(200, { latestAttempt: null, lastSuccessful: null, requestId: requestId() });
     const discovery = {
@@ -706,10 +851,10 @@ export async function restoresFallback(request: Request): Promise<Response | nul
   return null;
 }
 
-function catalog(ns: string): S["CatalogView"] {
+function catalog(ws: string): S["CatalogView"] {
   return {
     name: "primary",
-    namespace: ns,
+    namespace: ws,
     uid: "c47a1f20-3d5e-4b8c-9a61-7e2f0d4b8c15",
     resourceVersion: "61900",
     destinationRef: { name: "primary" },

@@ -3,12 +3,12 @@
 `application/vnd.logweir.drill-scorecard+json;version=1.0.0`
 
 The machine-readable schemas are
-[`schemas/logweir-drill-scorecard-2.4.0.json`](../../schemas/logweir-drill-scorecard-2.4.0.json)
+[`schemas/logweir-drill-scorecard-2.5.0.json`](../../schemas/logweir-drill-scorecard-2.5.0.json)
 (format 2's newest) and
-[`schemas/logweir-drill-scorecard-1.12.0.json`](../../schemas/logweir-drill-scorecard-1.12.0.json)
+[`schemas/logweir-drill-scorecard-1.13.0.json`](../../schemas/logweir-drill-scorecard-1.13.0.json)
 (format 1's newest). Both are generated from the code and diffed by CI on every
 build, so this document and the schemas cannot drift apart silently. Every older
-schema file, `-1.0.0.json` to `-1.11.0.json` and `-2.0.0.json` to `-2.3.0.json`,
+schema file, `-1.0.0.json` to `-1.12.0.json` and `-2.0.0.json` to `-2.4.0.json`,
 is frozen beside them and never regenerated. The payload type keeps `version=1.0.0`, the major-1
 envelope, so an older reader reaches its major refusal rather than a
 payload-type mismatch. A worked example is
@@ -68,6 +68,7 @@ chose.
 | 1.10.0, 2.2.0 | PROD-11.1a | [`target.creation`](#targetcreation-format-1100-and-220), arms TCR-1 to TCR-5 | every run that created topics (2.2.0 for a subset) | MINOR, OD-7 (a) |
 | 1.11.0, 2.3.0 | PROD-05.2 | [`target.topic_configuration`](#targettopic_configuration-format-1110-and-230), arms TC-1 to TC-5 | a restore whose plan carries `target.topic_configuration` (2.3.0 for a subset) | MINOR, OD-7 (a) |
 | 1.12.0, 2.4.0 | PROD-04.2 | [`integrity.verification.positions_mapping`](#integrityverificationpositions_mapping-format-1120-and-240), arms PM-1 to PM-5 | a passing complete restore of a point that captured consumer groups (2.4.0 for a subset) | MINOR, OD-7 (a) |
+| 1.13.0, 2.5.0 | PROD-03.2 | [`target.schemas`](#targetschemas-format-1130-and-250), arms SC-1 to SC-3 | a restore whose point captured a registry or whose target connection names one (2.5.0 for a subset) | MINOR, OD-7 (a) |
 
 **What an older reader does, and what a rollback writes.**
 
@@ -87,6 +88,7 @@ chose.
 | 1.10.0, 2.2.0 | A verifier older than 1.31.0 and an older `logweir drill verify` accept it, ignore the block and print no `target creation:` line; readers before 1.27.0 refuse a 2.2.0 document by its major. A runner from before PROD-11.1a refuses a clone plan (`drill spec does not parse`, exit 1) | An older `logweir` writes documents without the block; a clone cleanup needs it, so a clone restored by an older runner cannot exist. Documents stay valid |
 | 1.11.0, 2.3.0 | A verifier older than 1.32.0 and an older `logweir drill verify` accept it and ignore the block; readers before 1.27.0 refuse a 2.3.0 document by its major. An older runner ignores the plan block, creates its topics as before and claims nothing | Documents stay valid |
 | 1.12.0, 2.4.0 | Accepts it, ignores the block and prints no `mapping:` line; `verify_scorecard.py` before 1.33.0 and an older `logweir drill verify` have no `--positions-mapping` | An older `logweir` writes no mapping (a `Switchover` over such a restore is refused `NoPositionsMapping`); documents stay valid |
+| 1.13.0, 2.5.0 | Accepts it, ignores the block and prints no `schemas:` line: measured on 2026-10-16 with `v0.4.1`'s readers (`verify_scorecard.py` 1.34.0 and the `logweir` of runner image `sha-4bb185d5`) over three signed documents shaped as the parity gate's accepted SC cases (1.13.0 imported, 2.5.0 imported, 1.13.0 `not_imported`), each `VALID`, exit 0. On every build, `scorecard_golden.rs::a_block_a_later_minor_adds_inside_target_is_ignored` holds the rule it rests on (it fails if `TargetInfo` gains `deny_unknown_fields`). Readers before 1.27.0 refuse a 2.5.0 document by its major. For the line use script 1.35.0 or a `logweir` from PROD-03.2 on | Documents stay valid. 0.5.0 has no in-place rollback ([release-notes.md](../release-notes.md) item 137) |
 
 **What a renumber moves.** A version's number is held in several places that
 must move together, with each corpus case's `format_version` and its version
@@ -103,6 +105,7 @@ arm's reason (TB-1, IV-1, US-1, SEL-1, ON-1):
 | 1.10.0, 2.2.0 | `scorecard::FORMAT_VERSION_WITH_TARGET_CREATION`, `FORMAT_VERSION_SUBSET_WITH_TARGET_CREATION`, `TARGET_CREATION_SINCE_MINOR` and `TARGET_CREATION_SINCE_MINOR_OF_MAJOR_2`; both justfile schema versions and the two schema names; `SCORECARD_TARGET_CREATION_SINCE_MINOR` and `…_OF_MAJOR_2`; the parity script's `SCORECARD_TARGET_CREATION_VERSION` and `SCORECARD_SUBSET_TARGET_CREATION_VERSION`; `target_creation_*.json` |
 | 1.11.0, 2.3.0 | `scorecard::FORMAT_VERSION_WITH_TOPIC_CONFIGURATION`, `FORMAT_VERSION_SUBSET_WITH_TOPIC_CONFIGURATION`, `TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_TOPIC_CONFIGURATION_SINCE_MINOR` and `..._OF_MAJOR_2`; `topic_configuration_1_11_*.json`, `topic_configuration_under_format_1_10_0.json` |
 | 1.12.0, 2.4.0 | `scorecard::FORMAT_VERSION_WITH_POSITIONS_MAPPING`, `FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING`, `POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_POSITIONS_MAPPING_SINCE_MINOR` and `..._OF_MAJOR_2`; the `format_version` of every `positions_mapping_*.json` case in `positions-mapping-index.json` (the parity script reads them) |
+| 1.13.0, 2.5.0 | `scorecard::FORMAT_VERSION_WITH_SCHEMAS`, `FORMAT_VERSION_SUBSET_WITH_SCHEMAS`, `SCHEMAS_SINCE_MINOR` and `..._OF_MAJOR_2`; the justfile's two schema versions and the schemas' names; `SCORECARD_SCHEMAS_SINCE_MINOR` and `..._OF_MAJOR_2`; the parity script's `SCORECARD_SCHEMAS_VERSION` and `SCORECARD_SUBSET_SCHEMAS_VERSION` |
 
 ---
 
@@ -794,8 +797,9 @@ Since FX-23 a sampled verification makes three checks more:
   it. When they do run backwards, a record older than every segment's first
   record was dropped by every restore of that archive until PROD-01.1b
   ([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)),
-  and the per-partition bound failed that restore; so does a duplicate from
-  the engine's non-idempotent producer. Failing is the safer verdict.
+  and the per-partition bound failed that restore; so does a duplicate (a
+  second execution into a target, or an engine build before 5, whose producer
+  was not idempotent). Failing is the safer verdict.
 - **Phase 7 reads the engine's offset report** — streaming, keeping only its
   partition entries — and fails a restore whose report has no entry for a
   mapped partition the manifest proves holds records in the window. The report
@@ -1225,6 +1229,29 @@ names a partition `complete.partitions[]` lists, in its restored topic, and
 one marked `PartitionNotRestored` names none; a group that was not captured has
 no entry. Both then print one `mapping:` line per entry. Applying the mapping
 is a `Switchover`'s ([kubernetes.md](../kubernetes.md#switching-consumer-groups-over)).
+
+### `target.schemas` (format 1.13.0 and 2.5.0)
+
+PROD-03.2. Present when the bound point's receipt captured a Schema Registry or
+the plan names a target registry (`target.schema_registry`, the target
+connection's). Before any topic is created, the run collects the Confluent
+framed schema IDs its records carry, takes every subject holding one and the
+subjects their references name, and registers what the target registry lacks
+in its `IMPORT` mode with the source's IDs and versions, so no record byte is
+rewritten. The block records `snapshot_sha256`, `target_registry_url`,
+`imported` (the first 256 subject-versions, sorted) and `imported_count`,
+`already_present`, and `ids_not_in_snapshot`; or only `not_imported`
+(`noTargetRegistry`: the point has a snapshot and the target connection names
+no registry; `noSnapshot`: the reverse). SC-1: only from 1.13.0 / 2.5.0. SC-2:
+`not_imported` from its closed set and nothing else, or the snapshot's digest
+and the target registry. SC-3: the lists bounded, sorted and distinct.
+A conflicting ID or subject-version (`SchemaConflict`), a registry that cannot
+keep IDs (`SchemaRegistryCannotKeepIds`), a read-only subject
+(`SchemaRegistryReadOnly`), a subject mode that could not be put back
+(`SchemaRegistryModeNotRestored`), a snapshot that is not the receipt's
+(`SchemaSnapshotInvalid`) or an unreachable registry
+(`SchemaRegistryUnreachable`) refuses the run, exit 3, before any topic is
+created. Imported schemas are never removed.
 
 ### `partial_reason` must SAY something
 

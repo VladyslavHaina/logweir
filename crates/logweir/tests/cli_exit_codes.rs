@@ -64,17 +64,28 @@ fn help_still_exits_ok() {
 }
 
 #[test]
-fn identity_bootstrap_and_distribution_help_are_release_smokeable() {
-    for leaf in ["bootstrap", "distribute"] {
-        let out = bin().args(["identity", leaf, "--help"]).output().unwrap();
-        assert_eq!(
-            out.status.code(),
-            Some(0),
-            "identity {leaf} --help failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(String::from_utf8_lossy(&out.stdout).contains("Usage:"));
-    }
+fn identity_bootstrap_help_is_release_smokeable_and_distribute_is_gone() {
+    // PROD-19.1: one namespace, so nothing copies the signer any more.
+    let gone = bin()
+        .args(["identity", "distribute", "--help"])
+        .output()
+        .unwrap();
+    assert_ne!(
+        gone.status.code(),
+        Some(0),
+        "identity distribute still exists"
+    );
+    let out = bin()
+        .args(["identity", "bootstrap", "--help"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "identity bootstrap --help failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("Usage:"));
 }
 
 /// `main.rs`'s usage-error path still tries to delete the install's trust

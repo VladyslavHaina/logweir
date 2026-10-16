@@ -10,7 +10,7 @@ the `docker-desktop` context; name your own explicitly.
 
 **Before you install.**
 
-- **Minimum Kubernetes: 1.29.** The thirteen CRDs use CEL validation rules, GA
+- **Minimum Kubernetes: 1.29.** The fourteen CRDs use CEL validation rules, GA
   at 1.29, and the chart's `kubeVersion: >=1.29.0-0` makes Helm refuse an older
   cluster. The `ValidatingAdmissionPolicy` of *5b* needs 1.30.
 - **Helm 3.19 or newer, or 4.x.** A first install with the console needs it:
@@ -20,8 +20,9 @@ the `docker-desktop` context; name your own explicitly.
 - **Nodes: linux/amd64 or linux/arm64.** The controller, runner and console
   images, the identity hook's included, are published for both
   ([support-matrix.md, *Architectures*](support-matrix.md#architectures)).
-- **Engine: Logweir's build of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.4`
-  (build 4, patch 0001's rustls 0.23.46;
+- **Engine: Logweir's build of OSO 0.23.3**, `kafka-backup 0.23.3+logweir.5`
+  (build 5, patches 0004 to 0007: committed-only capture, idempotent restore
+  produce, repeated header keys kept, one byte-rate limit on a restore;
   [../third_party/kafka-backup-build.env](../third_party/kafka-backup-build.env)),
   inside the runner image. The floor is 0.21.0; an engine below it, such as
   `v0.19.1`, is `unsupported (lever-absent)`, never a fault. A standalone CLI
@@ -30,6 +31,13 @@ the `docker-desktop` context; name your own explicitly.
 - **Brokers:** Apache Kafka 3.7.1, 3.9.2, 4.1.2 and 4.3.1 (KRaft) and Confluent
   Platform 8.3.2 are supported; Redpanda is a backup source only; anything else
   is untested ([support-matrix.md, *Brokers*](support-matrix.md#brokers)).
+
+**One namespace per install.** Everything Logweir creates lives in the release
+namespace; the chart's `workspaces` list (default `[default]`) groups its
+objects, each with its own console role bindings and approval mode
+([kubernetes.md, *Workspaces*](kubernetes.md#workspaces)). An install of 0.4.x
+or older is not upgraded in place (*Upgrade CRDs before upgrading the
+controller*).
 
 Code, messages and older documents cite this guide by its numbered sections;
 *Section numbers before v1* at the end maps them.
@@ -209,15 +217,13 @@ For Argo CD or `helm template | kubectl apply`, set
 `identity.renderedOffline: true`. The chart then renders no retained object and
 no trust grant; the hook Jobs still run and fill the objects you create once,
 before the first sync. For the default names (the console pair only with
-`api.console.enabled`, and one Secret in each
-`identity.authorizedRunnerNamespaces` entry):
+`api.console.enabled`):
 
 ```bash
 kubectl --context <ctx> -n <release-ns> create secret generic logweir-signing-key
 kubectl --context <ctx> -n <release-ns> create configmap logweir-signing-trust
 kubectl --context <ctx> -n <release-ns> create secret generic logweir-console-confirmation
 kubectl --context <ctx> -n <release-ns> create configmap logweir-console-trust
-kubectl --context <ctx> -n <runner-ns> create secret generic logweir-signing-key
 ```
 
 The renderer never manages these objects, so no sync, re-apply or prune
@@ -335,10 +341,11 @@ helm upgrade --install logweir oci://registry-1.docker.io/vladyslavhaina/logweir
   -f <your values>
 ```
 
-In the values, list every namespace backups and restores run in under
-`identity.authorizedRunnerNamespaces` (each must exist), the clusters a restore
-may write into under `identity.installationTrust.allowedTargetClusterIds`, and
-`retention.enabled: true` only if you will ever enforce retention.
+In the values, name the workspaces under `workspaces` (for example `[dev, tst,
+stg, prd]`), the clusters a restore may write into under
+`identity.installationTrust.allowedTargetClusterIds`, and `retention.enabled:
+true` only if you will ever enforce retention. Every runner Job runs in the
+release namespace.
 
 **Check:** the controller Deployment is ready and `logweir-signing-trust`
 carries a `key-id` (*1*). Back up the identity at once (*Back up and recover the
@@ -349,14 +356,13 @@ half old archives cannot be verified.
 
 On the `kubectl` path (*The samples, applied second*), once the identity hook
 has finished and you have created the Secrets of *3*, run the preflight from a
-checkout against the namespace your `Backup` and `KafkaCluster` objects live
-in. It reads the cluster, changes nothing, checks presence only, and exits **1
+checkout against the release namespace. It reads the cluster, changes nothing, checks presence only, and exits **1
 naming the first absent Secret** (*3*). A console install skips it: the console
 creates each connection's and destination's credential Secret itself, so
 `kafka-scram` and `logweir-s3` never exist there and the preflight would fail.
 
 ```bash
-just check-secrets <namespace>; echo "rc=$?"
+just check-secrets <release-ns>; echo "rc=$?"
 ```
 
 ### 1. Installation signer and approver identity
@@ -372,7 +378,7 @@ kubectl --context docker-desktop -n logweir-system get configmap logweir-signing
   -o jsonpath='{.data.key-id}{"\n"}{.data.algorithm}{"\n"}{.data.trust-reference}{"\n"}'
 ```
 
-Only the bootstrap/distributor **processes and their projected API tokens** are
+Only the bootstrap **process and its projected API token** are
 short-lived. Their ServiceAccounts, name-scoped Roles and RoleBindings are
 ordinary persistent release resources, so a later upgrade or hook retry runs
 without widening authority; Helm does not automatically revoke these RBAC grants.
@@ -428,20 +434,17 @@ changing keys replaces the roster and briefly interrupts approval checks.
 
 ### 3. The four current Secrets
 
-Three live in the namespace of your `Backup`, `Restore` and `KafkaCluster`
-objects; the fourth is the controller's. Names and data keys are the code's.
+All four live in the release namespace. Names and data keys are the code's.
 With the console, it creates 2 and 3 for each connection and destination from
-the credential you type once; create only 4.
+the credential you type once; create only 4. **A credential Secret you create
+with `kubectl` (2 and 3) carries the label `logweir.dev/workspace` of the
+workspace whose objects name it**: the controller mounts a named Secret only
+when its workspace label equals the referrer's, so the install's key Secrets,
+which carry none, can never be named ([kubernetes.md, *Workspaces*](kubernetes.md#workspaces)).
 
 **1. `logweir-signing-key`**: the bootstrap creates it in the release namespace
-and the runner projects its `signing.pem`; never create or replace it. Declare
-every other runner namespace (it must exist), for example
-`--set-string 'identity.authorizedRunnerNamespaces[0]=recoveries'`: the chart
-renders `logweir-runner`, scoped distribution RBAC and the NetworkPolicies
-there, and a short-lived hook copies the exact established bytes. A namespace
-that already holds a different signer fails closed.
-Never mint a per-namespace signer. List it under `api.namespaces` too for the
-console.
+and the runner projects its `signing.pem`; never create or replace it, and
+never give it a workspace label.
 
 **2. The per-cluster SCRAM credential**: named by
 `KafkaCluster.spec.auth.secretRef`, data key `password`
@@ -450,18 +453,22 @@ connection ([kubernetes.md](kubernetes.md#credential-binding); the console does
 this for you):
 
 ```bash
-kubectl --context docker-desktop -n <namespace> create secret generic \
+kubectl --context docker-desktop -n <release-ns> create secret generic \
   kafka-scram --from-literal=password="$KAFKA_PASSWORD"
+kubectl --context docker-desktop -n <release-ns> label secret kafka-scram \
+  logweir.dev/workspace=<workspace>
 ```
 
 **3. `logweir-s3`**: the runner's archive credential, read by `object_store`'s
 own chain (`~/.aws`, `AWS_PROFILE` and SSO are unsupported):
 
 ```bash
-kubectl --context docker-desktop -n <namespace> create secret generic \
+kubectl --context docker-desktop -n <release-ns> create secret generic \
   logweir-s3 \
   --from-literal=access-key-id="$AWS_ACCESS_KEY_ID" \
   --from-literal=secret-access-key="$AWS_SECRET_ACCESS_KEY"
+kubectl --context docker-desktop -n <release-ns> label secret logweir-s3 \
+  logweir.dev/workspace=<workspace>
 ```
 
 Bind it to the location your inline `archive.url` (and a Restore plan's
@@ -470,7 +477,7 @@ Bind it to the location your inline `archive.url` (and a Restore plan's
 Run it once without `--apply`, confirm the endpoint it prints, then:
 
 ```bash
-python3 scripts/bind-credential.py --context docker-desktop --namespace <namespace> \
+python3 scripts/bind-credential.py --context docker-desktop --namespace <release-ns> \
   --location s3://<bucket> --endpoint <url|aws> --region <region|none> \
   --path-style true|false --allow-http true|false --secret logweir-s3 \
   --apply --confirm-endpoint '<the endpoint it printed>'
@@ -503,7 +510,7 @@ has the method; MinIO's action names are S3's):
 | Role | Actions | Resources |
 |---|---|---|
 | `archiveWrite` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`, `s3:PutObject` | the bucket for the listing; `arn:aws:s3:::<bucket>/<prefix>/*` for both object actions, plus `s3:PutObject` on `arn:aws:s3:::<bucket>/logweir/*` for the execution claim, the receipt and the catalog record — the claim is a conditional create (`If-None-Match: *`), so the store must honour it or every backup exits 4 `ExecutionClaimUnproven` ([why](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)) |
-| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`; to restore a catalog point, also `s3:GetObject` on its receipt and, on a versioned bucket, `s3:GetObjectVersion` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*`; the receipt is under `arn:aws:s3:::<bucket>/logweir/backups/*`; `s3:GetObjectVersion` on `arn:aws:s3:::<bucket>/<prefix>/*` |
+| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`; to restore a catalog point, also `s3:GetObject` on its receipt and, on a versioned bucket, `s3:GetObjectVersion` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*`; the receipt is under `arn:aws:s3:::<bucket>/logweir/backups/*`; to reconcile an interrupted restore, also `s3:GetObject` on `arn:aws:s3:::<bucket>/logweir/drills/*` (its targets record); `s3:GetObjectVersion` on `arn:aws:s3:::<bucket>/<prefix>/*` |
 | `evidenceWrite` | `s3:PutObject` (conditional create) | `arn:aws:s3:::<bucket>/logweir/*` |
 | `evidenceRead` | `s3:GetObject` | `arn:aws:s3:::<bucket>/logweir/*` |
 | write probe (opt-in; run as the `evidenceWrite` grant, already inside its `logweir/*`) | `s3:PutObject` | `arn:aws:s3:::<bucket>/logweir/readiness/*` |
@@ -533,59 +540,50 @@ has the method; MinIO's action names are S3's):
   `ControllerIdentityNotAllowlisted`). The `lwc-ev-<20 hex>` Job that reads
   evidence is in [kubernetes.md](kubernetes.md#evidence-fetch-how-a-pod-only-grant-is-read).
 
-### 4. Runner namespace prerequisites: Helm-managed or low-level manifest
+### 4. The runner account
 
-On the Helm path `identity.authorizedRunnerNamespaces` manages the runner
-account, the signer copy and the NetworkPolicies; never apply the files below
-over them. Only for a namespace the chart does not manage, with
-`identity.enabled=false` (the low-level path), apply the account and provision
-the signer yourself:
-
-```bash
-kubectl --context docker-desktop -n <namespace> \
-  apply -f config/samples/backup-runner-serviceaccount.yaml
-```
-
-Every runner Job names `logweir-runner`, granted no verb and given no token (a
-PodSpec naming none would get `default`).
-For the low-level path, apply it once per namespace that will run jobs. Retention
-enforcement also needs `logweir-retention` (`retention.enabled`, or
+The chart renders `logweir-runner` (granted no verb, given no token) and the
+NetworkPolicies in the release namespace, where every runner Job runs; every
+Job names that account. Only an install with `identity.enabled=false`
+(the low-level path) that removed the chart's account applies it by hand, once:
+`kubectl --context docker-desktop -n <release-ns> apply -f config/samples/backup-runner-serviceaccount.yaml`.
+Retention enforcement also needs `logweir-retention` (`retention.enabled`, or
 `config/samples/retention-serviceaccount.yaml`); without it the Job's pod is
 never admitted and the policy cannot say why.
 
-### 5. Binding the five human roles
+### 5. Roles: the console for people, `kubectl` for administrators
 
-The chart ships `logweir-viewer`, `logweir-operator`, `logweir-approver`,
-`logweir-trust-admin` and `logweir-retention-admin` **unbound**:
+People get roles in the console, per workspace
+(`api.console.roles.bindings[].workspace`, *5e*). Kubernetes RBAC cannot see
+workspaces, so the chart ships only two `kubectl` roles, **unbound**:
 
 ```bash
-kubectl --context docker-desktop create rolebinding logweir-operator \
-  --clusterrole=logweir-operator --user=<user> -n <namespace>
-kubectl --context docker-desktop create rolebinding logweir-approver \
-  --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
+kubectl --context docker-desktop create rolebinding logweir-viewer \
+  --role=logweir-viewer --user=<someone> -n <release-ns>
 kubectl --context docker-desktop create clusterrolebinding logweir-trust-admin \
   --clusterrole=logweir-trust-admin --user=<security-owner>
-kubectl --context docker-desktop create rolebinding logweir-retention-admin \
-  --clusterrole=logweir-retention-admin --user=<storage-owner> -n <namespace>
 ```
 
 | Decision | Who |
 |---|---|
-| Install, upgrade, CRDs, controller scope, approval modes | the installation administrator, in Helm values |
-| Whose keys a namespace trusts | `logweir-trust-admin`: cluster-scoped, the only write verb on `trustpolicies`, no `delete` |
-| Connections, destinations, schedules, backups, restore requests | `logweir-operator` (console role Operator) |
-| Approving one restore | the requester (confirm), another person (two-person), or an approver with a key (strict) |
-| Whether archive objects are deleted | `logweir-retention-admin` (the only write verb on `retentionpolicies`, no `delete`), plus an administrator's approval of each plan digest |
+| Install, upgrade, CRDs, workspaces, approval modes | the installation administrator, in Helm values |
+| Whose keys the install trusts | `logweir-trust-admin`: cluster-scoped, the only write verb on `trustpolicies`, no `delete` |
+| Connections, destinations, schedules, backups, restore requests | console Operators, per workspace |
+| Approving one restore | the requester (confirm), another person (two-person), or an approver with a key (strict), per workspace |
+| Whether archive objects are deleted | an installation administrator with `kubectl` (`RetentionPolicy`, which the console cannot write), plus an administrator's approval of each plan digest |
 
-Bind them to **different** people: an operator who could edit trust could
-approve their own restore. `logweir-approver` is `create` on `approvals` and
-read on `preflights`, nothing else. `logweir-viewer` reads all thirteen kinds
-but no ConfigMap. Withdrawing trust is an edit ([keys.md](keys.md), *Replacing a
-`TrustPolicy` safely*), and turning enforcement off is `mode: Report`.
+`logweir-viewer` reads every namespaced kind in every workspace, and no Secret
+or ConfigMap. **There is no `kubectl` write role**: creating a Logweir object
+creates it in any workspace, and **whoever can read Secrets, create Pods or
+Jobs, or create a Secret in the release namespace holds every key** (the
+signing key, the console's keys), so give that only to the people you would
+make administrators of every workspace (Kubernetes' own `admin`). Withdrawing
+trust is an edit ([keys.md](keys.md), *Replacing a `TrustPolicy` safely*), and
+turning enforcement off is `mode: Report`.
 
 ### 5d. The console/API principal
 
-`api.enabled` renders `<release>-api`, bound in `api.namespaces`. The API
+`api.enabled` renders `<release>-api`, a Role bound in the release namespace. The API
 authenticates every request and narrows each actor itself, through one sealed
 adapter (`crates/logweir-api/src/kube.rs`):
 
@@ -632,7 +630,7 @@ a `CrashLoopBackOff`, exit 2, naming the field; `shared` binds the Pod IP and
 has `/healthz` and `/readyz`), and confirms as
 `urn:logweir:local-admin#admin`; it cannot do two-person. **`create
 pods/portforward` in this namespace is equivalent to full console administrator
-authority over every bound namespace.** The local port must be `8484`, which
+authority over every workspace.** The local port must be `8484`, which
 the rendered `publicOrigin` carries:
 
 ```console
@@ -649,28 +647,25 @@ $ open http://127.0.0.1:8484/ui/
 `charts/logweir/examples/console-shared.values.yaml` is the whole shape: the
 OIDC issuer and client (`api.console.oidc.*`, the client secret's Secret key
 `clientSecret`), an exact `https://` `publicBaseUrl`, an Ingress with a TLS
-Secret, and `api.console.roles.bindings` (`role`, `namespace`, `groups`). It
-needs `controller.watchNamespaces` without the release namespace, so the
-controller cannot start a Job that mounts the console's keys (residual O1):
-move objects out of the release namespace, prepare each namespace as in step 4,
-and upgrade with the list (`[]` rolls back). With an Ingress set
+Secret, and `api.console.roles.bindings` (`role`, `workspace`, `groups`; each
+workspace in `workspaces`). With an Ingress set
 `trustedProxyService` (preferred) or `trustedProxyCidrs` (the ingress pods'
 range, at most `/16`), or `trustedProxy: none` by name, and
-`requireTrustedProxy: true`. Disable the console before emptying the list.
+`requireTrustedProxy: true`.
 [The chart reference](../charts/logweir/README.md) lists every render-time
 refusal; a refused render changes nothing:
 
 | refusal (the render names it) | fix |
 |---|---|
-| `api.console.mode=shared requires controller.watchNamespaces` | list the execution namespaces |
-| `controller.watchNamespaces includes the release namespace` | move Backups/Restores out of it and drop it |
+| `<value> is removed (OD-23 …)` | remove `kubernetes.namespace`, `kubernetes.connectionsNamespace`, `controller.watchNamespaces`, `identity.authorizedRunnerNamespaces`, `api.namespaces`; rename `approvalPolicy.namespaces` and the `…PerNamespace` caps as the message says |
+| `api.console.roles.bindings for role … names a namespace` | rename the binding's `namespace` to `workspace` |
+| `api.console.roles.bindings names workspace … which is not in workspaces` | add the workspace, or fix the name |
 | `ui.* is withdrawn` | remove the `ui` block (release-notes item 75) |
-| `api.console.roles.bindings names namespace … which is not in controller.watchNamespaces` | add the namespace, or remove the binding |
 | `api.console.trustedProxyCidrs names … wider than /16` (only with `requireTrustedProxy`) | narrow it to the ingress controller's own pod range |
 
 **Roles come from the ID token's `groups` claim alone** (scopes `openid profile
 email groups`; `email` names a requester to an approver only when the provider
-marks it verified, `email_verified: true`, and is never an authorization input). A user with no bound group sees no namespace (`404`).
+marks it verified, `email_verified: true`, and is never an authorization input). A user with no bound group sees no workspace (`404`).
 A provider that refuses one of those scopes takes `api.console.oidc.scopes`
 (a list that must hold `openid`, for example `[openid, profile, groups]`);
 `api.console.oidc.displayNameClaim: name` shows a requester's name, marked
@@ -707,7 +702,7 @@ install` with Helm 3.19+ or 4.x, a console, the managed identity and
 the console key, creates ONE default `TrustPolicy`
 (`identity.installationTrust.policyName`, default `logweir-installation`) with
 exactly the signer (`EvidenceSigning`) and the console key
-(`ConsoleConfirmation`), and marks the install so every namespace without its
+(`ConsoleConfirmation`), and marks the install so every workspace without its
 own policy is **confirm**. A trust administrator edits the target clusters
 later: `kubectl patch trustpolicy logweir-installation --type merge -p
 '{"spec":{"allowedTargetClusterIds":["<cluster id>"]}}'`.
@@ -738,11 +733,11 @@ kubectl --context <ctx> delete clusterrolebinding,clusterrole <release>-identity
 kubectl --context <ctx> get clusterrolebinding <release>-identity-trust   # NotFound
 ```
 
-**Choosing a mode.** `approvalPolicy.default: strict` keeps unbound namespaces
+**Choosing a mode.** `approvalPolicy.default: strict` keeps unbound workspaces
 on `legacy-governed-v1`; `approvalPolicy.default: confirm` (with
 `allowOrdinaryConfirmation: true`) makes them confirm. `approvalPolicy.policies`
-(`mode: confirm`, `two-person` or `strict`) and `approvalPolicy.namespaces` bind
-namespaces, and an explicit binding wins
+(`mode: confirm`, `two-person` or `strict`) and `approvalPolicy.workspaces` bind
+workspaces, and an explicit binding wins
 (`charts/logweir/examples/approval-policy.values.yaml`). **Two-person** needs
 the shared console:
 
@@ -752,14 +747,14 @@ approvalPolicy:
     - name: prod-pair
       mode: two-person
       maxAgeSeconds: 3600      # how long a request waits for its approver
-  namespaces:
-    prod: prod-pair
+  workspaces:
+    prd: prod-pair
 ```
 
 Bind the requester Operator and the approver **Approver**
 (`api.console.roles.bindings`; an Administrator is not an Approver unless bound
 as one); nobody approves their own request, and it cannot be the default. Whoever controls the console, its key or the identity provider
-can produce both halves (SECURITY.md); bind such a namespace `strict`. For
+can produce both halves (SECURITY.md); bind such a workspace `strict`. For
 **strict**, put each approver's `GovernedApproval` key, `principal.id` = their
 `<issuer>#<subject>`, on the governing policy (`docs/keys.md`, *Key usage
 separation*).
@@ -811,9 +806,12 @@ refused at render.
 Only after the preflight exits 0:
 
 ```bash
-kubectl --context docker-desktop -n <namespace> apply -f config/samples/kafkacluster.yaml
-kubectl --context docker-desktop -n <namespace> apply -f config/samples/backupschedule.yaml
+kubectl --context docker-desktop -n <release-ns> apply -f config/samples/kafkacluster.yaml
+kubectl --context docker-desktop -n <release-ns> apply -f config/samples/backupschedule.yaml
 ```
+
+Both samples carry `logweir.dev/workspace: default`; set the workspace they
+belong to before applying them.
 
 NetworkPolicy enforcement is CNI-specific, and Docker Desktop does not enforce
 it. Connected Helm discovers `kubernetes.default`'s addresses; offline rendering
@@ -1039,15 +1037,32 @@ in your secret store:
 
 ## Upgrade CRDs before upgrading the controller
 
-Read [release-notes.md](release-notes.md) first; it lists each release's
+**0.4.x to 0.5.0 has no in-place upgrade** (OD-23). Export trust as in
+*Recover onto a clean installation with the kit*, keep the bucket, `helm
+uninstall` the old release (one install per cluster), **apply the 0.5.0
+chart's CRDs server-side** (the first command of the block below, then its
+wait loop), install 0.5.0 into one namespace with `workspaces`, import trust,
+and then in each workspace add connections, destinations and schedules and
+connect a catalog to see the old points. Delete the old namespaces when done.
+Every archive stays readable and verifiable: nothing in the bucket names a
+namespace.
+
+**Why the CRDs go first on a fresh install too:** `helm uninstall` leaves the
+CRDs, and `helm install` creates a CRD from `crds/` only when none exists, so
+on a cluster that held 0.4.x it keeps the OLD ones without a word. The API
+server then prunes every field 0.5.0 added (`KafkaCluster.spec.schemaRegistry`,
+`Restore.status.interruption`). On an empty cluster the same apply simply
+creates them.
+
+Within a release line, read [release-notes.md](release-notes.md) first; it lists each release's
 required actions. Back up the identity, apply the new CRDs, wait for all
-thirteen, then upgrade (controller and runner together, then the console):
+fourteen, then upgrade (controller and runner together, then the console):
 
 ```bash
 kubectl --context docker-desktop apply --server-side --force-conflicts -f charts/logweir/crds/
 for crd in approvals backupdestinations backups backupschedules kafkaclusters \
            preflights protectionpolicies recoverycatalogs \
-           restores retentionpolicies topicdiscoveries trustpolicies trustrosters; do
+           restores retentionpolicies switchovers topicdiscoveries trustpolicies trustrosters; do
   kubectl --context docker-desktop wait --for=condition=Established \
     "crd/${crd}.logweir.dev" --timeout=60s
 done
@@ -1072,7 +1087,7 @@ the endpoint, then `--apply`), and resume
 draining restores and setting every `RetentionPolicy` to `Report`
 ([kubernetes.md](kubernetes.md#rolling-back)). Before rolling back past
 PROD-16.1 or PROD-16.2, remove `approvalPolicy.default` and any two-person
-policy, which older binaries refuse at start; unbound namespaces are then
+policy, which older binaries refuse at start; unbound workspaces are then
 `legacy-governed-v1`, pending confirmations are refused
 `ApprovalPolicyMismatch`, and the policy, keys and ConfigMaps are retained.
 
@@ -1175,7 +1190,7 @@ kubectl --context docker-desktop delete -f charts/logweir/crds/
 The four cleanup scopes are the control plane, scratch topics, archive objects
 and evidence objects. Uninstalling removes only
 that first thing: the release's RBAC, Deployments, runner ServiceAccounts and
-NetworkPolicies go, and the identity, its copies and the marker stay. Deleting
+NetworkPolicies go, and the identity and the marker stay. Deleting
 the CRDs deletes every custom resource and the Jobs and ConfigMaps they own, the
 trust anchors included, so export what you need first. The rest goes only on purpose:
 
@@ -1183,8 +1198,7 @@ trust anchors included, so export what you need first. The rest goes only on pur
 kafka-topics.sh --bootstrap-server <broker> --delete --topic 'logweir-scratch-<name>'
 aws s3 rm 's3://kafka-backups/logweir/<backup_id>/' --recursive    # archive objects
 aws s3 rm 's3://logweir-evidence/<prefix>/' --recursive            # evidence objects
-kubectl --context docker-desktop delete rolebinding logweir-viewer logweir-operator logweir-approver -n <namespace>
-kubectl --context docker-desktop -n <namespace> delete serviceaccount logweir-runner
+kubectl --context docker-desktop delete rolebinding logweir-viewer -n <release-ns>
 ```
 
 ### Keep the demo archive across an uninstall
@@ -1228,8 +1242,8 @@ installation's store (*Recover onto a clean installation with the kit*).
 | §2, step 2 | [2. The cluster-scoped `TrustRoster`](#2-the-cluster-scoped-trustroster-whose-name-is-fixed) |
 | §3, step 3 | [3. The four current Secrets](#3-the-four-current-secrets) |
 | §3.11 | [3.11 Object-store permissions](#311-object-store-permissions-per-destination-role) |
-| §4, step 4 | [4. Runner namespace prerequisites](#4-runner-namespace-prerequisites-helm-managed-or-low-level-manifest) |
-| §5 | [5. Binding the five human roles](#5-binding-the-five-human-roles) |
+| §4, step 4 | [4. The runner account](#4-the-runner-account) |
+| §5 | [5. Roles](#5-roles-the-console-for-people-kubectl-for-administrators) |
 | §5a, §5b, §5c | [5a](#5a-the-installation-policy-configmap), [5b](#5b-fence-the-consoles-create-secrets-kubernetes-130), [5c](#5c-notification-sinks) |
 | §5d, §5e, §5f | [5d](#5d-the-consoleapi-principal), [5e](#5e-running-the-console-in-the-cluster-apiconsoleenabled), [5f](#5f-approval-modes-confirm-two-person-strict-approvalpolicy) |
 | path (a), (b), (c), (d) | [Choose an image and installation path](#choose-an-image-and-installation-path) |

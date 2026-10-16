@@ -109,6 +109,7 @@ fn receipt_with(entry: &TopicSchemaDependency, records: u64) -> BackupReceipt {
         generations: None,
         consumer_positions: None,
         source_watermarks: None,
+        schema_registry: None,
     }
 }
 

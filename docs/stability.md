@@ -137,7 +137,7 @@ of its format's Versions table:
 ## The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the one checked-in schema the rule
-above does **not** cover. `info.version` is `1.0.0-alpha.3`. Its consumers are
+above does **not** cover. `info.version` is `1.0.0-alpha.4`. Its consumers are
 the console image and its typed client (PLAT-18.1); the binary is
 `publish = false`, and no client outside this repository is supported, so the
 console and the API ship and upgrade together. The owner decided on 2026-10-07
@@ -168,6 +168,15 @@ is still pre-release, so they move only the pre-release number, from
 
 [release-notes.md](release-notes.md) item 86 lists every change, one line each.
 
+`-alpha.4` (OD-23) is breaking again, so it moves the pre-release number only:
+- **breaking:** every product route moves from `/api/v1/namespaces/{ns}/…` to
+  `/api/v1/workspaces/{ws}/…`, and `GET /api/v1/namespaces` is
+  `GET /api/v1/workspaces`;
+- **breaking:** the session lists `workspaces[]`, and the problem code
+  `namespace_forbidden` is `workspace_forbidden`;
+- added: `POST …/restores/{name}/cancel` and `/cleanup`, and a restore's
+  `interruption` (PROD-07.2).
+
 ## The CLI, and what is not a contract
 
 - **CLI flags and exit codes are stable within a major.** A given Logweir major
@@ -179,6 +188,45 @@ is still pre-release, so they move only the pre-release number, from
   `logweir`) are **not** a stable API before 1.0. Only the signed document
   formats and the `logweir` CLI's flags and exit codes are covered by the
   promises above; internal crate APIs may change in any release before 1.0.
+
+## One namespace per install (OD-23): a fresh install, not an upgrade
+
+0.5.0 installs into ONE namespace and groups its objects by `workspaces`
+([kubernetes.md, *Workspaces*](kubernetes.md#workspaces)). This is a breaking
+change, made pre-1.0 and with no in-place upgrade from 0.4.x: install afresh,
+keep the bucket, import trust and connect a catalog in each workspace
+([install.md](install.md#upgrade-crds-before-upgrading-the-controller)). Apply
+the chart's CRDs server-side before `helm install`
+(`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`):
+`helm uninstall` leaves the old CRDs and `helm install` does not replace them,
+so without it the API server prunes the fields 0.5.0 added.
+
+- **Chart:** `kubernetes.namespace`, `kubernetes.connectionsNamespace`,
+  `controller.watchNamespaces`, `identity.authorizedRunnerNamespaces` and
+  `api.namespaces` are removed; `approvalPolicy.namespaces`,
+  `api.console.roles.bindings[].namespace` and the four `…PerNamespace` caps
+  are renamed per workspace. Each is refused at render by name. The
+  `kubectl` write roles `logweir-operator`, `logweir-approver` and
+  `logweir-retention-admin` are gone.
+- **Controller:** `LOGWEIR_WATCH_NAMESPACES` is gone;
+  `LOGWEIR_INSTALLATION_NAMESPACE` (the release namespace, which every watch
+  and Job uses) and `LOGWEIR_WORKSPACES` (the comma list) are required, and a
+  missing or malformed value refuses to start. An object without a listed
+  `logweir.dev/workspace` label is `WorkspaceUnknown`; a reference into another
+  workspace, directly or through what a referent names, is `WorkspaceMismatch`.
+  The installation policy's caps are `…PerWorkspace`, and the approval-policy
+  document binds `workspaces:`. The controller's Role gains `get` on `secrets`,
+  for the label of each Secret an object names; it reads no Secret's data.
+- **Runner:** the restore Job's contract gains
+  `LOGWEIR_EXECUTION_SUBJECT_WORKSPACE`, and `logweir switchover run` gains
+  `--workspace`. `logweir identity distribute` is removed.
+- **API:** `/api/v1/namespaces/{ns}/…` is `/api/v1/workspaces/{ws}/…`, with a
+  new OpenAPI pre-release ([api.md](api.md)).
+- **Signed formats:** the authorization document gains `subject.workspace`, one
+  MINOR step: an older reader refuses the unknown field (the safer verdict), and
+  this build refuses a document without it. Scorecards, receipts, catalog
+  points, switchover records and the bucket layout are unchanged, so every
+  archive made under the old layout stays readable, verifiable and importable.
 
 ## Mixed versions
 
@@ -569,19 +617,31 @@ fails when that changes.
 
 ### A crashed restore is not resumable in v0.1
 
-The rendered `restore.checkpoint_state` path is **pod-local and is never
-uploaded**, so a restore that dies mid-run re-runs from phase 0. Since engine
-build 3 the engine also saves it inside a topic every
-`checkpoint_interval_secs`; it is still per run and never read.
+Logweir renders no engine checkpoint (`restore.checkpoint_state`), so the
+engine keeps none and a restore that dies mid-run is never resumed: a new run
+starts from phase 0.
 
 ### An archive holding transaction markers is refused unless the plan allows it
 
-The pinned engine captures with `READ_UNCOMMITTED` and restores every archived
-record non-transactionally, so a restored transactional topic holds aborted
-records, records of transactions open at backup time, and one record per commit
-or abort marker, all visible to every consumer
+Since engine build 5 (PROD-00.3a, patch 0004) a backup captures **committed
+records only**: the engine fetches with `READ_COMMITTED`, ends each partition at
+its last stable offset, skips the commit and abort markers and drops the
+records of aborted transactions. A transaction still open at backup time is
+not captured (the broker holds the last stable offset back until it ends, at
+most `transaction.max.timeout.ms`, 15 minutes by default); the next backup
+captures it if it commits. Such an archive holds no marker, and a restore of it
+needs no override; the restore writes the committed records, without
+transactions (`e2e/tests/record_semantics.rs::transactional_topic_committed_input_versus_restored_output`).
+A source whose named partitions hold only aborted records gives an archive
+with no segment, which `logweir backup run` refuses exit 1 (it cannot prove the
+source empty).
+
+An archive written by an earlier engine build captured with
+`READ_UNCOMMITTED`, so a restore of it holds aborted records, records of
+transactions open at backup time, and one record per commit or abort marker,
+all visible to every consumer
 ([decision record §2.1](to-do/decisions/PROD-01.1-record-semantics.md#21-transactions)).
-Logweir does not claim transactional recovery. Since PROD-01.1a a restore, before
+Since PROD-01.1a a restore, before
 it creates anything, counts the records in its window's segments and every
 later segment that are shaped like a marker (key `00 00 00 00` or
 `00 00 00 01`, a 6-byte value starting `00 00`, no header but
@@ -656,25 +716,32 @@ clocks**, not by the broker's append time, which needs an archive that keeps it
 is listed under `source.time_basis.not_recorded`, never read as `CreateTime`
 ([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)).
 
-### A repeated header key keeps one copy
+### Repeated header keys are kept
 
-The pinned engine holds a record's headers as a map, so a header key repeated
-in one record is archived and restored once — at the first copy's position,
-with the last copy's value — and the drill does not detect it. A record that
-already carried `x-original-offset` keeps only the backup's own, and a drill
-that samples such a record fails
-(`e2e/tests/record_semantics.rs::keys_nulls_tombstones_and_duplicate_headers`;
-[decision record §2.4](to-do/decisions/PROD-01.1-record-semantics.md#24-keys-nulls-tombstones-and-headers)).
+Since engine build 5 (PROD-00.3e, patch 0006) every header of a record is
+archived and restored in order, each copy of a repeated key included, and a
+record that already carried `x-original-offset` keeps it beside the backup's
+own; verification keys by the last
+(`e2e/tests/record_semantics.rs::keys_nulls_tombstones_and_duplicate_headers`).
+An archive written by an earlier build holds a repeated key once, at the first
+copy's position with the last copy's value
+([decision record §2.4](to-do/decisions/PROD-01.1-record-semantics.md#24-keys-nulls-tombstones-and-headers)).
 
 ### A broker outage during a restore can leave a partial target with duplicates
 
-The engine resends a produce whose acknowledgement it did not receive, and does
-not produce idempotently, so a lost acknowledgement duplicates that batch. An
+The engine resends a produce whose acknowledgement it did not receive. Since
+engine build 5 (PROD-00.3d, patch 0005) a restore produces as one idempotent
+producer, so the resend carries the batch's sequence number and the broker
+discards the copy instead of appending it again
+(`e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`,
+on the `faultproxy` profile). The target principal needs `Write` on the topic,
+which implies `IdempotentWrite` since Kafka 3.0. A restore's producer is new
+each run, so a second execution into the same target still duplicates; phase 0
+refuses an existing target for that reason. An
 outage long enough for the broker to re-register can end the restore early,
 exit 1 with no scorecard, leaving the partial target; a stall past Logweir's
 20-second client timeout can fail a restore whose target is complete
-(`e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`;
-[decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
+([decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
 A duplicated target that reaches phase 7 fails: complete coverage counts each
 repeated `x-original-offset`, and the sampled check fails a duplicate in the
 head it reads.
@@ -721,8 +788,8 @@ the timings measured at them are one machine's and are **not** budgets.
 | Catalog point page (`…/points`) | 200 rows; the verdict join reads at most 2,000 `Backup`s (4 × 500) | `backupVerdictsIncomplete: Truncated`, and the console offers no restore from that page |
 | API list page | 200 objects | follow `nextCursor` |
 | Console lists (history, backups, runs) | 25 pages × 200 = 5,000 rows per kind | the page refuses and says how many it read, rather than showing a prefix as the whole; prune history or use `kubectl` |
-| Manual runs holding a runner slot (P10) | 4 manual `Backup`s and 2 manual `Restore`s per namespace (`runs.*`); scheduled runs not counted | the run waits `Queued` / `ConcurrencyLimited` with nothing created and starts in creation order ([manual runs](kubernetes.md#concurrency-and-manual-runs)) |
-| Manual runs started by one person (P10) | 10 "Back up now" and 5 restores per namespace per minute (`api.console.rateLimits.*`), per console process | `429 rate_limited` with `Retry-After`; nothing is created ([api.md](api.md) *Rate limits*) |
+| Manual runs holding a runner slot (P10) | 4 manual `Backup`s and 2 manual `Restore`s per workspace (`runs.*`); scheduled runs not counted | the run waits `Queued` / `ConcurrencyLimited` with nothing created and starts in creation order ([manual runs](kubernetes.md#concurrency-and-manual-runs)) |
+| Manual runs started by one person (P10) | 10 "Back up now" and 5 restores per person, per workspace, per minute (`api.console.rateLimits.*`), per console process | `429 rate_limited` with `Retry-After`; nothing is created ([api.md](api.md) *Rate limits*) |
 
 **What was measured.** Offline and in process (2026-09-23, release builds on
 an Apple M4), with harnesses that re-run:
@@ -841,7 +908,7 @@ it: it turns the controller's authority to CREATE A JOB into a deletion
 capability **in the namespace that holds the retention credential**, the same
 residual class as the signing oracle. The hard boundary is that credential's own
 scope — the policy's prefix, never `logweir/`. Arming it takes four things held
-by different places: `logweir-retention-admin` setting `mode: Enforce`, the
+by different places: an installation administrator setting `mode: Enforce` with `kubectl` (the console cannot write a `RetentionPolicy`), the
 `logweir-retention` ServiceAccount (chart value `retention.enabled`, no
 Kubernetes verb), the prefix-scoped credential, and an administrator's approval
 of the current `planSha256` ([enforcing](kubernetes.md#enforcing)).
@@ -910,10 +977,13 @@ and G-PITR's fixture keeps its producers' timestamps. MSK stays
   a CA bundle: `debian:bookworm-slim` with `ca-certificates` and `libssl3`,
   never a musl or distroless base.
 - **Supported engine pin.** The images ship **Logweir's build of OSO 0.23.3**,
-  `kafka-backup 0.23.3+logweir.4` (PROD-00.2, OD-3; build 2 adds FX-21's patch
+  `kafka-backup 0.23.3+logweir.5` (PROD-00.2, OD-3; build 2 adds FX-21's patch
   0002, build 3 PROD-00.3g's patch 0003: the restore checkpoint is saved
   inside a topic when its interval is due, and hashed without the run's
-  paths; build 4 moves patch 0001's rustls to 0.23.46): OSO's 2026-10-07
+  paths; build 4 moves patch 0001's rustls to 0.23.46; build 5 adds OD-23's
+  patches 0004 to 0007: a backup captures committed records only, a restore
+  produces idempotently, repeated header keys survive both, and
+  `restore.rate_limit_bytes_per_sec` limits the whole restore): OSO's 2026-10-07
   release source (tag commit `afb160e7`) plus Logweir's patch folder, for
   linux/amd64 and linux/arm64 (`third_party/kafka-backup-build.env`).
   `doctor` accepts exactly that version, as a whole token, and names OSO's own 0.23.3 binary (image digest
@@ -947,13 +1017,14 @@ data-plane client; `--approver-key-ids` pins which approver key ids a run
 accepts, refusing anything else with exit 3 before phase 0 dials; and
 `subject_kind` is inside the signed bytes so an approval cannot be retargeted
 at another kind of object. **None of that is a claim about a cluster-admin.**
-Anyone holding `create pods` in the runner's namespace can mount the signing
-Secret and sign whatever they like with no Logweir crate involved
+Anyone holding `create pods` in the install's namespace can mount the signing
+Secret (and, since OD-23 puts them in the same namespace, the console's keys)
+and sign whatever they like with no Logweir crate involved
 (`scripts/check-one-signer.sh`'s header says the same), and anyone who can
 create pods or replace the Job template can replace the execution contract
-wholesale. The boundary this product draws is between *namespace users* and
-*the operator's own trust roster*, not between an adopter and their own cluster
-administrator.
+wholesale. The boundary this product draws is between *console users*, whom workspaces
+separate, and *the operator's own trust roster*, not between an adopter and
+the administrators of its namespace or cluster.
 
 **The Kubernetes client pair, and the toolchain it was resolved against.**
 `crates/weirkeeper` is built against **`kube 0.99.0`** (`default-features =
@@ -983,13 +1054,13 @@ The separate **Never** list records product boundaries, not scheduled work.
 | 4 | **`OsoCliEngine::validation_run`** | Not implemented: the engine's own validation run is never executed (v1 removed phase 7's unused call, release-notes item 74), and `engine_subreport` is `null` in every document tag 1 produces. The subcommand is on the allowlist as a ceiling, not as a description. | spec §13; `docs/platform/find-engine.md` |
 | 5 | **Retention deletion — delivered, opt-in** | ADR 0008 **Amendment H** took the amendment deletion needed, and the worker exists: a `RetentionPolicy` in `mode: Enforce` runs the separately linked `logweir-retention` binary under its own delete-capable credential, only against an administrator-approved plan digest, and writes create-only (unsigned) tombstones and a record under `logweir/retention/`. `mode: Report` is the default and deletes nothing; a schedule's `spec.retention` is withdrawn and ignored; the controller, `logweir-store`, `logweir` and `logweir-api` link no delete path (`scripts/check-no-archive-write.sh` check 3). Versioned and Object Lock buckets are refused (`VersionedBucket`). | [kubernetes.md](kubernetes.md#retention); [release-notes.md](release-notes.md) |
 | 6 | **Byte-faithful production restores** (`strip_offset_headers: true` for `mode: newTopic`) | Gated on phase 7 gaining a **second reconciliation key**: today the injected header is the only key phase 7 has, so stripping it removes the only thing that makes a per-record claim checkable. | spec §6.1, §13 |
-| 7 | **Multi-tenancy beyond namespace RBAC** | The isolation tag 1 offers is the API server's own: namespaces and RBAC. There is no tenant object, no per-tenant quota and no cross-namespace policy. | spec §13 |
+| 7 | **Multi-tenancy beyond namespace RBAC** | One install serves one team (OD-11). Its workspaces separate console users, approval modes and run pools, and are invisible to Kubernetes RBAC: whoever can write the namespace writes every workspace. There is no tenant object and no per-workspace quota. | spec §13 |
 | 8 | **Delegated rule-based schedule approval** | Every approval in tag 1 is a signed document over exact bytes. A rule that approves on a schedule's behalf is a different trust model and gets its own design. | `design-operator.md:663-670` |
 | 9 | **A Helm chart — delivered** | The chart is the install. `just chart-check` verifies rendered manifests; `just helm-demo` exercises a cluster installation. This item is no longer deferred. | [Chart guide](../charts/logweir/README.md) |
 | 10 | **KMS / PKCS#11 signing** | `sign_detached` takes a concrete `&SigningKey` with **no trait seam**, so an external signer is a refactor and not a configuration option. | spec §13 |
 | 11 | **Key generation and rotation — partly delivered** | The chart's bootstrap Job now generates and retains the installation signing key (PLAT-02.1), and a `TrustPolicy` carries a key lifecycle so a rotation is an overlap rather than a replacement (PLAT-19.1). Still not shipped: an in-place runner cutover to a new signing key (`identity.activeSigningSecretName` and `logweir identity rotate` do not exist), and approver keys remain operator-generated. | [keys.md](keys.md), *The supported procedure* |
 | 12 | **A PVC for the runner pod** | The runner streams and writes to an emptyDir; a large restore is bounded by that, and a persistent volume would be a new lifecycle to own. | spec §13 |
-| 13 | **Subprocess timeout, cancellation and SIGTERM handling** | The engine subprocess runs to completion. A Job deleted mid-run leaves the child to the kubelet, and nothing in tag 1 propagates a cancel. | spec §13 |
+| 13 | **Subprocess timeout, cancellation and SIGTERM handling — delivered (PROD-07.2)** | A cancel suspends the run Job; the runner forwards SIGTERM to the engine, SIGKILLs it after 10 s and signs nothing, and on Linux the engine dies with the runner (`PR_SET_PDEATHSIG`). A run stopped after it created its targets is `Interrupted`, reconciled and cleaned up on request; nothing resumes. No timeout on the engine other than the Job's deadline. | [Kubernetes guide](kubernetes.md#cancel-and-an-interrupted-restore) |
 | 14 | **A configurable Kafka client timeout** | It is a **20 s constant**, not a setting. | `crates/logweir-kafka/src/rdkafka_reader.rs:16` |
 | 15 | **The kind + Calico NetworkPolicy probe** | The shipped NetworkPolicy is labelled `[UNVERIFIED]` in the manifest itself: docker-desktop runs no CNI that enforces NetworkPolicy, so a deny is never observed there and the probe that would make the claim real stays backlogged. | spec §9, §13 |
 | 16 | **Stage-2 Tasks 10 and 17-24** | Carried forward as a block, in the backlog they were written in. | `docs/platform/04-stage2-backlog.md` |
@@ -1001,7 +1072,7 @@ These are not scheduled. They are refused.
 | # | Entry | Why it is a never, not a later |
 |---|---|---|
 | 1 | **Restore-in-place into a live topic** | The product's whole safety argument is that a restore writes into topics that did not exist. Writing into a live topic removes the property that makes an unattended restore defensible at all. **Narrowed by the owner's decision [OD-2](to-do/product-expansion.md#owner-decisions) (2026-10-05) to exactly that: a LIVE topic.** A restore under the source's ORIGINAL topic name into a topic that does NOT exist is not this entry: it is PROD-15.1's one original-name path, behind its own approval subject (`originalName`), and it still only writes a topic it created itself, exclusively, after proving the name absent, the target another cluster or auto-creation disabled, and no declarative owner unless the owner path is chosen ([kubernetes.md](kubernetes.md#restoring-under-the-original-topic-names), "Restoring under the original topic names (PROD-15.1)"). A name that exists, in any mode, and an identity mapping in a scratch drill stay refused. |
-| 2 | **Confluent Schema Registry / Apicurio / RBAC-MDS / CSFLE** | Each is a separate product surface with its own trust model. Logweir moves records and reconciles bytes; it does not resolve schemas, evaluate a registry's RBAC, or hold field-level encryption keys. |
+| 2 | **RBAC-MDS and CSFLE; Schema Registry beyond backup, resolution and selective import** | Each is a separate product surface with its own trust model. Since [OD-23](to-do/product-expansion.md#owner-decisions) (2026-10-16) Logweir captures a Confluent-compatible registry's schemas with a backup and, before a restore creates any topic, imports the ones the restored records reference into the target registry keeping their IDs ([kubernetes.md](kubernetes.md), `KafkaCluster.spec.schemaRegistry`). It does not evaluate a registry's RBAC, hold field-level encryption keys, rewrite schema IDs or record bytes, or manage a registry's configuration (compatibility, modes, contexts); a registry that cannot keep IDs is refused, not mapped. |
 | 3 | **MSK ZK-to-KRaft migration, and the word "migration"** | Logweir is not a migration tool and the word is avoided on every surface, because a document that says "migration" is a document somebody will act on as though it were one. |
 | 4 | **Multi-cluster or fleet views, and the words** | One controller per cluster. There is no fleet object, no cross-cluster list and no aggregated view, and the vocabulary is kept out of the UI and the docs for the same reason as the previous row. |
 

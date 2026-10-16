@@ -24,7 +24,7 @@ to it verb for verb.
 * Trust writes are not here: `TrustPolicy` is `get`/`list` only, and trust is
   administered with `kubectl` under `logweir-trust-admin`. The read is
   cluster-wide by construction (the kind is cluster-scoped); the service shows
-  each actor only the namespaces it administers (`routes/trust.rs`).
+  it only to an administrator (`routes/trust.rs`).
 * `get` on `trustrosters/default` and no other name: a readiness verdict whose
   referent the service cannot read is reported `unverifiable`, never fresh.
   `TrustRoster` is not in `ClusterResource` (that would list every roster's
@@ -45,10 +45,16 @@ metadata:
 {{ . }}
 {{- end }}
 ---
+{{/*
+The namespaced half, a Role in the release namespace: the one namespace the
+console serves. Workspaces inside it are the console's own boundary
+(`KubeAdapter`), not Kubernetes'.
+*/}}
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
   labels:
     {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
@@ -81,13 +87,15 @@ rules:
       - topicdiscoveries
     verbs: ["create"]
   # `patch`: the merge patches `linkage.rs` pins (`backupschedules`
-  # suspension/policy, `backupdestinations` access) and `spec.cancelRequested`
-  # on the two `CancellableCheck` kinds. `Backup` and `Restore` have no cancel.
+  # suspension/policy, `backupdestinations` access), `spec.cancelRequested`
+  # on the two `CancellableCheck` kinds, and a Restore's cancel and clean-up
+  # annotations (PROD-07.2; its spec is sealed by CEL). `Backup` has no cancel.
   - apiGroups: ["logweir.dev"]
     resources:
       - backupdestinations
       - backupschedules
       - preflights
+      - restores
       - topicdiscoveries
     verbs: ["patch"]
   # PROD-04.2: a switchover is read and created through the API; never
@@ -179,30 +187,23 @@ subjects:
   - kind: ServiceAccount
     name: {{ $name }}
     namespace: {{ .Release.Namespace }}
-{{- range $ns := (include "logweir.api.namespaces" . | fromJsonArray) }}
 ---
-{{/*
-One RoleBinding per namespace, never a ClusterRoleBinding of the namespaced
-role: a defect in the console's own namespace check then reaches only the
-configured namespaces (`logweir.api.namespaces`).
-*/}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ $name }}
-  namespace: {{ $ns }}
+  namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "logweir.labels" $ | nindent 4 }}
+    {{- include "logweir.labels" . | nindent 4 }}
     app.kubernetes.io/component: api
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: {{ $name }}
 subjects:
   - kind: ServiceAccount
     name: {{ $name }}
-    namespace: {{ $.Release.Namespace }}
-{{- end }}
+    namespace: {{ .Release.Namespace }}
 {{- if include "logweir.freshInstallConfirm" . }}
 ---
 {{/*
@@ -246,7 +247,7 @@ subjects:
 {{- $svc := .Values.api.console.trustedProxyService }}
 ---
 {{/*
-The one read outside the product's namespaces: `list` on
+The one read outside the release namespace: `list` on
 `discovery.k8s.io/endpointslices` in the ingress controller's namespace, to
 trust the serving endpoints of `api.console.trustedProxyService`
 (`crates/logweir-api/src/trusted_proxy.rs`). EndpointSlice names are

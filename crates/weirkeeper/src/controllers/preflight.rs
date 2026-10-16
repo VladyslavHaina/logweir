@@ -5273,7 +5273,35 @@ fn connection_plan(c: &ResolvedConnection) -> ConnectionPlan {
             .as_ref()
             .map(|_| side.client_key_file_path()),
         principal: c.principal.clone(),
+        // PROD-03.1/03.2: the registry's URL and username, and the NAME of
+        // the variable its password is projected into.
+        schema_registry: c.schema_registry.as_ref().map(|r| {
+            logweir_core::check_contract::RegistryPlan {
+                url: r.url.clone(),
+                username: r.username.clone(),
+                password_env: r
+                    .password
+                    .as_ref()
+                    .map(|_| side.registry_password_env().to_string()),
+            }
+        }),
     }
+}
+
+/// The capability rows for `operation` against connection `c`: the
+/// registry rows (PROD-03.1/03.2) only when the connection names a registry.
+fn capability_checks_for_connection(
+    operation: CheckOperation,
+    skip: &[CheckId],
+    c: &ResolvedConnection,
+) -> Vec<CheckId> {
+    capability_checks(operation, skip)
+        .into_iter()
+        .filter(|id| {
+            c.schema_registry.is_some()
+                || !matches!(id, CheckId::RegistryReachable | CheckId::TargetSchemas)
+        })
+        .collect()
 }
 
 fn destination_plan(
@@ -5402,7 +5430,11 @@ pub fn build_job_shape(
                 evidence_write: evidence_write_grant.clone(),
                 evidence_read: evidence_read_grant.clone(),
                 skip_checks: skip.clone(),
-                capability_checks: capability_checks(CheckOperation::Backup, &skip),
+                capability_checks: capability_checks_for_connection(
+                    CheckOperation::Backup,
+                    &skip,
+                    c,
+                ),
             }))
         }
         PreflightOperation::SourceConnection => {
@@ -5412,7 +5444,11 @@ pub fn build_job_shape(
                 // FX-46: what the endpoint could be used for, so the test
                 // can say "usable as a source, not as a target". The request
                 // carries no skip list.
-                capability_checks: capability_checks(CheckOperation::SourceConnection, &[]),
+                capability_checks: capability_checks_for_connection(
+                    CheckOperation::SourceConnection,
+                    &[],
+                    c,
+                ),
             })
         }
         PreflightOperation::DestinationAccess => {
@@ -5480,7 +5516,11 @@ pub fn build_job_shape(
                 // second catalogue to drift from the runner's.
                 checks: Vec::new(),
                 skip_checks: skip.clone(),
-                capability_checks: capability_checks(CheckOperation::Restore, &skip),
+                capability_checks: capability_checks_for_connection(
+                    CheckOperation::Restore,
+                    &skip,
+                    c,
+                ),
             }))
         }
     };
@@ -6621,6 +6661,7 @@ fn owner_of(pf: &Preflight) -> Result<crate::job::RunnerOwner, ReconcileError> {
         uid: pf
             .uid()
             .ok_or_else(|| ReconcileError::NoUid(pf.name_any()))?,
+        workspace: crate::workspace::label_of(pf).map(str::to_string),
     })
 }
 
@@ -6917,10 +6958,10 @@ pub async fn reconcile_preflight(
         // afterwards could not be told apart from one about whatever the
         // objects became in between.
         let counts = limits::count(
-            &limits::check_jobs(client)
+            &limits::check_jobs(client, &namespace)
                 .await
                 .map_err(ReconcileError::Api)?,
-            &namespace,
+            crate::workspace::label_of(pf).unwrap_or_default(),
             inputs.cluster_uid.as_deref(),
         );
         if let limits::Admission::Queued(code) = limits::admit(
@@ -6939,7 +6980,7 @@ pub async fn reconcile_preflight(
                     message: format!(
                         "{} active check Job(s) in this namespace and {} across the \
                          installation; this check starts when a slot frees",
-                        counts.namespace, counts.total
+                        counts.workspace, counts.total
                     ),
                     binding: Some(recorded_binding),
                     ..StatusInput::default()
@@ -7475,6 +7516,11 @@ async fn reconcile(
     pf: Arc<Preflight>,
     ctx: Arc<ReconcilerContext>,
 ) -> Result<Action, ReconcileError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.context.client, pf.as_ref()).await? {
+        return Ok(action);
+    }
     // One clock read per pass: two reads could put a verdict and the expiry
     // that bounds it on either side of the same instant.
     reconcile_preflight(&pf, &ctx.context, &ctx.policy, Utc::now()).await
@@ -7506,24 +7552,16 @@ pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // One watch per watched namespace: `crate::scope` is the whole cluster
-    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
-    // then this reconciler runs once per namespace with an `Api::namespaced`
-    // watch, the only shape the scoped chart's RoleBindings permit.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(client.clone(), runner_image.clone(), namespace)
-    })
+    controller_in(client.clone(), runner_image.clone())
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<Preflight> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<Preflight> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let ctx = Arc::new(ReconcilerContext {
         context: Context {
             client,
@@ -7540,5 +7578,73 @@ fn controller_in(
             .run(reconcile, error_policy, ctx)
             .for_each(|_| std::future::ready(()))
             .await;
+    }
+}
+/// The objects a Preflight names, for the workspace gate (PROD-19.1).
+impl crate::workspace::Referrer for Preflight {
+    fn referents(&self) -> Vec<crate::workspace::Referent> {
+        let r = &self.spec.request;
+        let mut out = Vec::new();
+        if let Some(b) = &r.backup {
+            out.push(crate::workspace::Referent::Cluster(
+                crate::workspace::local(&b.source_ref),
+            ));
+            out.extend(
+                b.destination_ref
+                    .as_ref()
+                    .map(|d| crate::workspace::Referent::Destination(crate::workspace::local(d))),
+            );
+            out.extend(
+                b.schedule_ref
+                    .as_ref()
+                    .map(|d| crate::workspace::Referent::Schedule(crate::workspace::local(d))),
+            );
+            out.extend(crate::workspace::archive_secret(b.legacy_archive.as_ref()));
+        }
+        if let Some(x) = &r.restore {
+            out.extend(
+                x.restore_ref
+                    .as_ref()
+                    .map(|d| crate::workspace::Referent::Restore(d.name.clone())),
+            );
+            out.extend(
+                x.target_ref
+                    .as_ref()
+                    .map(|d| crate::workspace::Referent::Cluster(crate::workspace::local(d))),
+            );
+            out.extend(
+                [&x.source_destination_ref, &x.evidence_destination_ref]
+                    .into_iter()
+                    .flatten()
+                    .map(|d| crate::workspace::Referent::Destination(crate::workspace::local(d))),
+            );
+            out.extend(crate::workspace::archive_secret(
+                x.legacy_source_archive.as_ref(),
+            ));
+            out.extend(
+                x.recovery_point_ref
+                    .as_ref()
+                    .map(|d| crate::workspace::Referent::Backup(d.name.clone())),
+            );
+            out.extend(x.catalog_point_ref.as_ref().map(|d| {
+                crate::workspace::Referent::Catalog(crate::workspace::local(&d.catalog_ref))
+            }));
+        }
+        if let Some(d) = &r.destination_access {
+            out.push(crate::workspace::Referent::Destination(
+                crate::workspace::local(&d.destination_ref),
+            ));
+        }
+        if let Some(c) = &r.source_connection {
+            out.push(crate::workspace::Referent::Cluster(
+                crate::workspace::local(&c.connection_ref),
+            ));
+        }
+        if let Some(s) = &r.switchover {
+            out.push(crate::workspace::Referent::Restore(
+                s.restore_ref.name.clone(),
+            ));
+        }
+        out
     }
 }

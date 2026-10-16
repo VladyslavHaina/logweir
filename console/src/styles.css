@@ -296,7 +296,7 @@ body {
   font-size: var(--pf-t--global--font--size--lg);
   font-weight: var(--pf-t--global--font--weight--heading--bold);
 }
-.lw-ns-toggle__label {
+.lw-ws-toggle__label {
   color: var(--pf-t--global--text--color--subtle);
   margin-right: var(--pf-t--global--spacer--xs);
 }
@@ -330,7 +330,7 @@ body {
   margin-top: var(--pf-t--global--spacer--sm);
 }
 @media (max-width: 575px) {
-  .lw-ns-toggle__label,
+  .lw-ws-toggle__label,
   .lw-logo__word {
     display: none;
   }
@@ -463,7 +463,7 @@ body {
 .lw-breadcrumb {
   margin-bottom: var(--pf-t--global--spacer--sm);
 }
-/* The session gate's full pages: signed out, unavailable, no namespace. */
+/* The session gate's full pages: signed out, unavailable, no workspace. */
 .lw-gate {
   min-height: 100vh;
   display: flex;

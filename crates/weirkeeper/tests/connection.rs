@@ -1000,11 +1000,11 @@ fn legacy_objects_build_the_jobs_they_always_did() {
         )
         .expect("restore spec");
         assert_eq!(
-            redact_image(without_binding(
+            redact_image(without_subject_workspace(without_binding(
                 serde_json::to_value(job::build(&restore_spec)).expect("serialises"),
                 &file,
                 credentialed,
-            )),
+            ))),
             golden["restore"]["job"]["job"],
             "{file}: the restore Job differs"
         );
@@ -1016,6 +1016,23 @@ fn legacy_objects_build_the_jobs_they_always_did() {
         "five legacy shapes must be byte-identical (but for PROD-01.3's binding pair on a \
          credentialed connection) and two are the documented refusals"
     );
+}
+
+/// Remove the one variable PROD-19.1 adds to every restore Job,
+/// `LOGWEIR_EXECUTION_SUBJECT_WORKSPACE`, asserting first that it is there
+/// exactly once; everything else still compares with the golden.
+fn without_subject_workspace(mut job: Value) -> Value {
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .expect("the runner has an env list");
+    let name = logweir_core::execution_contract::SUBJECT_WORKSPACE_ENV;
+    assert_eq!(
+        env.iter().filter(|e| e["name"] == name).count(),
+        1,
+        "{name}"
+    );
+    env.retain(|e| e["name"] != name);
+    job
 }
 
 /// Remove the credential-binding pair from a built Job's runner env, asserting

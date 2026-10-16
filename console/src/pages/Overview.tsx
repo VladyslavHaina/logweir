@@ -1,4 +1,4 @@
-// The first page: is this namespace recoverable right now, and what needs you?
+// The first page: is this workspace recoverable right now, and what needs you?
 import { useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
@@ -47,9 +47,9 @@ import { useCatalogs, useNewestCatalogPoints } from "../api/backups";
 import { Prose } from "../components/Prose";
 import { GettingStarted } from "./GettingStarted";
 
-function BackUpNow({ ns, schedules }: { ns: string; schedules: Schedule[] }) {
+function BackUpNow({ ws, schedules }: { ws: string; schedules: Schedule[] }) {
   const [open, setOpen] = useState(false);
-  const backUp = useBackUpNow(ns);
+  const backUp = useBackUpNow(ws);
   const [toast, setToast] = useState<{ variant: "info" | "danger"; title: string; body: string } | null>(null);
   // A request with no answer may or may not have created the run: the next click for the
   // same schedule sends the same Idempotency-Key, so it names that run, never a second one.
@@ -149,7 +149,7 @@ function Stat({ title, value, detail, tone }: { title: string; value: string; de
 }
 
 /** Where the newest point came from, in words; "from protection policies" only when it did (DUI-3). */
-function NewestPointDetail({ ns, point, looked }: { ns: string; point: NewestPoint | undefined; looked: string[] }) {
+function NewestPointDetail({ ws, point, looked }: { ws: string; point: NewestPoint | undefined; looked: string[] }) {
   if (!point) {
     return <>No recovery point yet{looked.length ? `: looked at ${joinAnd(looked)}` : ""}.</>;
   }
@@ -165,7 +165,7 @@ function NewestPointDetail({ ns, point, looked }: { ns: string; point: NewestPoi
     return (
       <>
         Backup{" "}
-        <a href={`#/${ns}/backups/${point.backup.name}`} className="lw-break">
+        <a href={`#/${ws}/backups/${point.backup.name}`} className="lw-break">
           {point.backup.name}
         </a>
         , verified
@@ -174,7 +174,7 @@ function NewestPointDetail({ ns, point, looked }: { ns: string; point: NewestPoi
   }
   return (
     <>
-      A verified point in catalog <a href={`#/${ns}/catalog/${point.catalog}`}>{point.catalog}</a>
+      A verified point in catalog <a href={`#/${ws}/catalog/${point.catalog}`}>{point.catalog}</a>
     </>
   );
 }
@@ -266,12 +266,12 @@ function NeedsAttention({ items }: { items: Attention[] }) {
   );
 }
 
-function RunStrip({ ns, schedule, runs }: { ns: string; schedule: string; runs: Backup[] }) {
+function RunStrip({ ws, schedule, runs }: { ws: string; schedule: string; runs: Backup[] }) {
   const cells = strip(runs, schedule);
   return (
     <div className="lw-strip">
       <div className="lw-strip__name">
-        <Link to="/$ns/schedules/$name" params={{ ns, name: schedule }} search={{}} className="lw-break">
+        <Link to="/$ws/schedules/$name" params={{ ws, name: schedule }} search={{}} className="lw-break">
           <strong>{schedule}</strong>
         </Link>
         <span className="lw-subtle"> · {cells.length ? `last ${cells.length} ${cells.length === 1 ? "run" : "runs"}` : "no runs yet"}</span>
@@ -281,8 +281,8 @@ function RunStrip({ ns, schedule, runs }: { ns: string; schedule: string; runs: 
           {cells.map((c) => (
             <li key={c.backup.name}>
               <Link
-                to="/$ns/backups/$name"
-                params={{ ns, name: c.target.name }}
+                to="/$ws/backups/$name"
+                params={{ ws, name: c.target.name }}
                 className={`lw-strip__cell lw-strip__cell--${c.cls}`}
                 title={`${c.at}: ${c.word}`}
                 aria-label={`${c.at}, ${c.word}`}
@@ -295,7 +295,7 @@ function RunStrip({ ns, schedule, runs }: { ns: string; schedule: string; runs: 
   );
 }
 
-function Activity({ ns, backups, restores }: { ns: string; backups: Backup[]; restores: Restore[] }) {
+function Activity({ ws, backups, restores }: { ws: string; backups: Backup[]; restores: Restore[] }) {
   const rows = activity(backups, restores);
   if (rows.length === 0) {
     return (
@@ -310,7 +310,7 @@ function Activity({ ns, backups, restores }: { ns: string; backups: Backup[]; re
       label="Recent backups and restores"
       items={rows.map((row) => ({
         key: row.kind + row.name,
-        href: `#/${ns}/${row.kind === "Backup" ? "backups" : "restores"}/${row.name}`,
+        href: `#/${ws}/${row.kind === "Backup" ? "backups" : "restores"}/${row.name}`,
         title: row.name,
         meta: (
           <>
@@ -324,14 +324,14 @@ function Activity({ ns, backups, restores }: { ns: string; backups: Backup[]; re
 }
 
 /** Phones: a policy is one row, its name, its status and the newest point's age. */
-function PolicyList({ ns, policies, now }: { ns: string; policies: ProtectionPolicy[]; now: number }) {
+function PolicyList({ ws, policies, now }: { ws: string; policies: ProtectionPolicy[]; now: number }) {
   return (
     <CompactList
       flush
       label="Protection policies"
       items={policies.map((p) => ({
         key: p.name,
-        href: `#/${ns}/protection`,
+        href: `#/${ws}/protection`,
         title: p.name,
         meta: `${ageVsObjective(p, now).text} · objective ${duration(p.objectives.maxRecoveryPointAgeSeconds)}`,
         status: <HealthStatus health={p.health} />,
@@ -354,31 +354,31 @@ function Empty({ text }: { text: string }) {
 }
 
 export function Overview() {
-  const { ns } = useParams({ from: "/$ns/" });
+  const { ws } = useParams({ from: "/$ws/" });
   const navigate = useNavigate();
   const session = useSessionDoc();
-  const protection = useProtection(ns);
-  const backups = useBackups(ns);
-  const restores = useRestores(ns);
-  const connections = useConnections(ns);
-  const schedules = useSchedules(ns);
+  const protection = useProtection(ws);
+  const backups = useBackups(ws);
+  const restores = useRestores(ws);
+  const connections = useConnections(ws);
+  const schedules = useSchedules(ws);
   const narrow = useNarrow();
   const now = useNow();
 
   // What this role may read here decides which numbers and cards exist (docs/api.md, role table).
   const may = {
-    protection: can(session, ns, "protection"),
-    backups: can(session, ns, "backupsRead"),
-    restores: can(session, ns, "restoresRead"),
-    connections: can(session, ns, "connectionsRead"),
-    schedules: can(session, ns, "schedulesRead"),
-    backUp: can(session, ns, "manualBackupCreate") && can(session, ns, "schedulesRead"),
-    restore: can(session, ns, "restoreCreate"),
-    catalogs: can(session, ns, "catalogs"),
+    protection: can(session, ws, "protection"),
+    backups: can(session, ws, "backupsRead"),
+    restores: can(session, ws, "restoresRead"),
+    connections: can(session, ws, "connectionsRead"),
+    schedules: can(session, ws, "schedulesRead"),
+    backUp: can(session, ws, "manualBackupCreate") && can(session, ws, "schedulesRead"),
+    restore: can(session, ws, "restoreCreate"),
+    catalogs: can(session, ws, "catalogs"),
   };
-  const catalogs = useCatalogs(ns);
-  const catalogPoints = useNewestCatalogPoints(ns, catalogs.data);
-  const attentionReadable = useAttentionReadable(ns);
+  const catalogs = useCatalogs(ws);
+  const catalogPoints = useNewestCatalogPoints(ws, catalogs.data);
+  const attentionReadable = useAttentionReadable(ws);
 
   const queries = [protection, backups, restores, connections, schedules];
   const failed = queries.find((q) => q.isError);
@@ -387,13 +387,13 @@ export function Overview() {
   const header = (
     <PageHeader
       title="Overview"
-      description={`Whether ${ns} can be recovered right now, and what needs you.`}
+      description={`Whether ${ws} can be recovered right now, and what needs you.`}
       actions={
         empty || !(may.backUp || may.restore) ? undefined : (
           <Flex gap={{ default: "gapSm" }}>
-            {may.backUp && <BackUpNow ns={ns} schedules={schedules.data ?? []} />}
+            {may.backUp && <BackUpNow ws={ws} schedules={schedules.data ?? []} />}
             {may.restore && (
-              <Button variant="primary" onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: {} })}>
+              <Button variant="primary" onClick={() => void navigate({ to: "/$ws/restores/new", params: { ws }, search: {} })}>
                 Restore
               </Button>
             )}
@@ -439,7 +439,7 @@ export function Overview() {
     return (
       <>
         {header}
-        <GettingStarted ns={ns} />
+        <GettingStarted ws={ws} />
       </>
     );
   }
@@ -450,7 +450,7 @@ export function Overview() {
     (s): s is string => typeof s === "string",
   );
   const day = backupDay(runs, now);
-  const attention = attentionReadable ? attentionItems(ns, policies, runs, conns, now) : [];
+  const attention = attentionReadable ? attentionItems(ws, policies, runs, conns, now) : [];
   const scheduleNames = (schedules.data ?? []).map((s) => s.name);
 
   return (
@@ -471,7 +471,7 @@ export function Overview() {
               title="Newest recovery point"
               value={newest ? `${duration(newest.ageSeconds)} old` : "None"}
               tone={newest ? (newest.kind !== "policy" || newest.withinObjective ? "success" : "danger") : count.total ? "danger" : undefined}
-              detail={<NewestPointDetail ns={ns} point={newest} looked={looked} />}
+              detail={<NewestPointDetail ws={ws} point={newest} looked={looked} />}
             />
           )}
           {may.backups && (
@@ -511,15 +511,15 @@ export function Overview() {
                     </CardHeader>
                     <CardBody>
                       {policies.length === 0 ? (
-                        <Empty text="No protection policy names an objective for this namespace yet." />
+                        <Empty text="No protection policy names an objective for this workspace yet." />
                       ) : narrow ? (
-                        <PolicyList ns={ns} policies={policies} now={now} />
+                        <PolicyList ws={ws} policies={policies} now={now} />
                       ) : (
                         <PolicyTable policies={policies} now={now} />
                       )}
                     </CardBody>
                     <CardFooter>
-                      <Link to="/$ns/$section" params={{ ns, section: "protection" }}>
+                      <Link to="/$ws/$section" params={{ ws, section: "protection" }}>
                         All protection policies <ArrowRightIcon />
                       </Link>
                     </CardFooter>
@@ -536,7 +536,7 @@ export function Overview() {
                       ) : (
                         <>
                           {scheduleNames.map((name) => (
-                            <RunStrip key={name} ns={ns} schedule={name} runs={runs} />
+                            <RunStrip key={name} ws={ws} schedule={name} runs={runs} />
                           ))}
                           <ul className="lw-legend" aria-label="Legend">
                             <li><span className="lw-strip__cell lw-strip__cell--ok" /> Verified</li>
@@ -559,11 +559,11 @@ export function Overview() {
                   <CardTitle component="h2">Recent activity</CardTitle>
                 </CardHeader>
                 <CardBody>
-                  <Activity ns={ns} backups={runs} restores={restores.data ?? []} />
+                  <Activity ws={ws} backups={runs} restores={restores.data ?? []} />
                 </CardBody>
                 {may.backups && (
                   <CardFooter>
-                    <Link to="/$ns/backups" params={{ ns }}>
+                    <Link to="/$ws/backups" params={{ ws }}>
                       All backups <ArrowRightIcon />
                     </Link>
                   </CardFooter>

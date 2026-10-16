@@ -47,9 +47,9 @@ export function conflictWords(error: unknown): string | null {
 export const UNKNOWN_RUN_OUTCOME =
   "No answer reached this page, so whether the backup was started is unknown. Sending again is safe, and it is the right thing to do: it resends the key this click is holding, and the API answers a repeat of that key with the run the first request made rather than starting a second one.";
 
-export function BackUpNow({ ns, open, onClose }: { ns: string; open: boolean; onClose: () => void }) {
-  const schedules = useSchedules(ns);
-  const run = useBackUpNow(ns);
+export function BackUpNow({ ws, open, onClose }: { ws: string; open: boolean; onClose: () => void }) {
+  const schedules = useSchedules(ws);
+  const run = useBackUpNow(ws);
   const [name, setName] = useState("");
   const [key, setKey] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -119,7 +119,7 @@ export function BackUpNow({ ns, open, onClose }: { ns: string; open: boolean; on
                 {schedules.isError
                   ? `The schedules could not be read: ${schedules.error.message}`
                   : list.length === 0 && !schedules.isPending
-                    ? "This namespace has no schedule yet. Create one on Schedules first; a manual run copies a schedule's policy."
+                    ? "This workspace has no schedule yet. Create one on Schedules first; a manual run copies a schedule's policy."
                     : "The run copies this schedule's revision as this page read it."}
               </HelperTextItem>
             </HelperText>
@@ -145,7 +145,7 @@ export function BackUpNow({ ns, open, onClose }: { ns: string; open: boolean; on
         {result && (
           <Alert isInline variant={result.replayed ? "info" : "success"} title={result.replayed ? "Already started" : "Backup started"} className="lw-gap-top">
             {result.replayed ? "That request had already started this run, so no second run was made. " : ""}
-            <Link to="/$ns/backups/$name" params={{ ns, name: result.item.name }} onClick={onClose}>
+            <Link to="/$ws/backups/$name" params={{ ws, name: result.item.name }} onClick={onClose}>
               {result.item.name}
             </Link>{" "}
             copies revision g{result.item.scheduleRef?.generation ?? "?"} of {result.item.scheduleRef?.name ?? result.item.schedule ?? "its schedule"}.

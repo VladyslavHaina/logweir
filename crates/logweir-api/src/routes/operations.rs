@@ -1,4 +1,4 @@
-//! `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}`: the normalized
+//! `GET /api/v1/workspaces/{ws}/operations/{kind}/{name}`: the normalized
 //! status of one Backup, Restore, TopicDiscovery or Preflight, and
 //! `.../events`: the same thing as a bounded server-sent stream. `kind` is
 //! D0's closed set `backup|restore|discovery|preflight`; any other value is
@@ -56,29 +56,29 @@ pub async fn get_one(
     State(state): State<AppState>,
     RequestId(request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, kind, name)): ApiPath<(String, String, String)>,
+    ApiPath((ws, kind, name)): ApiPath<(String, String, String)>,
     uri: Uri,
 ) -> Result<Response, ApiError> {
     crate::http::parse_query(uri.query(), &[])?;
     match kind.as_str() {
         "discovery" => {
-            return super::topic_discoveries::operation(&state, request_id, &actor, &ns, &name)
+            return super::topic_discoveries::operation(&state, request_id, &actor, &ws, &name)
                 .await
         }
         "preflight" => {
-            return super::preflights::operation(&state, request_id, &actor, &ns, &name).await
+            return super::preflights::operation(&state, request_id, &actor, &ws, &name).await
         }
         _ => {}
     }
-    authorize(&state, &actor, &ns, Action::ReadOperations)?;
+    authorize(&state, &actor, &ws, Action::ReadOperations)?;
     let now = state.now();
     let item = match kind.as_str() {
         "backup" => status::backup_view(
-            &get_object::<Backup>(&state, &actor, &ns, &name).await?,
+            &get_object::<Backup>(&state, &actor, &ws, &name).await?,
             now,
         ),
         "restore" => status::restore_view(
-            &get_object::<Restore>(&state, &actor, &ns, &name).await?,
+            &get_object::<Restore>(&state, &actor, &ws, &name).await?,
             now,
         ),
         _ => return Err(ApiError::not_found()),
@@ -118,9 +118,9 @@ pub const STREAM_RETRY_AFTER_SECONDS: u64 = 5;
 
 /// `GET .../operations/{kind}/{name}/events` — the bounded SSE stream.
 ///
-/// AUTHORIZED ONCE, AT SUBSCRIBE, BEFORE ANY READ. The namespace grant and
+/// AUTHORIZED ONCE, AT SUBSCRIBE, BEFORE ANY READ. The workspace grant and
 /// both actions (`operation.read` and `operation.stream`) are decided before
-/// the first Kubernetes call, so an ungranted namespace answers exactly what
+/// the first Kubernetes call, so an ungranted workspace answers exactly what
 /// the read route answers and no stream is ever opened to find out whether an
 /// object exists. The audit record is emitted when this handler returns —
 /// which is when the decision was made — and the body that follows carries no
@@ -136,7 +136,7 @@ pub async fn events(
     State(state): State<AppState>,
     RequestId(_request_id): RequestId,
     actor: Actor,
-    ApiPath((ns, kind, name)): ApiPath<(String, String, String)>,
+    ApiPath((ws, kind, name)): ApiPath<(String, String, String)>,
     uri: Uri,
     headers: http::HeaderMap,
 ) -> Result<Response, ApiError> {
@@ -149,8 +149,8 @@ pub async fn events(
         // the boundary.
         _ => return Err(ApiError::not_found()),
     };
-    authorize(&state, &actor, &ns, Action::ReadOperations)?;
-    authorize_also(&state, &actor, &ns, Action::StreamOperationEvents)?;
+    authorize(&state, &actor, &ws, Action::ReadOperations)?;
+    authorize_also(&state, &actor, &ws, Action::StreamOperationEvents)?;
     super::check_name(&name)?;
 
     let last_event_id = match headers.get(LAST_EVENT_ID) {
@@ -167,10 +167,10 @@ pub async fn events(
         }
     };
 
-    let Some(slot) = take_slot(&state, &actor, &ns) else {
+    let Some(slot) = take_slot(&state, &actor, &ws) else {
         let mut error = ApiError::new(
             ProblemCode::RateLimited,
-            "Too many open event streams for this principal in this namespace. Close one, or \
+            "Too many open event streams for this principal in this workspace. Close one, or \
              fall back to polling the read route.",
         );
         error.retry_after_seconds = Some(STREAM_RETRY_AFTER_SECONDS);
@@ -178,11 +178,11 @@ pub async fn events(
         return Err(error);
     };
     actor.audit.note("stream", "open");
-    status::open_stream(state.clone(), kind, ns, name, slot, last_event_id).await
+    status::open_stream(state.clone(), kind, ws, name, slot, last_event_id).await
 }
 
-fn take_slot(state: &AppState, actor: &Actor, namespace: &str) -> Option<StreamSlot> {
-    slots(state).acquire(&actor.id(), namespace)
+fn take_slot(state: &AppState, actor: &Actor, workspace: &str) -> Option<StreamSlot> {
+    slots(state).acquire(&actor.id(), workspace)
 }
 
 /// Forget every held slot. A test hook: the localAdmin table is a process

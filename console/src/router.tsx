@@ -1,7 +1,7 @@
 // Routes. Hash history: the address after `#` is the route, so logweir-api keeps
 // serving files only and the sign-in round trip (`next=/ui/#/...`) comes back
-// to the same route. The namespace is always in the address, so every link names
-// what it shows; a visit with none lands on the session's first namespace.
+// to the same route. The workspace is always in the address, so every link names
+// what it shows; a visit with none lands on the session's first workspace.
 import {
   Outlet,
   createHashHistory,
@@ -10,7 +10,7 @@ import {
   createRouter,
   redirect,
 } from "@tanstack/react-router";
-import { landingNamespace } from "./api/session";
+import { landingWorkspace } from "./api/session";
 import type { Session } from "./api/types";
 import { Shell } from "./app/Shell";
 import { Overview } from "./pages/Overview";
@@ -34,36 +34,36 @@ const home = createRoute({
   getParentRoute: () => root,
   path: "/",
   beforeLoad: ({ context }) => {
-    throw redirect({ to: "/$ns", params: { ns: landingNamespace(context.session) ?? "default" } });
+    throw redirect({ to: "/$ws", params: { ws: landingWorkspace(context.session) ?? "default" } });
   },
 });
 
-export const nsRoute = createRoute({ getParentRoute: () => root, path: "$ns", component: Shell });
+export const wsRoute = createRoute({ getParentRoute: () => root, path: "$ws", component: Shell });
 
-const overview = createRoute({ getParentRoute: () => nsRoute, path: "/", component: Overview });
-const restores = createRoute({ getParentRoute: () => nsRoute, path: "restores", component: Restores });
+const overview = createRoute({ getParentRoute: () => wsRoute, path: "/", component: Overview });
+const restores = createRoute({ getParentRoute: () => wsRoute, path: "restores", component: Restores });
 const restoreNew = createRoute({
-  getParentRoute: () => nsRoute,
+  getParentRoute: () => wsRoute,
   path: "restores/new",
   component: RestoreWizard,
   validateSearch: restoreSearch,
 });
-const restore = createRoute({ getParentRoute: () => nsRoute, path: "restores/$name", component: RestoreDetail });
-const notFound = createRoute({ getParentRoute: () => nsRoute, path: "$section", component: NotFound });
+const restore = createRoute({ getParentRoute: () => wsRoute, path: "restores/$name", component: RestoreDetail });
+const notFound = createRoute({ getParentRoute: () => wsRoute, path: "$section", component: NotFound });
 
 const routeTree = root.addChildren([
   home,
-  nsRoute.addChildren([
+  wsRoute.addChildren([
     overview,
-    ...backupRoutes(nsRoute),
+    ...backupRoutes(wsRoute),
     restores,
     restoreNew,
     restore,
-    ...cutoverRoutes(nsRoute),
-    ...connectionRoutes(nsRoute),
-    ...destinationRoutes(nsRoute),
-    ...scheduleRoutes(nsRoute),
-    ...approvalRoutes(nsRoute),
+    ...cutoverRoutes(wsRoute),
+    ...connectionRoutes(wsRoute),
+    ...destinationRoutes(wsRoute),
+    ...scheduleRoutes(wsRoute),
+    ...approvalRoutes(wsRoute),
     notFound,
   ]),
 ]);

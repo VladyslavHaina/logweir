@@ -70,8 +70,8 @@ const schema = z
 
 type TextField = "name" | "description" | "bucket" | "prefix" | "region" | "endpoint" | "caName" | "caKey";
 
-export function AddDestination({ ns, onClose, onCreated }: { ns: string; onClose: () => void; onCreated: (name: string) => void }) {
-  const create = useCreateDestination(ns);
+export function AddDestination({ ws, onClose, onCreated }: { ws: string; onClose: () => void; onCreated: (name: string) => void }) {
+  const create = useCreateDestination(ws);
   const intent = useIntentKey("destination");
   const [unmatched, setUnmatched] = useState<string[]>([]);
   const [local, setLocal] = useState<unknown>(null);
@@ -213,10 +213,10 @@ export function AddDestination({ ns, onClose, onCreated }: { ns: string; onClose
             name="isDefault"
             control={control}
             render={({ field }) => (
-              <Field id="destination-default-group" label="Namespace default" role="group" error={err("isDefault")} help={DEFAULT_DESTINATION_SENTENCE}>
+              <Field id="destination-default-group" label="Workspace default" role="group" error={err("isDefault")} help={DEFAULT_DESTINATION_SENTENCE}>
                 <Checkbox
                   id="destination-default"
-                  label="Make this the namespace default"
+                  label="Make this the workspace default"
                   isChecked={field.value}
                   onChange={(_e, v) => field.onChange(v)}
                   aria-describedby="destination-default-group-helper"

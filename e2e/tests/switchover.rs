@@ -2216,6 +2216,7 @@ fn review_plan(r: &Restore, scorecard_key: &str) -> logweir_core::check_contract
                 client_cert_file: None,
                 client_key_file: None,
                 principal: "User:ANONYMOUS".to_string(),
+                schema_registry: None,
             },
             evidence: cc::DestinationPlan {
                 location_digest: location.location_digest(),

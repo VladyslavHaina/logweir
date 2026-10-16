@@ -9,7 +9,6 @@ pub mod connections;
 pub mod console_approval;
 pub mod destinations;
 pub mod health;
-pub mod namespaces;
 pub mod operations;
 pub mod preflights;
 pub mod protection;
@@ -21,6 +20,7 @@ pub mod subject;
 pub mod switchovers;
 pub mod topic_discoveries;
 pub mod trust;
+pub mod workspaces;
 
 use std::collections::BTreeMap;
 
@@ -84,31 +84,31 @@ pub fn json<T: Serialize>(status: StatusCode, body: &T) -> Response {
     }
 }
 
-/// Authorize, namespace first. A malformed namespace can never be granted, so
-/// it is `namespace_forbidden` by the same rule.
+/// Authorize, workspace first. A malformed workspace can never be granted, so
+/// it is `workspace_forbidden` by the same rule.
 ///
 /// # Errors
 ///
-/// `namespace_forbidden` or `forbidden`.
+/// `workspace_forbidden` or `forbidden`.
 pub fn authorize(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     action: Action,
 ) -> Result<(), ApiError> {
     let authorizer = state.authorizer();
-    let outcome = authz::decide(authorizer, actor, namespace, action);
+    let outcome = authz::decide(authorizer, actor, workspace, action);
     // THE DECISION IS ATTRIBUTED WHERE IT IS MADE. The audit record keeps the
-    // REAL reason even when the response hides it: an ungranted namespace
+    // REAL reason even when the response hides it: an ungranted workspace
     // answers 404 in shared mode so a caller cannot enumerate, and this line is
-    // where `namespace_forbidden` is still written down.
+    // where `workspace_forbidden` is still written down.
     let roles: Vec<String> = authorizer
-        .roles(actor, namespace)
+        .roles(actor, workspace)
         .iter()
         .map(|role| role.as_str().to_string())
         .collect();
     actor.audit.set_decision(
-        namespace,
+        workspace,
         action.name(),
         &roles,
         &authorizer.binding_revision(),
@@ -122,7 +122,7 @@ pub fn authorize(
         Ok(()) => Ok(()),
         Err(denial) => {
             actor.audit.set_failure(denial.audit_code());
-            Err(denial.response(authorizer.hides_unbound_namespaces()))
+            Err(denial.response(authorizer.hides_unbound_workspaces()))
         }
     }
 }
@@ -139,23 +139,23 @@ pub fn authorize(
 ///
 /// # Errors
 ///
-/// `namespace_forbidden` or `forbidden`, with the denial recorded.
+/// `workspace_forbidden` or `forbidden`, with the denial recorded.
 pub fn authorize_also(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     action: Action,
 ) -> Result<(), ApiError> {
     let authorizer = state.authorizer();
     actor.audit.note("alsoRequired", action.name());
-    match authz::decide(authorizer, actor, namespace, action) {
+    match authz::decide(authorizer, actor, workspace, action) {
         Ok(()) => Ok(()),
         Err(denial) => {
             actor.audit.set_decision(
-                namespace,
+                workspace,
                 action.name(),
                 &authorizer
-                    .roles(actor, namespace)
+                    .roles(actor, workspace)
                     .iter()
                     .map(|role| role.as_str().to_string())
                     .collect::<Vec<String>>(),
@@ -163,7 +163,7 @@ pub fn authorize_also(
                 crate::audit::Decision::Deny,
             );
             actor.audit.set_failure(denial.audit_code());
-            Err(denial.response(authorizer.hides_unbound_namespaces()))
+            Err(denial.response(authorizer.hides_unbound_workspaces()))
         }
     }
 }
@@ -285,14 +285,14 @@ pub fn is_equality_selector(selector: &str) -> bool {
 pub async fn list_page<K: ProductResource>(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     query: &ListQuery,
 ) -> Result<(Vec<K>, Page), ApiError> {
     let scope = CursorScope {
         actor_id: actor.id(),
         route: route.to_string(),
-        namespace: namespace.to_string(),
+        workspace: workspace.to_string(),
         filters: query
             .label_selector
             .as_ref()
@@ -324,7 +324,7 @@ pub async fn list_page<K: ProductResource>(
     };
     let list = state
         .kube()
-        .list::<K>(namespace, &page)
+        .list::<K>(workspace, &page)
         .await
         .map_err(KubeFailure::into_api_error)?;
     let next_cursor = list
@@ -376,7 +376,7 @@ impl<K> Created<K> {
 pub async fn create_idempotent<K, Req>(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     prefix: &str,
     key: &IdempotencyKey,
@@ -389,24 +389,24 @@ where
     Req: Serialize,
 {
     create_idempotent_inner(
-        state, actor, namespace, route, prefix, None, key, request_id, validated, build,
+        state, actor, workspace, route, prefix, None, key, request_id, validated, build,
     )
     .await
 }
 
 /// The name [`create_idempotent`] gives the object this request creates, or
-/// replays, under `prefix`: a function of the actor, the namespace, the route
+/// replays, under `prefix`: a function of the actor, the workspace, the route
 /// and the `Idempotency-Key` only (never of the body), so a route can look
 /// under it BEFORE anything is created.
 #[must_use]
 pub(crate) fn deterministic_name(
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     prefix: &str,
     key: &IdempotencyKey,
 ) -> String {
-    idempotency::identity(actor, namespace, route, prefix, key, b"").name
+    idempotency::identity(actor, workspace, route, prefix, key, b"").name
 }
 
 /// Whether an object under `name` is already THIS request's own — a replay —
@@ -430,7 +430,7 @@ pub(crate) fn deterministic_name(
 pub async fn is_own_replay<K, Req>(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     name: &str,
     key: &IdempotencyKey,
@@ -446,9 +446,9 @@ where
             "The request could not be hashed.",
         )
     })?;
-    let mut identity = idempotency::identity(actor, namespace, route, "", key, &canonical);
+    let mut identity = idempotency::identity(actor, workspace, route, "", key, &canonical);
     identity.name = name.to_string();
-    match state.kube().get::<K>(namespace, name).await {
+    match state.kube().get::<K>(workspace, name).await {
         Ok(existing) => Ok(matches!(
             idempotency::compare(Some(existing.annotations()), &identity),
             ReplayVerdict::Replay
@@ -464,7 +464,7 @@ where
 /// referenced by name by every schedule, backup and restore that uses it, and
 /// an operator picks that name; a hashed name would make the reference
 /// unreadable and the object un-namable from `kubectl`. The idempotency scope
-/// is unchanged — it still binds issuer, subject, namespace, route and key —
+/// is unchanged — it still binds issuer, subject, workspace, route and key —
 /// so a replay still returns the same object and a different request under the
 /// same key is still `idempotency_conflict`. What changes is the failure mode
 /// of a name COLLISION between two actors: the second gets `state_conflict`,
@@ -473,7 +473,7 @@ where
 pub async fn create_named_idempotent<K, Req>(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     name: &str,
     key: &IdempotencyKey,
@@ -488,7 +488,7 @@ where
     create_idempotent_inner(
         state,
         actor,
-        namespace,
+        workspace,
         route,
         "",
         Some(name),
@@ -504,7 +504,7 @@ where
 async fn create_idempotent_inner<K, Req>(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     prefix: &str,
     fixed_name: Option<&str>,
@@ -523,7 +523,7 @@ where
             "The request could not be hashed.",
         )
     })?;
-    let mut identity = idempotency::identity(actor, namespace, route, prefix, key, &canonical);
+    let mut identity = idempotency::identity(actor, workspace, route, prefix, key, &canonical);
     if let Some(name) = fixed_name {
         identity.name = name.to_string();
     }
@@ -561,10 +561,10 @@ where
     // Two attempts: the second covers an object deleted between our
     // AlreadyExists and our read of it. A third outcome is a conflict.
     for _ in 0..2 {
-        match state.kube().create::<K>(namespace, &object).await {
+        match state.kube().create::<K>(workspace, &object).await {
             Ok(created) => {
                 tracing::info!(
-                    namespace,
+                    workspace,
                     route,
                     name = %identity.name,
                     uid = %created.uid().unwrap_or_default(),
@@ -582,7 +582,7 @@ where
             Err(KubeFailure::AlreadyExists) => {}
             Err(other) => return Err(other.into_api_error()),
         }
-        let existing = match state.kube().get::<K>(namespace, &identity.name).await {
+        let existing = match state.kube().get::<K>(workspace, &identity.name).await {
             Ok(existing) => existing,
             Err(KubeFailure::NotFound) => continue,
             Err(other) => return Err(other.into_api_error()),
@@ -614,6 +614,73 @@ where
     ))
 }
 
+/// Names are unique per install (PROD-19.1 §4.3): a typed name another
+/// workspace holds is refused before anything is written.
+///
+/// # Errors
+///
+/// `state_conflict` naming the name, or the adapter's failure.
+pub async fn refuse_name_in_use<K: ProductResource>(
+    state: &AppState,
+    workspace: &str,
+    name: &str,
+) -> Result<(), ApiError> {
+    if state
+        .kube()
+        .held_elsewhere::<K>(workspace, name)
+        .await
+        .map_err(KubeFailure::into_api_error)?
+    {
+        return Err(ApiError::new(
+            ProblemCode::StateConflict,
+            format!(
+                "The name `{name}` is in use in this installation; names are shared by every \
+                 workspace."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// A request body may name only objects of the path's workspace (PROD-19.1
+/// §4.1). A reference to another workspace's object is `422` on `field`,
+/// worded as for a missing one; a missing referent is left to the
+/// controller, as before. Every route that accepts a referenced name calls
+/// this one helper.
+///
+/// EARLY FEEDBACK, NOT THE BOUNDARY. The referent is read once, now, and
+/// nothing keeps that answer: it can be deleted and recreated in another
+/// workspace before the controller acts. The boundary is the controller's
+/// `weirkeeper::workspace::same` at every reconcile, which refuses
+/// `WorkspaceMismatch` and creates no Job. Squatting a name another workspace
+/// expects yields a refusal there (this 422, or the 409 of
+/// [`refuse_name_in_use`]), never access.
+///
+/// # Errors
+///
+/// `validation_failed` on `field`, or the adapter's failure.
+pub async fn refuse_reference_elsewhere<K: ProductResource>(
+    state: &AppState,
+    workspace: &str,
+    field: &str,
+    noun: &str,
+    name: &str,
+) -> Result<(), ApiError> {
+    if state
+        .kube()
+        .held_elsewhere::<K>(workspace, name)
+        .await
+        .map_err(KubeFailure::into_api_error)?
+    {
+        return Err(ApiError::validation(vec![FieldError::new(
+            field,
+            "not_found",
+            format!("no {noun} named `{name}` in workspace `{workspace}`"),
+        )]));
+    }
+    Ok(())
+}
+
 /// Read an object after its name check.
 ///
 /// # Errors
@@ -622,13 +689,13 @@ where
 pub async fn get_object<K: ProductResource>(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     name: &str,
 ) -> Result<K, ApiError> {
     check_name(name)?;
     let object = state
         .kube()
-        .get::<K>(namespace, name)
+        .get::<K>(workspace, name)
         .await
         .map_err(KubeFailure::into_api_error)?;
     // The read is attributed to the exact object, with its UID and
@@ -640,10 +707,10 @@ pub async fn get_object<K: ProductResource>(
 
 // TRANSIENT CHECKS: rate limit, cancellation, object-level authorization.
 
-/// D2 §8.2: at most this many discovery creates per actor, per namespace, per
+/// D2 §8.2: at most this many discovery creates per actor, per workspace, per
 /// minute.
 pub const DISCOVERY_CREATES_PER_MINUTE: u32 = 6;
-/// D2 §8.3: at most this many preflight creates per actor, per namespace, per
+/// D2 §8.3: at most this many preflight creates per actor, per workspace, per
 /// minute.
 pub const PREFLIGHT_CREATES_PER_MINUTE: u32 = 20;
 /// The window both limits use.
@@ -654,7 +721,7 @@ struct CheckWindow {
     count: u32,
 }
 
-/// The check-create windows, keyed by `(actor, namespace, route)`.
+/// The check-create windows, keyed by `(actor, workspace, route)`.
 ///
 /// WHY A PROCESS GLOBAL AND NOT A FIELD. `AppState`'s `Settings` is built by
 /// `main.rs` and by the test harness, both outside this task's ownership, and
@@ -663,13 +730,13 @@ struct CheckWindow {
 /// per PROCESS, so two console replicas each permit the configured rate, and
 /// the limit is a politeness bound on how fast one operator can queue check
 /// Jobs — not a security control. The real ceiling on concurrent checks is the
-/// controller's `checks.maxActivePerNamespace`, which no API can talk past.
+/// controller's `checks.maxActivePerWorkspace`, which no API can talk past.
 /// The clock is [`AppState::now`], so a test advances it instead of sleeping.
 static CHECK_WINDOWS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, CheckWindow>>> =
     std::sync::OnceLock::new();
 
 /// The most keys tracked at once. Past this the map is cleared rather than
-/// grown without bound: a flood of actor/namespace pairs must not become a
+/// grown without bound: a flood of actor/workspace pairs must not become a
 /// memory leak, and losing a window only forgives requests.
 pub const MAX_TRACKED_CHECK_KEYS: usize = 4096;
 
@@ -681,39 +748,39 @@ pub const MAX_TRACKED_CHECK_KEYS: usize = 4096;
 pub fn check_create_rate(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     route: &str,
     per_window: u32,
 ) -> Result<(), ApiError> {
     count_in_window(
         CHECK_WINDOWS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new())),
         state.now(),
-        format!("{}\n{namespace}\n{route}", actor.id()),
+        format!("{}\n{workspace}\n{route}", actor.id()),
         per_window,
-        "Too many checks were started in this namespace; wait for the window to reset.",
+        "Too many checks were started in this workspace; wait for the window to reset.",
     )
 }
 
 // THE MANUAL-RUN CREATE LIMIT.
 
 /// The default ceiling on manual `Backup` creates ("Back up now") per
-/// actor, per namespace, per minute.
+/// actor, per workspace, per minute.
 ///
 /// TEN. A person clicking "Back up now" does it once and waits; a script that
-/// needs more than ten ad-hoc captures a minute in one namespace wants a
+/// needs more than ten ad-hoc captures a minute in one workspace wants a
 /// schedule. The number is the administrator's (`api.console.rateLimits`); the
-/// controller's `runs.maxManualBackupsActivePerNamespace` is what bounds the
+/// controller's `runs.maxManualBackupsActivePerWorkspace` is what bounds the
 /// PODS, and it holds whatever this says.
 pub const MANUAL_BACKUP_CREATES_PER_MINUTE: u32 = 10;
 /// The default ceiling on manual `Restore` creates per actor, per
-/// namespace, per minute. Five: a restore is an incident action with a human
+/// workspace, per minute. Five: a restore is an incident action with a human
 /// approval behind it.
 pub const MANUAL_RESTORE_CREATES_PER_MINUTE: u32 = 5;
 /// The largest per-minute ceiling a configuration may set. Above this the
 /// limit bounds nothing a person could produce by hand.
 pub const MAX_RUN_CREATES_PER_MINUTE: u32 = 600;
 
-/// The two manual-run create ceilings, per actor, per namespace, per minute —
+/// The two manual-run create ceilings, per actor, per workspace, per minute —
 /// `rateLimits` in the configuration file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RunRateLimits {
@@ -732,7 +799,7 @@ impl Default for RunRateLimits {
     }
 }
 
-/// The manual-run create windows, keyed by `(actor, namespace, route)` — ONE
+/// The manual-run create windows, keyed by `(actor, workspace, route)` — ONE
 /// PER APPLICATION STATE, not a process global.
 ///
 /// The check limiter above is a process global only because it could not
@@ -798,9 +865,9 @@ pub enum ManualRun {
 
 /// Count one manual-run create and decide.
 ///
-/// KEYED BY `(actor, namespace, route)`, exactly as the check limiter is: the
+/// KEYED BY `(actor, workspace, route)`, exactly as the check limiter is: the
 /// actor is the stable `issuer#subject` id, never a display name, so two
-/// people are two windows and one person in two namespaces is two windows. It
+/// people are two windows and one person in two workspaces is two windows. It
 /// counts every create that passed authorization and validation — a replay of
 /// an earlier key included, because telling a replay from a first create
 /// needs the read this check exists to avoid; a replayed request refused here
@@ -813,28 +880,28 @@ pub enum ManualRun {
 pub fn run_create_rate(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     run: ManualRun,
 ) -> Result<(), ApiError> {
     let limits = state.run_rate_limits();
     let (route, per_window, message) = match run {
         ManualRun::Backup => (
-            "POST /api/v1/namespaces/{ns}/backups",
+            "POST /api/v1/workspaces/{ws}/backups",
             limits.manual_backups_per_minute,
-            "Too many backups were started in this namespace in the last minute; wait for the \
+            "Too many backups were started in this workspace in the last minute; wait for the \
              window to reset. Runs already accepted are queued and start as slots free.",
         ),
         ManualRun::Restore => (
-            "POST /api/v1/namespaces/{ns}/restores",
+            "POST /api/v1/workspaces/{ws}/restores",
             limits.manual_restores_per_minute,
-            "Too many restores were started in this namespace in the last minute; wait for the \
+            "Too many restores were started in this workspace in the last minute; wait for the \
              window to reset.",
         ),
     };
     let result = count_in_window(
         &state.run_create_windows().windows,
         state.now(),
-        format!("{}\n{namespace}\n{route}", actor.id()),
+        format!("{}\n{workspace}\n{route}", actor.id()),
         per_window,
         message,
     );
@@ -858,7 +925,7 @@ pub fn reset_check_rate_limits() {
 /// Whether `actor` created the object, by the annotation the create recorded.
 ///
 /// EXACT ACTOR, NOT A ROLE. D0 gives an operator "start/read/cancel OWN
-/// checks": two operators in one namespace are both operators, and the one who
+/// checks": two operators in one workspace are both operators, and the one who
 /// did not start a check may not stop it. The comparison is the stable
 /// `issuer#subject` id, never a display name.
 #[must_use]
@@ -871,7 +938,7 @@ pub fn created_by<K: ProductResource>(object: &K, actor: &Actor) -> bool {
         .is_some_and(|recorded| recorded == &actor.id())
 }
 
-/// Whether `actor` administers `namespace`.
+/// Whether `actor` administers `workspace`.
 ///
 /// THE ONE EXCEPTION TO OWNERSHIP, AND ONLY FOR CANCEL. D0's "cancel own
 /// checks" is written in the OPERATOR row; an administrator who cannot stop a
@@ -882,10 +949,10 @@ pub fn created_by<K: ProductResource>(object: &K, actor: &Actor) -> bool {
 /// records who actually did it, and nothing else in this crate consults the
 /// role for an ownership decision.
 #[must_use]
-pub fn administers(state: &AppState, actor: &Actor, namespace: &str) -> bool {
+pub fn administers(state: &AppState, actor: &Actor, workspace: &str) -> bool {
     state
         .authorizer()
-        .roles(actor, namespace)
+        .roles(actor, workspace)
         .contains(&crate::authz::Role::Administrator)
 }
 
@@ -904,7 +971,7 @@ pub fn administers(state: &AppState, actor: &Actor, namespace: &str) -> bool {
 pub async fn cancel_check<K>(
     state: &AppState,
     actor: &Actor,
-    namespace: &str,
+    workspace: &str,
     name: &str,
     terminal: impl Fn(&K) -> bool,
     already_requested: impl Fn(&K) -> bool,
@@ -913,9 +980,9 @@ where
     K: crate::kube::CancellableCheck,
 {
     for _ in 0..2 {
-        let object = get_object::<K>(state, actor, namespace, name).await?;
+        let object = get_object::<K>(state, actor, workspace, name).await?;
         if !created_by(&object, actor) {
-            if administers(state, actor, namespace) {
+            if administers(state, actor, workspace) {
                 // WHO ACTUALLY DID IT IS RECORDED. An administrator stopping
                 // someone else's check is a different event from an operator
                 // stopping its own, and the audit reader should not have to
@@ -928,7 +995,7 @@ where
                 return Err(ApiError::new(
                     ProblemCode::Forbidden,
                     "This check was started by another actor. An operator may cancel only the \
-                     checks it started; an administrator of this namespace may cancel any.",
+                     checks it started; an administrator of this workspace may cancel any.",
                 ));
             }
         }
@@ -941,12 +1008,12 @@ where
         let version = object.meta().resource_version.clone().unwrap_or_default();
         match state
             .kube()
-            .request_check_cancel::<K>(namespace, name, &version)
+            .request_check_cancel::<K>(workspace, name, &version)
             .await
         {
             Ok(updated) => {
                 tracing::info!(
-                    namespace,
+                    workspace,
                     name,
                     actor = %actor.id(),
                     "cancel requested"

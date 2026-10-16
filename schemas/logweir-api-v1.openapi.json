@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Logweir product API",
-    "version": "1.0.0-alpha.3",
+    "version": "1.0.0-alpha.4",
     "description": "The bounded shared-console product API (PLAT-17.1). Not a Kubernetes proxy: no generic resource path, no Secret, Pod, log, exec or Job access, no delete, and no arbitrary patch. Every error is application/problem+json. Unsafe methods require Content-Type: application/json and an Origin equal to the configured public origin. Durable creates require Idempotency-Key. Capabilities without a route are advertised false in /api/v1/session."
   },
   "paths": {
@@ -74,7 +74,7 @@
     "/api/v1/session": {
       "get": {
         "operationId": "getSession",
-        "summary": "The actor, its roles and explicit namespace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method.",
+        "summary": "The actor, its roles and explicit workspace grants, the synchronizer CSRF token and the capability flags. In shared mode the CSRF token must be sent in X-CSRF-Token on every unsafe method.",
         "responses": {
           "200": {
             "description": "The session.",
@@ -237,17 +237,17 @@
         ]
       }
     },
-    "/api/v1/namespaces": {
+    "/api/v1/workspaces": {
       "get": {
-        "operationId": "listNamespaces",
-        "summary": "The configured namespace grants. Core Namespace objects are never listed.",
+        "operationId": "listWorkspaces",
+        "summary": "The actor's workspace grants. Core Namespace objects are never listed.",
         "responses": {
           "200": {
             "description": "The grants.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/NamespaceListResponse"
+                  "$ref": "#/components/schemas/WorkspaceListResponse"
                 }
               }
             }
@@ -273,16 +273,16 @@
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/connections": {
+    "/api/v1/workspaces/{ws}/connections": {
       "get": {
         "operationId": "listConnections",
         "summary": "KafkaCluster projections. Secret reference names only.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -303,7 +303,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -350,12 +350,12 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
@@ -363,10 +363,10 @@
         "summary": "Create a KafkaCluster. A SASL password or an mTLS client certificate and key may be entered ONCE in auth.credential; it becomes a Secret owned by and bound to the connection and is never read back or echoed. An existing Secret is never named.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -375,7 +375,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -445,7 +445,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "origin_mismatch",
           "payload_too_large",
           "rate_limited",
@@ -454,20 +453,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/connections/{name}": {
+    "/api/v1/workspaces/{ws}/connections/{name}": {
       "get": {
         "operationId": "getConnection",
         "summary": "One KafkaCluster projection.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -512,19 +512,19 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
     "/api/v1/cadence-previews": {
       "get": {
         "operationId": "previewCadence",
-        "summary": "What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no namespace, so it needs permission to read schedules in at least one granted namespace.",
+        "summary": "What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no workspace, so it needs permission to read schedules in at least one workspace.",
         "parameters": [
           {
             "name": "schedule",
@@ -681,16 +681,16 @@
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/schedules": {
+    "/api/v1/workspaces/{ws}/schedules": {
       "get": {
         "operationId": "listSchedules",
         "summary": "BackupSchedule projections.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -711,7 +711,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -758,12 +758,12 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
@@ -771,10 +771,10 @@
         "summary": "Create a BackupSchedule.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -783,7 +783,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -853,7 +853,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "origin_mismatch",
           "payload_too_large",
           "rate_limited",
@@ -862,20 +861,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/schedules/{name}": {
+    "/api/v1/workspaces/{ws}/schedules/{name}": {
       "get": {
         "operationId": "getSchedule",
         "summary": "One BackupSchedule projection.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -920,12 +920,12 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       },
       "put": {
@@ -933,10 +933,10 @@
         "summary": "Replace a schedule's FUTURE policy under expectedGeneration. The whole policy is sent and a field omitted is removed. spec.sourceRef is not on the request: a different cluster is a different schedule, and naming it is 422 sourceRef: field_immutable. It never touches a Backup that already exists, its frozen inputs or its Job. Idempotency-Key is refused: the precondition is the idempotence.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1001,7 +1001,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -1011,20 +1010,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension": {
+    "/api/v1/workspaces/{ws}/schedules/{name}:set-suspension": {
       "post": {
         "operationId": "setScheduleSuspension",
         "summary": "Set spec.suspend, the schedule's one mutable field, if expectedResourceVersion is current. Idempotency-Key is refused.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1089,7 +1089,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -1099,20 +1098,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/backups": {
+    "/api/v1/workspaces/{ws}/backups": {
       "get": {
         "operationId": "listBackups",
         "summary": "Backup projections with a status summary.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1133,7 +1133,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -1180,12 +1180,12 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
@@ -1193,10 +1193,10 @@
         "summary": "Back up now. With scheduleRef the schedule's current revision is copied and recorded (uid, generation, runPolicySha256) and a policy field beside it is 422; without it the body is the policy, for a cluster with no schedule yet. A suspended schedule, an invalid cadence, an active Forbid run and a schedule deleted a second later none of them block the run. Readiness is recorded, never obeyed.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1205,7 +1205,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -1275,7 +1275,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -1286,20 +1285,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/backups/{name}": {
+    "/api/v1/workspaces/{ws}/backups/{name}": {
       "get": {
         "operationId": "getBackup",
         "summary": "One Backup projection.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1344,25 +1344,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/restores": {
+    "/api/v1/workspaces/{ws}/restores": {
       "get": {
         "operationId": "listRestores",
         "summary": "Restore projections with a status summary; planBytes omitted.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1383,7 +1383,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -1430,12 +1430,12 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
@@ -1443,10 +1443,10 @@
         "summary": "Create a Restore. planBytes is opaque, checked against planHash and stored unchanged.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1455,7 +1455,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -1525,7 +1525,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "origin_mismatch",
           "payload_too_large",
           "rate_limited",
@@ -1534,20 +1533,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/restores/{name}": {
+    "/api/v1/workspaces/{ws}/restores/{name}": {
       "get": {
         "operationId": "getRestore",
         "summary": "One Restore projection, planBytes included.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1592,25 +1592,179 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/restores/{name}/approval": {
+    "/api/v1/workspaces/{ws}/restores/{name}/cancel": {
       "post": {
-        "operationId": "submitGovernedApproval",
-        "summary": "PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a namespace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+        "operationId": "cancelRestore",
+        "summary": "PROD-07.2: stop a restore. Sets `logweir.dev/cancel-requested-by` (metadata; the sealed spec is untouched). Before the run's Job exists the restore fails `Cancelled` and nothing ran; while it runs the controller suspends the Job, the runner stops its engine (SIGTERM, SIGKILL after ten seconds) and signs nothing, and a run that created its target topics becomes `Interrupted`. A run that already signed keeps its outcome. A repeated request writes nothing. Requires the role that may create restores in the workspace. 409 once the restore has ended. Idempotency-Key is refused.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cancel is recorded (or already was).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed",
+          "workspace_forbidden"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/restores/{name}/cleanup": {
+      "post": {
+        "operationId": "cleanupRestore",
+        "summary": "PROD-07.2: remove the topics an interrupted restore created and left. Sets `logweir.dev/cleanup-requested-by`; the controller runs `logweir restore cleanup` over the reconcile's signed scorecard, which deletes only the topics it lists, each only while its topic ID is the one recorded at creation, and lists what it left. The recovery point is released once it succeeded. A repeated request writes nothing. Requires the role that may create restores in the workspace; no second approval. 409 unless the restore is `Interrupted` with a signed reconcile. Idempotency-Key is refused.",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "required": true,
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cleanup is recorded (or already was).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed",
+          "workspace_forbidden"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/restores/{name}/approval": {
+      "post": {
+        "operationId": "submitGovernedApproval",
+        "summary": "PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation of this Restore. Only in a workspace bound to a Governed policy; the submitting principal must not be the console-attested requester (403, whatever the role); the confirmation must still name this Restore's UID, plan hash and the current policy digest and must not have expired. Creates the Approval `spec.approvalRef` names from the confirmation's exact document bytes and the console's signatures plus the approver's; the controller re-verifies everything before any Job. A replay of the same submission returns 200 with the same object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "required": true,
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1684,7 +1838,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -1695,20 +1848,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/restores/{name}/approval-request": {
+    "/api/v1/workspaces/{ws}/restores/{name}/approval-request": {
       "get": {
         "operationId": "getApprovalRequest",
-        "summary": "PROD-16.2: a two-person request as the second person is shown it before approving. Only in a namespace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing.",
+        "summary": "PROD-16.2: a two-person request as the second person is shown it before approving. Only in a workspace whose policy takes its approval from the console (`operatorMode: two-person`; 409 `policy_mismatch` elsewhere). The console first verifies its OWN signature on the stored request; requester, plan hash, approval subject, ticket, window and `confirmationSha256` are then read from the verified bytes and from nothing else, and the original topic names from the Restore's own plan. A stored request that does not carry this console's signature, or that names another Restore, UID, plan or policy, is `notConfirmed` and none of it is shown. `approve.offered` says whether this session may approve, by the rules the click is held to. Signs and stores nothing.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1753,26 +1907,26 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "policy_mismatch",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/restores/{name}/console-approval": {
+    "/api/v1/workspaces/{ws}/restores/{name}/console-approval": {
       "post": {
         "operationId": "approveInConsole",
-        "summary": "PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a namespace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
+        "summary": "PROD-16.2: the second person's click. Requires the Approver role (an Administrator who is not also an Approver is refused 403), a shared console, and a workspace whose policy takes its approval from the console. The console verifies its OWN signature on the stored request before anything else, and copies requester, subject, UID, plan hash, policy and expiry only from the verified bytes; the body carries `confirmationSha256` alone, which is compared and never copied. Refused: the requester, or anyone who is not a second person of the same issuer (403); a request that is not this console's or names another Restore, UID, plan or policy (409 `policy_mismatch`); an expired request, one that changed since it was shown, or one already approved by someone else (409 `state_conflict`). Creates the Approval `spec.approvalRef` names: the verified document with `approver`, `approvedAt` and `formatVersion` 2.2.0, signed by the console's confirmation key. The same approver's repeat returns 200 with the stored object. Idempotency-Key is not used: the name is the Restore's own approvalRef.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1846,7 +2000,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -1857,20 +2010,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/switchovers": {
+    "/api/v1/workspaces/{ws}/switchovers": {
       "get": {
         "operationId": "listSwitchovers",
         "summary": "PROD-04.2: Switchover projections with their groups' outcomes; planBytes omitted.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1891,7 +2045,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -1938,23 +2092,23 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
         "operationId": "createSwitchover",
-        "summary": "PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound namespace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict.",
+        "summary": "PROD-04.2: create a Switchover from a reviewed plan (`logweir switchover plan`). planBytes is checked against planHash, parsed and bounded, and its restore block must be restoreRef; it is stored unchanged. In a bound workspace the console signs the authorization document for subject kind Switchover: the Approval under confirm, the request an approver countersigns under two-person or strict.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -1963,7 +2117,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -2033,7 +2187,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "origin_mismatch",
           "payload_too_large",
           "rate_limited",
@@ -2042,20 +2195,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/switchovers/{name}": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}": {
       "get": {
         "operationId": "getSwitchover",
         "summary": "PROD-04.2: one Switchover projection, planBytes included.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2100,25 +2254,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/switchovers/{name}/approval": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}/approval": {
       "post": {
         "operationId": "submitSwitchoverApproval",
-        "summary": "PROD-04.2: the restore route's submission, by the same functions. In an unbound namespace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
+        "summary": "PROD-04.2: the restore route's submission, by the same functions. In an unbound workspace, records the approval `logweir drill approve --subject-kind Switchover` wrote (refused unless it binds this plan hash and subject kind Switchover); under a strict policy, an approver's countersignature over the console's stored request (never the requester's own; never under confirm or two-person, where a second person approves in the console). Creates the Approval spec.approvalRef names; the controller re-verifies everything before any Job.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2192,7 +2346,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -2203,20 +2356,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/switchovers/{name}/approval-request": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}/approval-request": {
       "get": {
         "operationId": "getSwitchoverApprovalRequest",
         "summary": "PROD-04.2: a two-person switchover request as the second person is shown it, by the restore route's rules and the same function: the console verifies its OWN signature first, and shows the restore the plan applies and every group, topic and position (its class and the position it must hold first) from the plan the verified request names by hash, or `scopeComplete: false` with why (`tooManyGroups`, `tooManyPositions`, `planUnreadable`, ...). Signs and stores nothing.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2261,26 +2415,26 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "policy_mismatch",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/switchovers/{name}/console-approval": {
+    "/api/v1/workspaces/{ws}/switchovers/{name}/console-approval": {
       "post": {
         "operationId": "approveSwitchoverInConsole",
-        "summary": "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person namespace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
+        "summary": "PROD-04.2: the second person's click on a switchover's request: every step of the restore click, by the same function (Approver role, shared console, two-person workspace, the console's own signature first, the shown digest, the whole scope re-derived, requester is not approver). Creates the Approval `spec.approvalRef` names (subject kind Switchover), signed by the console's confirmation key; the same approver's repeat returns 200.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2354,7 +2508,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -2365,20 +2518,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/approval-policy": {
+    "/api/v1/workspaces/{ws}/approval-policy": {
       "get": {
         "operationId": "getApprovalPolicy",
-        "summary": "PLAT-19.2: the namespace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the namespace's TrustPolicy.",
+        "summary": "PLAT-19.2: the workspace's effective approval policy — its binding, mode, maxAgeSeconds, snapshot digest, the installation document's digest the controller also logs, and the console confirmation key id to put on the install's TrustPolicy.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2423,25 +2577,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/approvals": {
+    "/api/v1/workspaces/{ws}/approvals": {
       "get": {
         "operationId": "listApprovals",
         "summary": "Approval metadata; no documents.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2462,7 +2616,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -2509,25 +2663,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/approvals/{name}": {
+    "/api/v1/workspaces/{ws}/approvals/{name}": {
       "get": {
         "operationId": "getApproval",
         "summary": "One Approval's metadata; no documents.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2572,25 +2726,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/approvals/{name}/packet": {
+    "/api/v1/workspaces/{ws}/approvals/{name}/packet": {
       "get": {
         "operationId": "getApprovalPacket",
         "summary": "The approval and sidecar documents, verbatim.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2635,25 +2789,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/destinations": {
+    "/api/v1/workspaces/{ws}/destinations": {
       "get": {
         "operationId": "listDestinations",
         "summary": "Saved destinations. Credential REFERENCES only: a Secret name and the key names inside it, never a value.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2674,7 +2828,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -2721,12 +2875,12 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
@@ -2734,10 +2888,10 @@
         "summary": "Create a BackupDestination. The object's name is the `name` field, because every schedule, backup and restore references a destination by name. A grant may carry a credential VALUE once in access.*.secret.new; it becomes a Secret owned by the destination and is never read back or echoed.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2746,7 +2900,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -2818,7 +2972,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "origin_mismatch",
           "payload_too_large",
           "rate_limited",
@@ -2828,20 +2981,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/destinations/{name}": {
+    "/api/v1/workspaces/{ws}/destinations/{name}": {
       "get": {
         "operationId": "getDestination",
         "summary": "One destination, with the last explicit access test.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2886,25 +3040,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/destinations/{name}:update-access": {
+    "/api/v1/workspaces/{ws}/destinations/{name}:update-access": {
       "post": {
         "operationId": "updateDestinationAccess",
         "summary": "Rotate the four grants and the CA reference under an expectedGeneration precondition. It cannot name the location or the transport, and it refuses Idempotency-Key. A grant carrying a credential VALUE whose deterministic Secret already exists is state_conflict: this service holds `create` on Secrets and nothing else, so the value was NOT written and nothing was changed.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -2971,7 +3125,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -2983,20 +3136,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/destinations/{name}:test": {
+    "/api/v1/workspaces/{ws}/destinations/{name}:test": {
       "post": {
         "operationId": "testDestination",
         "summary": "Start a DestinationAccess Preflight for this destination and answer 202 with it. Absent roles means every role the destination configures.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3014,7 +3168,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -3084,7 +3238,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -3094,20 +3247,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/destinations/{name}/usage": {
+    "/api/v1/workspaces/{ws}/destinations/{name}/usage": {
       "get": {
         "operationId": "getDestinationUsage",
         "summary": "Schedules and backups labelled for this destination, bounded to 100 each. `basis` states how the lists were built, so an empty answer is not read as \"nothing uses this\".",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3152,25 +3306,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries": {
+    "/api/v1/workspaces/{ws}/connections/{name}/topic-discoveries": {
       "get": {
         "operationId": "listConnectionTopicDiscoveries",
         "summary": "Discoveries for one connection. With latest=true it answers the two slots instead of a page: a failed attempt never hides the last successful inventory, and a successful inventory never hides that the newest attempt failed.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3200,7 +3354,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -3256,24 +3410,24 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
         "operationId": "createTopicDiscovery",
-        "summary": "Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and namespace.",
+        "summary": "Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and workspace.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3291,7 +3445,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -3361,7 +3515,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -3371,20 +3524,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/topic-discoveries/{id}": {
+    "/api/v1/workspaces/{ws}/topic-discoveries/{id}": {
       "get": {
         "operationId": "getTopicDiscovery",
         "summary": "One discovery. `visibility` is never better than unknown without an explicit attestation: a successful Kafka list alone says nothing about whether it was whole. `stale` is recomputed per read against the connection as it is now.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3429,25 +3583,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel": {
+    "/api/v1/workspaces/{ws}/topic-discoveries/{id}:cancel": {
       "post": {
         "operationId": "cancelTopicDiscovery",
-        "summary": "Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the namespace may cancel any. Nothing is deleted. Idempotency-Key is refused.",
+        "summary": "Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the workspace may cancel any. Nothing is deleted. Idempotency-Key is refused.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3502,7 +3656,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -3513,20 +3666,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics": {
+    "/api/v1/workspaces/{ws}/topic-discoveries/{id}/topics": {
       "get": {
         "operationId": "listDiscoveredTopics",
         "summary": "One page of a stored inventory, read from the immutable result chunks the controller committed. Each chunk is verified by owner UID, immutability and digest before a row is served. At most eight chunks are read per request: a sparse q returns a short page with scan.complete=false and a cursor.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3639,27 +3793,27 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "result_integrity_failed",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/preflights": {
+    "/api/v1/workspaces/{ws}/preflights": {
       "post": {
         "operationId": "createPreflight",
         "summary": "Start a readiness check for a Backup, a Restore or a destination's grants. planBytes is opaque: planHash is checked against the SHA-256 of exactly those bytes and they are stored unchanged. The verdict is advisory and every execution-time guard still runs.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3668,7 +3822,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -3738,7 +3892,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -3748,20 +3901,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/preflights/{id}": {
+    "/api/v1/workspaces/{ws}/preflights/{id}": {
       "get": {
         "operationId": "getPreflight",
         "summary": "One readiness result. `applicable` and `stale` are recomputed on every read against the planHash the caller sends, so an edited plan, a replaced referent or an expired result is never rendered as current readiness. An actor bound only as Approver reads Restore results and nothing else.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3815,26 +3969,26 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/preflights/{id}:cancel": {
+    "/api/v1/workspaces/{ws}/preflights/{id}:cancel": {
       "post": {
         "operationId": "cancelPreflight",
         "summary": "Ask an unfinished preflight to stop. Same rules as a discovery cancel.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3889,7 +4043,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "origin_mismatch",
           "payload_too_large",
@@ -3900,20 +4053,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/preflights/{id}/details": {
+    "/api/v1/workspaces/{ws}/preflights/{id}/details": {
       "get": {
         "operationId": "listPreflightDetails",
         "summary": "One page of a preflight's detail document, verified by owner UID, immutability and digest before a row is served.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -3990,27 +4144,27 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "result_integrity_failed",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/operations/{kind}/{name}": {
+    "/api/v1/workspaces/{ws}/operations/{kind}/{name}": {
       "get": {
         "operationId": "getOperation",
         "summary": "The normalized status of one Backup, Restore, TopicDiscovery or Preflight. For a backup or a restore the body is an OperationResponse: result and evidence verification are separate, and NotAttempted is never verified success. For a discovery or a preflight it is a CheckOperationResponse, which carries none of those fields because a transient check has none of those facts.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4070,25 +4224,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events": {
+    "/api/v1/workspaces/{ws}/operations/{kind}/{name}/events": {
       "get": {
         "operationId": "streamOperationEvents",
-        "summary": "A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per namespace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream.",
+        "summary": "A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per workspace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4148,25 +4302,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/protection-policies": {
+    "/api/v1/workspaces/{ws}/protection-policies": {
       "get": {
         "operationId": "listProtectionPolicies",
         "summary": "Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's OWN readiness beside protection health, and the alert ledger with its delivery state. No sink URL, no routing key and no Secret name: each route publishes its name and which channels it has as booleans.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4187,7 +4341,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -4234,25 +4388,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/protection-policies/{name}": {
+    "/api/v1/workspaces/{ws}/protection-policies/{name}": {
       "get": {
         "operationId": "getProtectionPolicy",
         "summary": "One protection policy. `health` absent means nothing has been evaluated, which is not Healthy.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4297,25 +4451,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/catalogs": {
+    "/api/v1/workspaces/{ws}/catalogs": {
       "get": {
         "operationId": "listCatalogs",
         "summary": "Recovery catalogs: the ten verdict counts, the signer list, whether the Kubernetes view is a WINDOW over a larger archive, and when that window ages out with its sync Job.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4336,7 +4490,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -4383,12 +4537,12 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       },
       "post": {
@@ -4396,10 +4550,10 @@
         "summary": "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4408,7 +4562,7 @@
             "name": "Idempotency-Key",
             "in": "header",
             "required": true,
-            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, workspace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
             "schema": {
               "type": "string",
               "minLength": 8,
@@ -4478,7 +4632,6 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "origin_mismatch",
           "payload_too_large",
           "rate_limited",
@@ -4487,20 +4640,21 @@
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/catalogs/{name}": {
+    "/api/v1/workspaces/{ws}/catalogs/{name}": {
       "get": {
         "operationId": "getCatalog",
         "summary": "One catalog.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4545,25 +4699,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/catalogs/{name}/points": {
+    "/api/v1/workspaces/{ws}/catalogs/{name}/points": {
       "get": {
         "operationId": "listCatalogPoints",
         "summary": "One page of the materialised point view, with availability and verification as SEPARATE columns and the controller's own `selectable` conjunction beside them. Pages are read by the names the catalog's status records, at most eight per request, and each one is refused unless it is immutable and its bytes match the digest the status recorded. The cursor is bound to the view generation: a view replaced under a paging client is cursor_invalid with 'restart the list', never a silently different page. An empty list with viewExpired true means the window aged out, not that the archive is empty. incomplete true means a named materialised page disappeared during this read; any rows are a prefix, never proof that omitted rows are absent.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4644,27 +4798,27 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "result_integrity_failed",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/catalogs/{name}/signers": {
+    "/api/v1/workspaces/{ws}/catalogs/{name}/signers": {
       "get": {
         "operationId": "listCatalogSigners",
         "summary": "The untrusted-signer panel: each key id that signed points in this archive, how many, and whether the bound TrustPolicy accepts it — with the out-of-band fingerprint command and NO route that would trust a key. Absent `trusted` means the catalog could not tell, which is not false and is certainly not true.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4709,25 +4863,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/retention-policies": {
+    "/api/v1/workspaces/{ws}/retention-policies": {
       "get": {
         "operationId": "listRetentionPolicies",
         "summary": "Retention: what the last evaluation would remove, what is ACTUALLY enforcing it (RecommendationOnly, LogweirWorker or ExternalLifecycleDeclared), which guarantees are Logweir-enforced, provider-declared-unverified or not enforced at all, where the approved-plan gate stands, and whether three consecutive failed runs have set EnforcementDegraded. The delete-capable credential is published as a boolean, never as a Secret name.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4748,7 +4902,7 @@
             "name": "cursor",
             "in": "query",
             "required": false,
-            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, workspace and filters; expires after 15 minutes.",
             "schema": {
               "type": "string"
             }
@@ -4795,25 +4949,25 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "rate_limited",
           "session_expired",
           "unauthenticated",
           "upstream_timeout",
-          "validation_failed"
+          "validation_failed",
+          "workspace_forbidden"
         ]
       }
     },
-    "/api/v1/namespaces/{ns}/retention-policies/{name}": {
+    "/api/v1/workspaces/{ws}/retention-policies/{name}": {
       "get": {
         "operationId": "getRetentionPolicy",
         "summary": "One retention policy, with the plan preview its last evaluation produced. Nothing in `lastEvaluation` was deleted.",
         "parameters": [
           {
-            "name": "ns",
+            "name": "ws",
             "in": "path",
             "required": true,
-            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists.",
             "schema": {
               "type": "string"
             }
@@ -4858,19 +5012,19 @@
           "malformed_request",
           "method_not_allowed",
           "misdirected_request",
-          "namespace_forbidden",
           "not_found",
           "rate_limited",
           "session_expired",
           "unauthenticated",
-          "upstream_timeout"
+          "upstream_timeout",
+          "workspace_forbidden"
         ]
       }
     },
     "/api/v1/trust-policies": {
       "get": {
         "operationId": "listTrustPolicies",
-        "summary": "The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no namespace and requires the administrator role in at least one bound namespace. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route.",
+        "summary": "The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no workspace and requires the administrator role in at least one workspace; it serves the policies that govern the install's namespace and the installation default. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route.",
         "parameters": [
           {
             "name": "limit",
@@ -5060,7 +5214,7 @@
         "description": "How one role's credential is obtained.",
         "oneOf": [
           {
-            "description": "Keys read from a Secret in this namespace, projected into the Job.",
+            "description": "Keys read from a Secret in this workspace, projected into the Job.",
             "type": "string",
             "enum": [
               "secretKeys"
@@ -5373,7 +5527,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "planHash": {
@@ -5486,7 +5640,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "planHash": {
@@ -5544,7 +5698,7 @@
         }
       },
       "ApprovalPolicyView": {
-        "description": "PLAT-19.2: a namespace's effective approval policy.",
+        "description": "PLAT-19.2: a workspace's effective approval policy.",
         "type": "object",
         "required": [
           "basis",
@@ -5553,19 +5707,19 @@
           "legacy",
           "mode",
           "name",
-          "namespace",
           "operatorMode",
           "ordinaryConfirmationAvailable",
           "requireDistinctPrincipal",
-          "ticketRequired"
+          "ticketRequired",
+          "workspace"
         ],
         "properties": {
           "basis": {
-            "description": "PROD-16.1: why the namespace resolves to this policy.",
+            "description": "PROD-16.1: why the workspace resolves to this policy.",
             "$ref": "#/components/schemas/PolicyBasisView"
           },
           "confirmationKeyId": {
-            "description": "The console's `ConsoleConfirmation` key id, when configured — the id an administrator must put on this namespace's `TrustPolicy`.",
+            "description": "The console's `ConsoleConfirmation` key id, when configured — the id an administrator must put on the install's `TrustPolicy`.",
             "type": "string",
             "nullable": true
           },
@@ -5583,7 +5737,7 @@
             "type": "string"
           },
           "legacy": {
-            "description": "`true` when the namespace resolves to `legacy-governed-v1`.",
+            "description": "`true` when the workspace resolves to `legacy-governed-v1`.",
             "type": "boolean"
           },
           "maxAgeSeconds": {
@@ -5597,11 +5751,7 @@
             "$ref": "#/components/schemas/ApprovalModeView"
           },
           "name": {
-            "description": "The policy name — `legacy-governed-v1` for an unbound namespace on an unmarked install, `default-confirm-v1` for one under a `confirm` unbound default (PROD-16.1).",
-            "type": "string"
-          },
-          "namespace": {
-            "description": "The namespace asked about.",
+            "description": "The policy name — `legacy-governed-v1` for an unbound workspace on an unmarked install, `default-confirm-v1` for one under a `confirm` unbound default (PROD-16.1).",
             "type": "string"
           },
           "operatorMode": {
@@ -5619,6 +5769,10 @@
           "ticketRequired": {
             "description": "Whether a submission here must carry a change ticket (an explicit Governed binding; D0).",
             "type": "boolean"
+          },
+          "workspace": {
+            "description": "The workspace asked about.",
+            "type": "string"
           }
         }
       },
@@ -5677,7 +5831,7 @@
         "description": "Where a two-person request stands.",
         "oneOf": [
           {
-            "description": "The console's own request, verified, bound to this Restore, this plan and the namespace's current policy, inside its window, and not yet approved.",
+            "description": "The console's own request, verified, bound to this Restore, this plan and the workspace's current policy, inside its window, and not yet approved.",
             "type": "string",
             "enum": [
               "pending"
@@ -5713,14 +5867,14 @@
           "approvalName",
           "approve",
           "confirmationName",
-          "namespace",
           "policy",
           "policyDigest",
           "restore",
           "restoreUid",
           "scopeComplete",
           "state",
-          "stateSentence"
+          "stateSentence",
+          "workspace"
         ],
         "properties": {
           "approvalName": {
@@ -5768,17 +5922,13 @@
             "format": "date-time",
             "nullable": true
           },
-          "namespace": {
-            "description": "The namespace.",
-            "type": "string"
-          },
           "planHash": {
             "description": "The plan hash the request names — the Restore's own, recomputed.",
             "type": "string",
             "nullable": true
           },
           "policy": {
-            "description": "The namespace's current policy.",
+            "description": "The workspace's current policy.",
             "type": "string"
           },
           "policyDigest": {
@@ -5844,6 +5994,10 @@
             "description": "The change ticket the requester gave.",
             "type": "string",
             "nullable": true
+          },
+          "workspace": {
+            "description": "The workspace.",
+            "type": "string"
           }
         }
       },
@@ -5989,7 +6143,7 @@
             ]
           },
           {
-            "description": "The session holds no Approver role in this namespace. An Administrator is not an Approver unless separately bound as one.",
+            "description": "The session holds no Approver role in this workspace. An Administrator is not an Approver unless separately bound as one.",
             "type": "string",
             "enum": [
               "notApprover"
@@ -6080,7 +6234,7 @@
         ],
         "properties": {
           "credentialRef": {
-            "description": "An existing Secret in this namespace carrying the object-store credential.",
+            "description": "An existing Secret in this workspace carrying the object-store credential.",
             "default": null,
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
@@ -6246,7 +6400,7 @@
             "format": "int64"
           },
           "destinationRef": {
-            "description": "The saved `BackupDestination` this run was written to, in this namespace.\n\nABSENT means the run carries its archive location INLINE in `archive`, exactly as every run did before saved destinations existed. It is a legacy inline-archive run, not a degraded one.",
+            "description": "The saved `BackupDestination` this run was written to, in this workspace.\n\nABSENT means the run carries its archive location INLINE in `archive`, exactly as every run did before saved destinations existed. It is a legacy inline-archive run, not a degraded one.",
             "$ref": "#/components/schemas/BackupDestinationRefView",
             "nullable": true
           },
@@ -6265,7 +6419,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "observedAuth": {
@@ -6278,7 +6432,7 @@
             "$ref": "#/components/schemas/OperationSummary"
           },
           "queue": {
-            "description": "P10: present while this MANUAL run waits for a slot in its namespace's manual-run pool (`operation.state: queued`, reason `ConcurrencyLimited`) — the ceiling it is queued behind. Absent on every other run, and on anything an older controller wrote.",
+            "description": "P10: present while this MANUAL run waits for a slot in its workspace's manual-run pool (`operation.state: queued`, reason `ConcurrencyLimited`) — the ceiling it is queued behind. Absent on every other run, and on anything an older controller wrote.",
             "$ref": "#/components/schemas/RunQueueView",
             "nullable": true
           },
@@ -6346,7 +6500,7 @@
         ],
         "properties": {
           "name": {
-            "description": "The destination's name, in this namespace.",
+            "description": "The destination's name, in this workspace.",
             "type": "string"
           },
           "uid": {
@@ -6390,7 +6544,7 @@
         ],
         "properties": {
           "destination": {
-            "description": "The destination, in this namespace.",
+            "description": "The destination, in this workspace.",
             "default": null,
             "type": "string",
             "nullable": true
@@ -6408,7 +6562,7 @@
             "nullable": true
           },
           "sourceConnection": {
-            "description": "The source connection, in this namespace.",
+            "description": "The source connection, in this workspace.",
             "type": "string"
           },
           "topics": {
@@ -6458,7 +6612,7 @@
             "nullable": true
           },
           "name": {
-            "description": "The `BackupSchedule` name, in this namespace.",
+            "description": "The `BackupSchedule` name, in this workspace.",
             "type": "string"
           }
         },
@@ -6484,14 +6638,14 @@
         ]
       },
       "CaBundleRequest": {
-        "description": "A CA bundle in a `ConfigMap` in this namespace. A `ConfigMap` and never a Secret: a CA certificate is public material.",
+        "description": "A CA bundle in a `ConfigMap` in the installation's namespace (ConfigMaps are not held to a workspace). A `ConfigMap` and never a Secret: a CA certificate is public material.",
         "type": "object",
         "required": [
           "configMapName"
         ],
         "properties": {
           "configMapName": {
-            "description": "The `ConfigMap` name, in this namespace.",
+            "description": "The `ConfigMap` name.",
             "type": "string"
           },
           "key": {
@@ -6821,7 +6975,7 @@
         }
       },
       "Capabilities": {
-        "description": "The capability flags of one namespace grant.\n\nEvery flag is `implemented && allowed`. The eight domains that have no route in this build are always `false`.",
+        "description": "The capability flags of one workspace grant.\n\nEvery flag is `implemented && allowed`. The eight domains that have no route in this build are always `false`.",
         "type": "object",
         "required": [
           "approvalPacketRead",
@@ -6933,7 +7087,7 @@
             "type": "boolean"
           },
           "scheduleCreate": {
-            "description": "`POST .../schedules` — AND `PUT .../schedules/{name}`.\n\nONE FLAG FOR TWO ROUTES, BECAUSE IT IS ONE AUTHORITY. D1 §5.1 makes a schedule's future policy editable, and this crate's decision (recorded in `docs/api.md`) is that an operator who may WRITE a policy into a bound namespace may write a new one over it: the edit reaches exactly the fields `POST` already sets, never `spec.sourceRef`, and never a created run. `Action::EditSchedulePolicy` is a separate action so the AUDIT record says `schedule.editPolicy` rather than `schedule.create`, but it has the same role allowance — pinned by `tests/role_matrix.rs::editing_a_policy_is_exactly_the_authority_to_create_one` — so a console reads this one flag for both buttons. D2 §8's rule stands: `ui/contract.js`'s `CAPABILITY_FLAGS` is a frozen 19-entry list, and splitting a flag is a contract change that lands on both sides at once.",
+            "description": "`POST .../schedules` — AND `PUT .../schedules/{name}`.\n\nONE FLAG FOR TWO ROUTES, BECAUSE IT IS ONE AUTHORITY. D1 §5.1 makes a schedule's future policy editable, and this crate's decision (recorded in `docs/api.md`) is that an operator who may WRITE a policy into a bound workspace may write a new one over it: the edit reaches exactly the fields `POST` already sets, never `spec.sourceRef`, and never a created run. `Action::EditSchedulePolicy` is a separate action so the AUDIT record says `schedule.editPolicy` rather than `schedule.create`, but it has the same role allowance — pinned by `tests/role_matrix.rs::editing_a_policy_is_exactly_the_authority_to_create_one` — so a console reads this one flag for both buttons. D2 §8's rule stands: `ui/contract.js`'s `CAPABILITY_FLAGS` is a frozen 19-entry list, and splitting a flag is a contract change that lands on both sides at once.",
             "type": "boolean"
           },
           "scheduleSetSuspension": {
@@ -7083,7 +7237,7 @@
         ],
         "properties": {
           "catalog": {
-            "description": "The catalog, in this namespace.",
+            "description": "The catalog, in this workspace.",
             "type": "string"
           },
           "pointId": {
@@ -7202,7 +7356,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "observedGeneration": {
@@ -7491,7 +7645,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "observedAt": {
@@ -7969,7 +8123,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "reachability": {
@@ -7983,6 +8137,11 @@
           "role": {
             "description": "The role label.",
             "type": "string"
+          },
+          "schemaRegistry": {
+            "description": "The connection's Schema Registry (PROD-03.1), when it names one.",
+            "$ref": "#/components/schemas/SchemaRegistryView",
+            "nullable": true
           },
           "uid": {
             "description": "The Kubernetes UID.",
@@ -8192,7 +8351,7 @@
         "additionalProperties": false
       },
       "CreateBackupRequest": {
-        "description": "`POST /api/v1/namespaces/{ns}/backups` — \"Back up now\" and \"Run first backup now\" (D1 §8.2).\n\nTWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's current revision — selection, archive, deadline — and records `{uid, generation, runPolicySha256}`; a policy field in the body beside it is `422`, because a \"manual run of this schedule\" that quietly ran a different policy would be the wrong thing recorded in the receipt. Without it the body IS the policy, for a cluster with no schedule yet.",
+        "description": "`POST /api/v1/workspaces/{ws}/backups` — \"Back up now\" and \"Run first backup now\" (D1 §8.2).\n\nTWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's current revision — selection, archive, deadline — and records `{uid, generation, runPolicySha256}`; a policy field in the body beside it is `422`, because a \"manual run of this schedule\" that quietly ran a different policy would be the wrong thing recorded in the receipt. Without it the body IS the policy, for a cluster with no schedule yet.",
         "type": "object",
         "properties": {
           "deadlineSeconds": {
@@ -8227,7 +8386,7 @@
             "nullable": true
           },
           "sourceRef": {
-            "description": "Body B: the source connection, in this namespace.",
+            "description": "Body B: the source connection, in this workspace.",
             "default": null,
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
@@ -8242,7 +8401,7 @@
         "additionalProperties": false
       },
       "CreateConnectionRequest": {
-        "description": "`POST /api/v1/namespaces/{ns}/connections`.",
+        "description": "`POST /api/v1/workspaces/{ws}/connections`.",
         "type": "object",
         "required": [
           "auth",
@@ -8270,12 +8429,17 @@
           "role": {
             "description": "`source` or `target`.",
             "$ref": "#/components/schemas/ConnectionRole"
+          },
+          "schemaRegistry": {
+            "description": "**PROD-03.1.** The cluster's Schema Registry: captured by a backup of this connection, written by a restore into it. The password, when given, goes into the connection's own Secret under `registry-password`.",
+            "$ref": "#/components/schemas/SchemaRegistryRequest",
+            "nullable": true
           }
         },
         "additionalProperties": false
       },
       "CreateDestinationRequest": {
-        "description": "`POST /api/v1/namespaces/{ns}/destinations`.",
+        "description": "`POST /api/v1/workspaces/{ws}/destinations`.",
         "type": "object",
         "required": [
           "access",
@@ -8289,7 +8453,7 @@
             "$ref": "#/components/schemas/AccessRequest"
           },
           "default": {
-            "description": "Whether this becomes the namespace's default destination. At most one destination per namespace may hold it, and a second request naming another default is a conflict rather than a silent takeover.",
+            "description": "Whether this becomes the workspace's default destination. At most one destination per workspace may hold it, and a second request naming another default is a conflict rather than a silent takeover.",
             "default": null,
             "type": "boolean",
             "nullable": true
@@ -8381,7 +8545,7 @@
         "additionalProperties": false
       },
       "CreateRestoreRequest": {
-        "description": "`POST /api/v1/namespaces/{ns}/restores`.\n\n`planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of exactly these bytes and stores them unchanged. It never parses or re-emits the plan document.",
+        "description": "`POST /api/v1/workspaces/{ws}/restores`.\n\n`planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of exactly these bytes and stores them unchanged. It never parses or re-emits the plan document.",
         "type": "object",
         "required": [
           "approvalRef",
@@ -8395,7 +8559,7 @@
         ],
         "properties": {
           "approvalRef": {
-            "description": "The Approval that will authorise this restore, in this namespace. It need not exist yet: the controller holds the restore until it verifies.",
+            "description": "The Approval that will authorise this restore, in this workspace. It need not exist yet: the controller holds the restore until it verifies.",
             "$ref": "#/components/schemas/NameRef"
           },
           "backupSetRef": {
@@ -8424,7 +8588,7 @@
             "nullable": true
           },
           "originalNameConfirmation": {
-            "description": "**OD-10 (PROD-15.1 review M1).** The original topic names the requester RE-TYPED to confirm a restore under the ORIGINAL topic names alone. REQUIRED for a request declaring `target.topicNaming.originalName` in a namespace confirmed by one person (`confirm`, internal `Ordinary`), where it must be exactly the plan's `source.topics` (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere else (`not_accepted`). The console signs it into the authorization document, and the controller and the runner hold it to the plan again. Absent keeps the idempotency hash unchanged.",
+            "description": "**OD-10 (PROD-15.1 review M1).** The original topic names the requester RE-TYPED to confirm a restore under the ORIGINAL topic names alone. REQUIRED for a request declaring `target.topicNaming.originalName` in a workspace confirmed by one person (`confirm`, internal `Ordinary`), where it must be exactly the plan's `source.topics` (`typed_topics_required`, `typed_topics_mismatch`); refused anywhere else (`not_accepted`). The console signs it into the authorization document, and the controller and the runner hold it to the plan again. Absent keeps the idempotency hash unchanged.",
             "$ref": "#/components/schemas/OriginalNameConfirmationRequest",
             "nullable": true
           },
@@ -8454,7 +8618,7 @@
             "$ref": "#/components/schemas/RestoreTargetRequest"
           },
           "ticket": {
-            "description": "PLAT-19.2: the change ticket the console signs into the authorization document. REQUIRED in a namespace bound to a Governed policy (D0), optional under Ordinary, refused in an unbound namespace (which signs nothing; `logweir drill approve --ticket` carries it there). At most 128 printable characters. Absent keeps the idempotency hash unchanged.",
+            "description": "PLAT-19.2: the change ticket the console signs into the authorization document. REQUIRED in a workspace bound to a Governed policy (D0), optional under Ordinary, refused in an unbound workspace (which signs nothing; `logweir drill approve --ticket` carries it there). At most 128 printable characters. Absent keeps the idempotency hash unchanged.",
             "type": "string",
             "nullable": true
           },
@@ -8470,7 +8634,7 @@
         "additionalProperties": false
       },
       "CreateScheduleRequest": {
-        "description": "`POST /api/v1/namespaces/{ns}/schedules`.\n\n# It creates what the edit route can edit (PLAT-10.1)\n\nUntil PLAT-10.1 this DTO carried seven fields and the edit route carried thirteen, so a schedule the console could *edit* into shape could not be *created* in that shape: a saved destination, a dynamic selection, a zone, a catch-up policy and retries all had to be added afterwards by a second request against an object that was already scheduling runs from a policy nobody asked for. D2 W13's record named the first of those — \"`CreateScheduleRequest.destinationRef`\" — under *owed by the API before these pages are complete*, and the console's create form printed the debt on screen. The optional fields below close it, and they are exactly [`UpdateSchedulePolicyRequest`]'s, so one form serves both routes.\n\n# Every addition is optional, and an old body still means what it meant\n\n`archive` became optional so that `destinationRef` can take its place — **exactly one** of the two, as on the edit route — and `topics` became optional so that `allUserTopics` can take *its* place. A pre-PLAT-10.1 body names `archive` and a non-empty `topics` and is refused by neither rule, so it creates byte for byte the schedule it created before: absent `timeZone` is UTC, absent `catchUpPolicy` is `None`, absent `retry` is no retries, and absent deadlines are the documented defaults.\n\n# And it hashes to the bytes it always hashed to\n\nThe idempotency request hash is taken over THIS type's serialisation, so every member added by PLAT-10.1 is `skip_serializing_if = \"Option::is_none\"` (the rule `topic_mapping` states for restores): a pre-PLAT-10.1 body retried under its old `Idempotency-Key` after an upgrade replays onto its object instead of answering `409 idempotency_conflict`. `concurrencyPolicy` and `retention` predate PLAT-10.1 and ALWAYS serialised, `null` included, so they keep doing so. `schedule_create::a_pre_plat_10_1_body_hashes_to_its_pre_upgrade_bytes` pins the bytes.",
+        "description": "`POST /api/v1/workspaces/{ws}/schedules`.\n\n# It creates what the edit route can edit (PLAT-10.1)\n\nUntil PLAT-10.1 this DTO carried seven fields and the edit route carried thirteen, so a schedule the console could *edit* into shape could not be *created* in that shape: a saved destination, a dynamic selection, a zone, a catch-up policy and retries all had to be added afterwards by a second request against an object that was already scheduling runs from a policy nobody asked for. D2 W13's record named the first of those — \"`CreateScheduleRequest.destinationRef`\" — under *owed by the API before these pages are complete*, and the console's create form printed the debt on screen. The optional fields below close it, and they are exactly [`UpdateSchedulePolicyRequest`]'s, so one form serves both routes.\n\n# Every addition is optional, and an old body still means what it meant\n\n`archive` became optional so that `destinationRef` can take its place — **exactly one** of the two, as on the edit route — and `topics` became optional so that `allUserTopics` can take *its* place. A pre-PLAT-10.1 body names `archive` and a non-empty `topics` and is refused by neither rule, so it creates byte for byte the schedule it created before: absent `timeZone` is UTC, absent `catchUpPolicy` is `None`, absent `retry` is no retries, and absent deadlines are the documented defaults.\n\n# And it hashes to the bytes it always hashed to\n\nThe idempotency request hash is taken over THIS type's serialisation, so every member added by PLAT-10.1 is `skip_serializing_if = \"Option::is_none\"` (the rule `topic_mapping` states for restores): a pre-PLAT-10.1 body retried under its old `Idempotency-Key` after an upgrade replays onto its object instead of answering `409 idempotency_conflict`. `concurrencyPolicy` and `retention` predate PLAT-10.1 and ALWAYS serialised, `null` included, so they keep doing so. `schedule_create::a_pre_plat_10_1_body_hashes_to_its_pre_upgrade_bytes` pins the bytes.",
         "type": "object",
         "required": [
           "schedule",
@@ -8514,7 +8678,7 @@
             "nullable": true
           },
           "destinationRef": {
-            "description": "A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built by the route and is never accepted from a body.",
+            "description": "A saved `BackupDestination` in this workspace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built by the route and is never accepted from a body.",
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
@@ -8534,7 +8698,7 @@
             "type": "string"
           },
           "sourceRef": {
-            "description": "The source connection, in this namespace.",
+            "description": "The source connection, in this workspace.",
             "$ref": "#/components/schemas/NameRef"
           },
           "startingDeadlineSeconds": {
@@ -8596,7 +8760,7 @@
             "$ref": "#/components/schemas/SwitchoverRestoreRef"
           },
           "ticket": {
-            "description": "The change ticket, signed beside the plan in a bound namespace.",
+            "description": "The change ticket, signed beside the plan in a bound workspace.",
             "type": "string",
             "nullable": true
           }
@@ -8762,7 +8926,7 @@
             "nullable": true
           },
           "default": {
-            "description": "Whether this is the namespace's default destination.",
+            "description": "Whether this is the workspace's default destination.",
             "type": "boolean"
           },
           "description": {
@@ -8790,7 +8954,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "resourceVersion": {
@@ -8979,7 +9143,7 @@
             "type": "string"
           },
           "default": {
-            "description": "Whether this is the namespace's default destination.",
+            "description": "Whether this is the workspace's default destination.",
             "type": "boolean"
           },
           "description": {
@@ -9485,7 +9649,7 @@
         }
       },
       "ExistingSecretRequest": {
-        "description": "An existing Secret in this namespace, and the keys inside it.",
+        "description": "An existing Secret in this workspace, and the keys inside it.",
         "type": "object",
         "required": [
           "name"
@@ -9769,7 +9933,7 @@
             "format": "int32"
           },
           "backupRef": {
-            "description": "The `Backup` the disposition is about, when there is one — a name in this namespace, which every reader of the schedule may already list.",
+            "description": "The `Backup` the disposition is about, when there is one — a name in this workspace, which every reader of the schedule may already list.",
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
@@ -9861,7 +10025,7 @@
         }
       },
       "ManualBackupResponse": {
-        "description": "`POST /api/v1/namespaces/{ns}/backups`: the created run, and the schedule it came from.",
+        "description": "`POST /api/v1/workspaces/{ws}/backups`: the created run, and the schedule it came from.",
         "type": "object",
         "required": [
           "item",
@@ -9945,14 +10109,14 @@
         }
       },
       "NameRef": {
-        "description": "A same-namespace reference by name.",
+        "description": "A same-workspace reference by name.",
         "type": "object",
         "required": [
           "name"
         ],
         "properties": {
           "name": {
-            "description": "The referenced object's name, in the same namespace.",
+            "description": "The referenced object's name, in the same workspace.",
             "type": "string"
           }
         },
@@ -9979,55 +10143,8 @@
           }
         }
       },
-      "NamespaceGrant": {
-        "description": "One explicitly granted namespace.",
-        "type": "object",
-        "required": [
-          "capabilities",
-          "name",
-          "roles"
-        ],
-        "properties": {
-          "capabilities": {
-            "description": "What the actor may do there. Domains without a route are `false`.",
-            "$ref": "#/components/schemas/Capabilities"
-          },
-          "name": {
-            "description": "The namespace name.",
-            "type": "string"
-          },
-          "roles": {
-            "description": "The product roles the actor holds here, sorted and unioned across every binding that matched. Empty in localAdmin mode, which has no roles.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Role"
-            }
-          }
-        }
-      },
-      "NamespaceListResponse": {
-        "description": "`GET /api/v1/namespaces`.",
-        "type": "object",
-        "required": [
-          "items",
-          "requestId"
-        ],
-        "properties": {
-          "items": {
-            "description": "The configured grants. Core `Namespace` objects are never listed.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NamespaceGrant"
-            }
-          },
-          "requestId": {
-            "description": "The request ID.",
-            "type": "string"
-          }
-        }
-      },
       "NewConnectionCredentialRequest": {
-        "description": "**PROD-01.3 security follow-up: the credential, typed ONCE.**\n\nWRITE-ONLY. The value becomes a Secret this service creates — owned by the connection, bound to it (`logweir-binding`) — and is never echoed in any response, log line, status, annotation or audit record; the only thing that comes out of it is the Secret's NAME. This replaces naming an existing Secret: a connection that could name any Secret in the namespace could make Logweir present another team's credential to a broker of its author's choosing.\n\n**IT SERIALIZES WITHOUT ITS VALUES.** `Serialize` is hand-written: every present field becomes [`WRITE_ONLY_PLACEHOLDER`]. The request DTO is serialized to compute the idempotency digests this service publishes on the object (`api.logweir.dev/request-sha256`) and writes into the audit record, and a digest over a password is an offline confirmation oracle for anyone who can read the object. With the placeholder, no serialization of this type — a digest, an audit field, a future debug dump — can carry a value.",
+        "description": "**PROD-01.3 security follow-up: the credential, typed ONCE.**\n\nWRITE-ONLY. The value becomes a Secret this service creates — owned by the connection, bound to it (`logweir-binding`) — and is never echoed in any response, log line, status, annotation or audit record; the only thing that comes out of it is the Secret's NAME. This replaces naming an existing Secret: a connection that could name any Secret in the workspace could make Logweir present another team's credential to a broker of its author's choosing.\n\n**IT SERIALIZES WITHOUT ITS VALUES.** `Serialize` is hand-written: every present field becomes [`WRITE_ONLY_PLACEHOLDER`]. The request DTO is serialized to compute the idempotency digests this service publishes on the object (`api.logweir.dev/request-sha256`) and writes into the audit record, and a digest over a password is an offline confirmation oracle for anyone who can read the object. With the placeholder, no serialization of this type — a digest, an audit field, a future debug dump — can carry a value.",
         "type": "object",
         "properties": {
           "certificatePem": {
@@ -10101,7 +10218,7 @@
         }
       },
       "ObjectKeyRefRequest": {
-        "description": "One key of a ConfigMap in this namespace.",
+        "description": "One key of a ConfigMap in the installation's namespace. ConfigMaps are not held to a workspace: name only a public CA bundle.",
         "type": "object",
         "required": [
           "key",
@@ -10113,7 +10230,7 @@
             "type": "string"
           },
           "name": {
-            "description": "The object's name, in the same namespace.",
+            "description": "The ConfigMap's name.",
             "type": "string"
           }
         },
@@ -10226,7 +10343,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "resourceVersion": {
@@ -10474,10 +10591,17 @@
             ]
           },
           {
-            "description": "Cancelled. Not produced by current resources (no cancel exists).",
+            "description": "Cancelled before it created anything (PROD-07.2: a restore whose cancel landed before its Job, or that stopped before its creation step).",
             "type": "string",
             "enum": [
               "cancelled"
+            ]
+          },
+          {
+            "description": "PROD-07.2: stopped before it finished after it created its target topics; nothing was resumed. `interruption` says why and what the reconcile found.",
+            "type": "string",
+            "enum": [
+              "interrupted"
             ]
           },
           {
@@ -10692,7 +10816,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "progress": {
@@ -10811,7 +10935,7 @@
         ]
       },
       "OriginalNameConfirmationRequest": {
-        "description": "**OD-10.** The typed confirmation of a restore under the original topic names on a one-person-confirmation namespace.",
+        "description": "**OD-10.** The typed confirmation of a restore under the original topic names on a one-person-confirmation workspace.",
         "type": "object",
         "required": [
           "typedTopics"
@@ -10845,7 +10969,7 @@
             "minimum": 0.0
           },
           "nextCursor": {
-            "description": "An opaque cursor for the next page, valid for fifteen minutes for the same actor, route, namespace and filters; absent on the last page.",
+            "description": "An opaque cursor for the next page, valid for fifteen minutes for the same actor, route, workspace and filters; absent on the last page.",
             "type": "string",
             "nullable": true
           },
@@ -11003,7 +11127,7 @@
         ],
         "properties": {
           "backupVerdictsIncomplete": {
-            "description": "Present when the controller's `Backup` verdicts could not ALL be read, so `selectable` and `backupVerdict` reflect only the ones that were — for the rest, the catalog row alone. `Truncated`: the namespace holds more `Backup`s than one request reads (2 000). `Unavailable`: the `Backup` list failed (transport, RBAC, a missing CRD), or a refusal named no receipt digest and no set id and so could be tied to no row. Absent means every `Backup` was read. The page is served either way: the point list is what an operator reads to choose a point, and the Restore reconciler and the runner re-verify before any data-plane work.",
+            "description": "Present when the controller's `Backup` verdicts could not ALL be read, so `selectable` and `backupVerdict` reflect only the ones that were — for the rest, the catalog row alone. `Truncated`: the workspace holds more `Backup`s than one request reads (2 000). `Unavailable`: the `Backup` list failed (transport, RBAC, a missing CRD), or a refusal named no receipt digest and no set id and so could be tied to no row. Absent means every `Backup` was read. The page is served either way: the point list is what an operator reads to choose a point, and the Restore reconciler and the runner re-verify before any data-plane work.",
             "$ref": "#/components/schemas/BackupVerdictsIncomplete",
             "nullable": true
           },
@@ -11133,6 +11257,38 @@
           "verdict": {
             "description": "`schemaDependent` (a key or value side is framed: registry not captured), `notDetected` (neither side over the records judged), or `notAssessed` (nothing could be judged; `reason` says why).",
             "type": "string"
+          }
+        }
+      },
+      "PointSchemaRegistryView": {
+        "description": "A point's Schema Registry capture (PROD-03.1).",
+        "type": "object",
+        "required": [
+          "captured",
+          "subjects",
+          "versions"
+        ],
+        "properties": {
+          "captured": {
+            "description": "Whether the snapshot was taken.",
+            "type": "boolean"
+          },
+          "incompleteReason": {
+            "description": "Why the capture is incomplete (`registryUnreachable`, `registryUnauthorized`, `snapshotTooLarge`, `snapshotIncomplete`, `unresolvedReferences`, `idsNotInSnapshot`); absent when complete.",
+            "type": "string",
+            "nullable": true
+          },
+          "subjects": {
+            "description": "Distinct subjects captured.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "versions": {
+            "description": "Subject-versions captured.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
           }
         }
       },
@@ -11284,6 +11440,11 @@
             "description": "The run that produced it.",
             "type": "string"
           },
+          "schemaRegistry": {
+            "description": "**PROD-03.1.** Whether the backup captured its source Schema Registry, its counts, and why the capture is incomplete. ABSENT: the source connection names no registry, the point predates it, or not published.",
+            "$ref": "#/components/schemas/PointSchemaRegistryView",
+            "nullable": true
+          },
           "selectable": {
             "description": "The conjunction of the two, materialised by the controller so no surface writes D3 §5.4's selection rule a second time — and `false` whenever `backupVerdict` is present, because a verdict the controller reached outranks a view row that may predate it.",
             "type": "boolean"
@@ -11314,10 +11475,10 @@
         }
       },
       "PolicyBasisView": {
-        "description": "PROD-16.1: why a namespace resolves to its policy.",
+        "description": "PROD-16.1: why a workspace resolves to its policy.",
         "oneOf": [
           {
-            "description": "An explicit namespace binding in the installation document.",
+            "description": "An explicit workspace binding in the installation document.",
             "type": "string",
             "enum": [
               "binding"
@@ -11485,7 +11646,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "observedAt": {
@@ -11754,7 +11915,7 @@
         }
       },
       "ProblemCode": {
-        "description": "The stable problem codes. Clients branch on `code`, never on `detail`.\n\nThe decision's baseline set is here verbatim (`unauthenticated`, `session_expired`, `forbidden`, `namespace_forbidden`, `not_found`, `idempotency_conflict`, `state_conflict`, `approval_required`, `policy_mismatch`, `precondition_failed`, `validation_failed`, `rate_limited`, `kubernetes_unavailable`, `upstream_timeout`, plus the cursor pair). The remainder name transport-level refusals the baseline did not enumerate; each is documented in the OpenAPI document.",
+        "description": "The stable problem codes. Clients branch on `code`, never on `detail`.\n\nThe decision's baseline set is here verbatim (`unauthenticated`, `session_expired`, `forbidden`, `workspace_forbidden`, `not_found`, `idempotency_conflict`, `state_conflict`, `approval_required`, `policy_mismatch`, `precondition_failed`, `validation_failed`, `rate_limited`, `kubernetes_unavailable`, `upstream_timeout`, plus the cursor pair). The remainder name transport-level refusals the baseline did not enumerate; each is documented in the OpenAPI document.",
         "oneOf": [
           {
             "description": "400 — the body is not JSON or did not arrive in time (a body still arriving brought less than 32 KiB in a 30 s window, or it was not whole after 60 s), a query string is malformed or carries an unknown or repeated parameter.",
@@ -11813,10 +11974,10 @@
             ]
           },
           {
-            "description": "403 — the namespace is not explicitly granted to the actor.",
+            "description": "403 — the workspace is not explicitly granted to the actor.",
             "type": "string",
             "enum": [
-              "namespace_forbidden"
+              "workspace_forbidden"
             ]
           },
           {
@@ -12204,7 +12365,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "objectives": {
@@ -12336,7 +12497,7 @@
         ],
         "properties": {
           "preflight": {
-            "description": "The `Preflight` whose verdict was shown, in this namespace.",
+            "description": "The `Preflight` whose verdict was shown, in this workspace.",
             "type": "string"
           },
           "state": {
@@ -12546,12 +12707,17 @@
             "type": "string",
             "nullable": true
           },
+          "interruption": {
+            "description": "PROD-07.2: a run that ended without a signed scorecard after it created its target topics. ABSENT on every other run.",
+            "$ref": "#/components/schemas/RestoreInterruptionView",
+            "nullable": true
+          },
           "name": {
             "description": "The object name.",
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "newTopics": {
@@ -12593,7 +12759,7 @@
             "format": "date-time"
           },
           "queue": {
-            "description": "P10: present while this admitted MANUAL restore waits for a slot in its namespace's manual-restore pool (`operation.state: queued`).",
+            "description": "P10: present while this admitted MANUAL restore waits for a slot in its workspace's manual-restore pool (`operation.state: queued`).",
             "$ref": "#/components/schemas/RunQueueView",
             "nullable": true
           },
@@ -12700,6 +12866,54 @@
           "requested": {
             "description": "What the Restore asks for: `spec.coverage`, absent read as `sampled`. The controller has held it to the plan's own `sample.coverage`.",
             "$ref": "#/components/schemas/RestoreCoverage"
+          },
+          "schemas": {
+            "description": "**PROD-03.2.** The schemas the run imported into the target registry keeping their IDs, how many were there already, or why none were: copied from `status.integrity.schemas`. ABSENT: no registry on either side, or not recorded.",
+            "$ref": "#/components/schemas/RestoreSchemasView",
+            "nullable": true
+          }
+        }
+      },
+      "RestoreInterruptionView": {
+        "description": "`Restore.interruption` (PROD-07.2), from `status.interruption`.",
+        "type": "object",
+        "required": [
+          "cleanupOffered"
+        ],
+        "properties": {
+          "cause": {
+            "description": "`Cancelled`, `RunnerStopped` or `RunFailed`.",
+            "type": "string",
+            "nullable": true
+          },
+          "cleanup": {
+            "description": "The cleanup: `Removing`, `Removed` or `RemovalFailed`.",
+            "type": "string",
+            "nullable": true
+          },
+          "cleanupOffered": {
+            "description": "Whether `cleanup` may be requested now.",
+            "type": "boolean"
+          },
+          "cleanupReason": {
+            "description": "Why the cleanup failed, when it did.",
+            "type": "string",
+            "nullable": true
+          },
+          "requestedBy": {
+            "description": "Who asked for the cancel.",
+            "type": "string",
+            "nullable": true
+          },
+          "verification": {
+            "description": "`Running`, `Done` or `Failed`: the reconcile of the partial targets. Its signed scorecard's counts are this restore's `integrity` and `coverage`.",
+            "type": "string",
+            "nullable": true
+          },
+          "verificationReason": {
+            "description": "Why the reconcile failed, or what it found when nothing was left.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -12810,7 +13024,7 @@
         "additionalProperties": false
       },
       "RestoreResponse": {
-        "description": "One `Restore`.\n\n`authorization` is PLAT-19.2's routing answer and is present exactly on a create (and its replay): what the Restore needs next under the namespace's frozen approval policy. A single read carries none — the operation view and the Approval are the durable state, and this is the answer to one request.",
+        "description": "One `Restore`.\n\n`authorization` is PLAT-19.2's routing answer and is present exactly on a create (and its replay): what the Restore needs next under the workspace's frozen approval policy. A single read carries none — the operation view and the Approval are the durable state, and this is the answer to one request.",
         "type": "object",
         "required": [
           "item",
@@ -12865,11 +13079,11 @@
             "nullable": true
           },
           "legacy": {
-            "description": "`true` for an unbound namespace (today's governed behaviour).",
+            "description": "`true` for an unbound workspace (today's governed behaviour).",
             "type": "boolean"
           },
           "mode": {
-            "description": "The mode the namespace's binding requires.",
+            "description": "The mode the workspace's binding requires.",
             "$ref": "#/components/schemas/ApprovalModeView"
           },
           "operatorMode": {
@@ -12877,7 +13091,7 @@
             "$ref": "#/components/schemas/OperatorModeView"
           },
           "policy": {
-            "description": "The policy name — `legacy-governed-v1` for an unbound namespace.",
+            "description": "The policy name — `legacy-governed-v1` for an unbound workspace.",
             "type": "string"
           },
           "policyDigest": {
@@ -12893,6 +13107,33 @@
           "state": {
             "description": "Where the submission goes next.",
             "$ref": "#/components/schemas/AuthorizationState"
+          }
+        }
+      },
+      "RestoreSchemasView": {
+        "description": "`Restore.coverage.schemas` (PROD-03.2).",
+        "type": "object",
+        "required": [
+          "alreadyPresent",
+          "imported"
+        ],
+        "properties": {
+          "alreadyPresent": {
+            "description": "Subject-versions the target already held.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "imported": {
+            "description": "Subject-versions imported with their source IDs.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "notImported": {
+            "description": "`noTargetRegistry` or `noSnapshot` when nothing was imported.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -12951,7 +13192,7 @@
         ],
         "properties": {
           "clusterRef": {
-            "description": "The target connection, in this namespace.",
+            "description": "The target connection, in this workspace.",
             "$ref": "#/components/schemas/NameRef"
           },
           "mode": {
@@ -13361,7 +13602,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "observedGeneration": {
@@ -13463,14 +13704,14 @@
             ]
           },
           {
-            "description": "Submits governed approvals in approver-bound namespaces. Cannot create an execution.",
+            "description": "Submits governed approvals in approver-bound workspaces. Cannot create an execution.",
             "type": "string",
             "enum": [
               "approver"
             ]
           },
           {
-            "description": "Administers bound namespaces. Is STILL the requester when it operates, and is not an approver unless separately bound as one.",
+            "description": "Administers bound workspaces. Is STILL the requester when it operates, and is not an approver unless separately bound as one.",
             "type": "string",
             "enum": [
               "administrator"
@@ -13479,7 +13720,7 @@
         ]
       },
       "RunQueueView": {
-        "description": "P10: why a manual run has no Job yet — the per-namespace ceiling of its manual-run pool, copied from the object's `status.queue`. Nothing that moves (a count, a place in line) is published: the controller does not record one.",
+        "description": "P10: why a manual run has no Job yet — the per-workspace ceiling of its manual-run pool, copied from the object's `status.queue`. Nothing that moves (a count, a place in line) is published: the controller does not record one.",
         "type": "object",
         "required": [
           "limit"
@@ -13492,7 +13733,7 @@
             "nullable": true
           },
           "limit": {
-            "description": "The ceiling: `runs.maxManualBackupsActivePerNamespace` for a Backup, `runs.maxManualRestoresActivePerNamespace` for a Restore.",
+            "description": "The ceiling: `runs.maxManualBackupsActivePerWorkspace` for a Backup, `runs.maxManualRestoresActivePerWorkspace` for a Restore.",
             "type": "integer",
             "format": "int64"
           }
@@ -13624,7 +13865,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "preset": {
@@ -13842,7 +14083,7 @@
             "nullable": true
           },
           "name": {
-            "description": "The schedule's name, in this namespace.",
+            "description": "The schedule's name, in this workspace.",
             "type": "string"
           },
           "runPolicySha256": {
@@ -13950,6 +14191,55 @@
           "ready": {
             "description": "The `Ready` condition.",
             "$ref": "#/components/schemas/ConditionView",
+            "nullable": true
+          }
+        }
+      },
+      "SchemaRegistryRequest": {
+        "description": "A new connection's Schema Registry. `Debug` and `Serialize` never carry the password.",
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "password": {
+            "description": "The basic-auth password, entered once.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "url": {
+            "description": "`http://` or `https://`, no userinfo, query or fragment.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The basic-auth username; given exactly when `password` is.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "SchemaRegistryView": {
+        "description": "A stored connection's Schema Registry: the URL, the username and the Secret's NAME. Never the password.",
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "credentialRef": {
+            "description": "The Secret holding the password, by name.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "url": {
+            "description": "The registry URL.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The basic-auth username.",
+            "type": "string",
             "nullable": true
           }
         }
@@ -14289,8 +14579,8 @@
           "authenticationMode",
           "bindingRevision",
           "capabilities",
-          "namespaces",
-          "requestId"
+          "requestId",
+          "workspaces"
         ],
         "properties": {
           "actor": {
@@ -14320,21 +14610,21 @@
             "format": "date-time",
             "nullable": true
           },
-          "namespaces": {
-            "description": "The explicitly granted namespaces.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/NamespaceGrant"
-            }
-          },
           "requestId": {
             "description": "The request ID.",
             "type": "string"
+          },
+          "workspaces": {
+            "description": "The workspaces the actor holds a role in.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceGrant"
+            }
           }
         }
       },
       "SetSuspensionRequest": {
-        "description": "`POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension`.",
+        "description": "`POST /api/v1/workspaces/{ws}/schedules/{name}:set-suspension`.",
         "type": "object",
         "required": [
           "expectedResourceVersion",
@@ -14444,7 +14734,7 @@
         ],
         "properties": {
           "connectionRef": {
-            "description": "The `KafkaCluster` to dial, in this namespace. REQUIRED: a connectivity check with no connection is not a smaller check, it is no check, and the absence is refused as `422 connectionRef required` rather than defaulted to anything.",
+            "description": "The `KafkaCluster` to dial, in this workspace. REQUIRED: a connectivity check with no connection is not a smaller check, it is no check, and the absence is refused as `422 connectionRef required` rather than defaulted to anything.",
             "type": "string"
           }
         },
@@ -14643,14 +14933,14 @@
         }
       },
       "SubmitApprovalRequest": {
-        "description": "`POST .../restores/{name}/approval` — an approver records the approval a Restore waits for.\n\n* Under an explicit **Governed** policy: `sidecarBytes` only — the DSSE sidecar `logweir drill countersign` wrote over the console's confirmation; the confirmation's exact document bytes are used, so `approvalBytes` is refused. * In an **unbound** namespace (`legacy-governed-v1`, today's flow): both files `logweir drill approve` wrote over the Restore's plan, exactly as they arrived.",
+        "description": "`POST .../restores/{name}/approval` — an approver records the approval a Restore waits for.\n\n* Under an explicit **Governed** policy: `sidecarBytes` only — the DSSE sidecar `logweir drill countersign` wrote over the console's confirmation; the confirmation's exact document bytes are used, so `approvalBytes` is refused. * In an **unbound** workspace (`legacy-governed-v1`, today's flow): both files `logweir drill approve` wrote over the Restore's plan, exactly as they arrived.",
         "type": "object",
         "required": [
           "sidecarBytes"
         ],
         "properties": {
           "approvalBytes": {
-            "description": "`approval.json` from `logweir drill approve` — unbound namespaces only. At most 64 KiB.",
+            "description": "`approval.json` from `logweir drill approve` — unbound workspaces only. At most 64 KiB.",
             "type": "string",
             "nullable": true
           },
@@ -14684,14 +14974,14 @@
           "approvalName",
           "approve",
           "confirmationName",
-          "namespace",
           "policy",
           "policyDigest",
           "scopeComplete",
           "state",
           "stateSentence",
           "switchover",
-          "switchoverUid"
+          "switchoverUid",
+          "workspace"
         ],
         "properties": {
           "approvalName": {
@@ -14728,9 +15018,6 @@
             "type": "string",
             "format": "date-time",
             "nullable": true
-          },
-          "namespace": {
-            "type": "string"
           },
           "planHash": {
             "type": "string",
@@ -14796,6 +15083,9 @@
           "ticket": {
             "type": "string",
             "nullable": true
+          },
+          "workspace": {
+            "type": "string"
           }
         }
       },
@@ -14891,7 +15181,7 @@
             "nullable": true
           },
           "restoreName": {
-            "description": "The verified `Restore`, in this namespace.",
+            "description": "The verified `Restore`, in this workspace.",
             "type": "string"
           },
           "restoreUid": {
@@ -14936,7 +15226,7 @@
         ],
         "properties": {
           "name": {
-            "description": "The `Restore`'s name, in this namespace.",
+            "description": "The `Restore`'s name, in this workspace.",
             "type": "string"
           },
           "uid": {
@@ -15498,7 +15788,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The namespace.",
+            "description": "The namespace: the install's, for `kubectl`.",
             "type": "string"
           },
           "observedAt": {
@@ -16277,7 +16567,7 @@
         "additionalProperties": false
       },
       "UpdateSchedulePolicyRequest": {
-        "description": "`PUT /api/v1/namespaces/{ns}/schedules/{name}` — the editable future policy (D1 §5.1, §5.6).\n\nTHE WHOLE POLICY, NOT A DIFF. Every mutable field is sent; a field omitted is REMOVED, which is what makes \"absent means the documented default\" reachable from a form. `spec.sourceRef` is not on this DTO at all: the identity of the protected cluster is immutable, and a request naming it is `422 validation_failed` with `sourceRef: field_immutable` before anything is read or written.\n\nIT CHANGES THE FUTURE AND NOTHING ELSE. A `Backup` already created keeps its copied policy and its frozen inputs; an edit during a run does not reach the run (D1 §5.5).",
+        "description": "`PUT /api/v1/workspaces/{ws}/schedules/{name}` — the editable future policy (D1 §5.1, §5.6).\n\nTHE WHOLE POLICY, NOT A DIFF. Every mutable field is sent; a field omitted is REMOVED, which is what makes \"absent means the documented default\" reachable from a form. `spec.sourceRef` is not on this DTO at all: the identity of the protected cluster is immutable, and a request naming it is `422 validation_failed` with `sourceRef: field_immutable` before anything is read or written.\n\nIT CHANGES THE FUTURE AND NOTHING ELSE. A `Backup` already created keeps its copied policy and its frozen inputs; an edit during a run does not reach the run (D1 §5.5).",
         "type": "object",
         "required": [
           "expectedGeneration",
@@ -16312,7 +16602,7 @@
             "nullable": true
           },
           "destinationRef": {
-            "description": "A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built here and is never accepted from a body.",
+            "description": "A saved `BackupDestination` in this workspace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built here and is never accepted from a body.",
             "default": null,
             "$ref": "#/components/schemas/NameRef",
             "nullable": true
@@ -16526,7 +16816,7 @@
             "type": "string"
           },
           "namespace": {
-            "description": "The subject namespace.",
+            "description": "The subject namespace (the install's).",
             "type": "string"
           },
           "uid": {
@@ -16619,6 +16909,53 @@
           }
         },
         "additionalProperties": false
+      },
+      "WorkspaceGrant": {
+        "description": "One workspace the actor holds a role in.",
+        "type": "object",
+        "required": [
+          "capabilities",
+          "name",
+          "roles"
+        ],
+        "properties": {
+          "capabilities": {
+            "description": "What the actor may do there. Domains without a route are `false`.",
+            "$ref": "#/components/schemas/Capabilities"
+          },
+          "name": {
+            "description": "The workspace name.",
+            "type": "string"
+          },
+          "roles": {
+            "description": "The product roles the actor holds here, sorted and unioned across every binding that matched. Empty in localAdmin mode, which has no roles.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Role"
+            }
+          }
+        }
+      },
+      "WorkspaceListResponse": {
+        "description": "`GET /api/v1/workspaces`.",
+        "type": "object",
+        "required": [
+          "items",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The actor's grants, from configuration. Core `Namespace` objects are never listed.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkspaceGrant"
+            }
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
       },
       "WriteProbeDto": {
         "description": "Whether an explicit readiness test may write a marker object.",

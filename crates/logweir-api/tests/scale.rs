@@ -40,6 +40,10 @@
 
 mod support;
 
+/// The `metadata.uid` of `tests/fixtures/recovery-catalog.json`, which its
+/// pages carry as `logweir.dev/catalog-uid`.
+const CATALOG_UID: &str = "catalog-primary-uid";
+
 use std::time::Instant;
 
 use logweir_api::routes::catalogs::{
@@ -172,6 +176,7 @@ fn seed_view(fake: &FakeKube, points: usize, pages: usize) {
             json!({
                 "metadata": {
                     "name": name,
+                    "labels": {weirkeeper::catalog_view::LABEL_CATALOG_UID: CATALOG_UID},
                     "annotations": {weirkeeper::catalog_view::PAGE_DIGEST_ANNOTATION: digest.clone()}
                 },
                 "immutable": true,
@@ -318,7 +323,7 @@ async fn a_point_page_reads_a_bounded_number_of_objects_at_any_scale() {
 
     let walked = walk(
         &app,
-        "/api/v1/namespaces/team-a/catalogs/primary/points?limit=2",
+        "/api/v1/workspaces/team-a/catalogs/primary/points?limit=2",
         64,
     )
     .await;
@@ -364,7 +369,7 @@ async fn a_topic_search_reads_a_bounded_number_of_chunks_at_any_scale() {
     seed_inventory(&fake, "td-scale", 50_000);
     let app = TestApp::with(fake, Options::default());
 
-    let base = "/api/v1/namespaces/team-a/topic-discoveries/td-scale/topics";
+    let base = "/api/v1/workspaces/team-a/topic-discoveries/td-scale/topics";
     let sparse = walk(&app, &format!("{base}?q=no-such-topic&limit=200"), 64).await;
     for (i, r) in sparse.reads.iter().enumerate() {
         assert!(
@@ -409,7 +414,7 @@ async fn walking_the_console_list_budget_is_one_list_per_page() {
 
     let walked = walk(
         &app,
-        &format!("/api/v1/namespaces/team-a/backups?limit={CONSOLE_PAGE_SIZE}"),
+        &format!("/api/v1/workspaces/team-a/backups?limit={CONSOLE_PAGE_SIZE}"),
         CONSOLE_PAGE_BUDGET + 1,
     )
     .await;
@@ -446,7 +451,7 @@ async fn measure_status_load_over_the_console_list_budget() {
     for (plural, label) in [("backups", "Backup"), ("restores", "Restore")] {
         let walked = walk(
             &app,
-            &format!("/api/v1/namespaces/team-a/{plural}?limit={CONSOLE_PAGE_SIZE}"),
+            &format!("/api/v1/workspaces/team-a/{plural}?limit={CONSOLE_PAGE_SIZE}"),
             CONSOLE_PAGE_BUDGET + 1,
         )
         .await;
@@ -460,7 +465,7 @@ async fn measure_status_load_over_the_console_list_budget() {
     for _ in 0..50 {
         let started = Instant::now();
         let r = app
-            .get("/api/v1/namespaces/team-a/operations/backup/b-002500")
+            .get("/api/v1/workspaces/team-a/operations/backup/b-002500")
             .await;
         millis.push(started.elapsed().as_secs_f64() * 1_000.0);
         assert_eq!(r.status, 200, "{}", r.text());
@@ -485,7 +490,7 @@ async fn measure_catalog_points_over_the_largest_view() {
         let app = TestApp::with(fake, Options::default());
         let walked = walk(
             &app,
-            &format!("/api/v1/namespaces/team-a/catalogs/primary/points?limit={CONSOLE_PAGE_SIZE}"),
+            &format!("/api/v1/workspaces/team-a/catalogs/primary/points?limit={CONSOLE_PAGE_SIZE}"),
             64,
         )
         .await;
@@ -506,7 +511,7 @@ async fn measure_topic_inventory_paging() {
         let fake = FakeKube::new();
         seed_inventory(&fake, "td-scale", topics);
         let app = TestApp::with(fake, Options::default());
-        let base = "/api/v1/namespaces/team-a/topic-discoveries/td-scale/topics";
+        let base = "/api/v1/workspaces/team-a/topic-discoveries/td-scale/topics";
         let walked = walk(&app, &format!("{base}?limit={CONSOLE_PAGE_SIZE}"), 1_000).await;
         assert_eq!(walked.items(), topics);
         walked.report(&format!(

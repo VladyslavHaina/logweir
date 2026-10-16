@@ -29,7 +29,7 @@ const RESERVED_FOR_LATER_STAGES: [ProblemCode; 2] = [
 ];
 
 fn schedules() -> String {
-    format!("/api/v1/namespaces/{NS_A}/schedules")
+    format!("/api/v1/workspaces/{NS_A}/schedules")
 }
 
 #[tokio::test]
@@ -167,7 +167,7 @@ async fn idempotency_key_problems() {
     response.assert_problem(400, "idempotency_key_invalid");
     // The command route refuses the header rather than silently ignoring it.
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly:set-suspension"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly:set-suspension"),
         Some("key-not-accepted"),
         r#"{"suspended":true,"expectedResourceVersion":"1"}"#,
     )
@@ -177,35 +177,35 @@ async fn idempotency_key_problems() {
 }
 
 #[tokio::test]
-async fn namespace_forbidden_is_decided_before_any_lookup() {
+async fn workspace_forbidden_is_decided_before_any_lookup() {
     let app = TestApp::new();
     for path in [
-        "/api/v1/namespaces/team-c/backups",
-        "/api/v1/namespaces/team-c/backups/exists-or-not",
-        "/api/v1/namespaces/kube-system/connections",
-        "/api/v1/namespaces/default/restores",
-        "/api/v1/namespaces/Team-A/restores",
-        "/api/v1/namespaces/team-c/operations/backup/x",
-        "/api/v1/namespaces/team-c/approvals/x/packet",
+        "/api/v1/workspaces/team-c/backups",
+        "/api/v1/workspaces/team-c/backups/exists-or-not",
+        "/api/v1/workspaces/kube-system/connections",
+        "/api/v1/workspaces/default/restores",
+        "/api/v1/workspaces/Team-A/restores",
+        "/api/v1/workspaces/team-c/operations/backup/x",
+        "/api/v1/workspaces/team-c/approvals/x/packet",
     ] {
         app.get(path)
             .await
-            .assert_problem(403, "namespace_forbidden");
+            .assert_problem(403, "workspace_forbidden");
     }
     app.post(
-        "/api/v1/namespaces/team-c/schedules",
+        "/api/v1/workspaces/team-c/schedules",
         Some("key-forbidden-1"),
         &support::schedule_body().to_string(),
     )
     .await
-    .assert_problem(403, "namespace_forbidden");
+    .assert_problem(403, "workspace_forbidden");
     assert!(app.fake.requests().is_empty());
 }
 
 struct DenyingAuthorizer;
 
 impl Authorizer for DenyingAuthorizer {
-    fn namespaces(&self, _actor: &Actor) -> Vec<String> {
+    fn workspaces(&self, _actor: &Actor) -> Vec<String> {
         vec![NS_A.to_string()]
     }
 
@@ -255,12 +255,12 @@ async fn the_authorization_seam_denies_without_route_changes() {
         .await
         .assert_problem(403, "forbidden");
     viewer
-        .get(&format!("/api/v1/namespaces/{NS_A}/approvals/x/packet"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/approvals/x/packet"))
         .await
         .assert_problem(403, "forbidden");
     let session = viewer.get("/api/v1/session").await.json();
-    assert_eq!(session["namespaces"].as_array().unwrap().len(), 1);
-    let caps = &session["namespaces"][0]["capabilities"];
+    assert_eq!(session["workspaces"].as_array().unwrap().len(), 1);
+    let caps = &session["workspaces"][0]["capabilities"];
     assert_eq!(caps["schedulesRead"], true);
     assert_eq!(caps["scheduleCreate"], false);
     assert_eq!(caps["approvalPacketRead"], false);
@@ -278,7 +278,7 @@ async fn the_authorization_seam_denies_without_route_changes() {
         .await
         .assert_problem(401, "unauthenticated");
     anonymous
-        .get(&format!("/api/v1/namespaces/{NS_A}/backups"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/backups"))
         .await
         .assert_problem(401, "unauthenticated");
     // The static UI and health do not require an actor.
@@ -300,7 +300,7 @@ fn fault(method: &'static str, path: &str, status: u16, reason: &'static str) ->
 
 #[tokio::test]
 async fn kubernetes_failures_map_to_stable_codes_without_echoing_messages() {
-    let backups = format!("/api/v1/namespaces/{NS_A}/backups");
+    let backups = format!("/api/v1/workspaces/{NS_A}/backups");
     for (status, reason, expect_status, expect_code) in [
         (403, "Forbidden", 503, "kubernetes_unavailable"),
         (401, "Unauthorized", 503, "kubernetes_unavailable"),
@@ -362,7 +362,7 @@ async fn a_kubernetes_call_past_its_deadline_is_upstream_timeout() {
         remaining: 1,
     });
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/restores"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/restores"))
         .await;
     response.assert_problem(504, "upstream_timeout");
     assert_eq!(response.json()["retryable"], true);
@@ -376,7 +376,7 @@ fn the_production_deadline_is_ten_seconds() {
 #[tokio::test]
 async fn cursor_and_precondition_and_conflict_codes() {
     let app = TestApp::new();
-    let backups = format!("/api/v1/namespaces/{NS_A}/backups");
+    let backups = format!("/api/v1/workspaces/{NS_A}/backups");
     app.get(&format!("{backups}?cursor=forged.cursor"))
         .await
         .assert_problem(400, "cursor_invalid");
@@ -393,7 +393,7 @@ async fn cursor_and_precondition_and_conflict_codes() {
         json!({"metadata": {"name": "nightly"}, "spec": {"schedule": "0 3 * * *", "sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "s3://b/p"}, "suspend": false}}),
     );
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/nightly:set-suspension"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/nightly:set-suspension"),
         None,
         r#"{"suspended":true,"expectedResourceVersion":"1"}"#,
     )
@@ -433,7 +433,7 @@ fn every_code_renders_as_a_complete_problem_document() {
         (ProblemCode::Unauthenticated, 401),
         (ProblemCode::SessionExpired, 401),
         (ProblemCode::Forbidden, 403),
-        (ProblemCode::NamespaceForbidden, 403),
+        (ProblemCode::WorkspaceForbidden, 403),
         (ProblemCode::NotFound, 404),
         (ProblemCode::IdempotencyConflict, 409),
         (ProblemCode::StateConflict, 409),
@@ -464,7 +464,7 @@ fn every_code_is_produced_or_reserved() {
         "cursor_invalid",           // cursor_and_precondition_and_conflict_codes
         "unauthenticated",          // the_authorization_seam_denies_without_route_changes
         "forbidden",                // the_authorization_seam_denies_without_route_changes
-        "namespace_forbidden",      // namespace_forbidden_is_decided_before_any_lookup
+        "workspace_forbidden",      // workspace_forbidden_is_decided_before_any_lookup
         "origin_mismatch", // boundary::unsafe_methods_need_the_exact_origin_and_json_before_anything_else
         "not_found", // boundary::kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing
         "method_not_allowed", // boundary::unimplemented_mutations_have_no_route
@@ -525,7 +525,7 @@ async fn a_rejected_rotation_is_reported_as_an_immutable_location() {
     let response = app
         .post(
             &format!(
-                "/api/v1/namespaces/{}/destinations/primary:update-access",
+                "/api/v1/workspaces/{}/destinations/primary:update-access",
                 support::NS_A
             ),
             None,

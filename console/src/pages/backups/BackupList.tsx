@@ -1,4 +1,4 @@
-// Every backup run in the namespace: find one, see whether the controller
+// Every backup run in the workspace: find one, see whether the controller
 // verified it, restore it, or start one now.
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -94,11 +94,11 @@ export function Trigger({ b }: { b: Backup }) {
 }
 
 export function Backups() {
-  const { ns } = useParams({ from: "/$ns/backups" });
-  const { filter: linked } = useSearch({ from: "/$ns/backups" });
+  const { ws } = useParams({ from: "/$ws/backups" });
+  const { filter: linked } = useSearch({ from: "/$ws/backups" });
   const navigate = useNavigate();
-  const list = useBackupList(ns);
-  const flags = useFlags(ns);
+  const list = useBackupList(ws);
+  const flags = useFlags(ws);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>(linked ?? "all");
   const [page, setPage] = useState(1);
@@ -141,12 +141,12 @@ export function Backups() {
   const actionsFor = (b: Backup): IAction[] => {
     const offer = restoreOffer(b, mayRestore);
     return [
-      { title: "View details", onClick: () => void navigate({ to: "/$ns/backups/$name", params: { ns, name: b.name } }) },
+      { title: "View details", onClick: () => void navigate({ to: "/$ws/backups/$name", params: { ws, name: b.name } }) },
       {
         title: "Restore this point",
         isAriaDisabled: !offer.offer,
         tooltipProps: offer.offer ? undefined : { content: <Prose text={offer.reason} /> },
-        onClick: () => void navigate({ to: "/$ns/restores/new", params: { ns }, search: { backup: b.name, uid: b.uid } }),
+        onClick: () => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { backup: b.name, uid: b.uid } }),
       },
     ];
   };
@@ -155,7 +155,7 @@ export function Backups() {
     <>
       <PageHeader
         title="Backups"
-        description="Every backup run in this namespace. A run is green only when the controller has verified its signed receipt."
+        description="Every backup run in this workspace. A run is green only when the controller has verified its signed receipt."
         actions={
           <>
             {flags?.manualBackupCreate && (
@@ -164,14 +164,14 @@ export function Backups() {
               </Button>
             )}{" "}
             {mayRestore && (
-              <Button variant="primary" onClick={() => void navigate({ to: "/$ns/restores/new", params: { ns }, search: {} })}>
+              <Button variant="primary" onClick={() => void navigate({ to: "/$ws/restores/new", params: { ws }, search: {} })}>
                 Restore a point
               </Button>
             )}
           </>
         }
       />
-      {runNow && <BackUpNow ns={ns} open={runNow} onClose={() => setRunNow(false)} />}
+      {runNow && <BackUpNow ws={ws} open={runNow} onClose={() => setRunNow(false)} />}
       <PageSection>
         <Card>
           <Toolbar clearAllFilters={clear}>
@@ -250,7 +250,7 @@ export function Backups() {
                 label="Backups"
                 items={shown.map((b) => ({
                   key: b.uid || b.name,
-                  href: `#/${ns}/backups/${b.name}`,
+                  href: `#/${ws}/backups/${b.name}`,
                   title: b.name,
                   meta: (
                     <>
@@ -282,7 +282,7 @@ export function Backups() {
                 {shown.map((b) => (
                   <Tr key={b.uid || b.name}>
                     <Td dataLabel="Name" className="lw-name-cell">
-                      <Link to="/$ns/backups/$name" params={{ ns, name: b.name }} className="lw-break">
+                      <Link to="/$ws/backups/$name" params={{ ws, name: b.name }} className="lw-break">
                         {b.name}
                       </Link>
                       <div className="lw-subtle lw-small">

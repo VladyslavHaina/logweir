@@ -154,9 +154,9 @@ data:
     {
       "checks": {
         "maxActiveDiscoveriesPerConnection": 1,
-        "maxActivePerNamespace": 4,
+        "maxActivePerWorkspace": 4,
         "maxActiveTotal": 20,
-        "maxEvidenceFetchActivePerNamespace": 4
+        "maxEvidenceFetchActivePerWorkspace": 4
       },
       "discovery": {
         "defaultMaxTopics": 20000,
@@ -185,11 +185,75 @@ data:
       "version": 1
     }
 ---
-# Source: logweir/templates/clusterrole.yaml
+# Source: logweir/templates/controller-rbac.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
+  name: weirkeeper-cluster-scope
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+rules:
+  # The two cluster-scoped kinds. The one `patch` on a TrustPolicy itself
+  # places and releases the compromise-revocation finalizer.
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustrosters/status"]
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "watch", "patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies/status"]
+    verbs: ["patch"]
+---
+# Source: logweir/templates/human-roles.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-trust-admin
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# Source: logweir/templates/controller-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: weirkeeper-cluster-scope
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: weirkeeper-cluster-scope
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: logweir-system
+---
+# Source: logweir/templates/controller-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
   name: weirkeeper
+  namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
@@ -204,9 +268,8 @@ rules:
       - backupschedules
       - kafkaclusters
       - restores
-      - trustrosters
     verbs: ["get", "list", "watch"]
-  # In its own rule so the six-kind list `logweir-viewer` shares is untouched.
+  # In its own rule so the kind list `logweir-viewer` shares is untouched.
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations"]
     verbs: ["get", "list", "watch"]
@@ -241,7 +304,6 @@ rules:
       - backupschedules/status
       - kafkaclusters/status
       - restores/status
-      - trustrosters/status
     verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations/status"]
@@ -277,14 +339,14 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
-  # `patch` on the object is the compromise-revocation finalizer and nothing
-  # else.
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustpolicies"]
-    verbs: ["list", "watch", "patch"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustpolicies/status"]
-    verbs: ["patch"]
+  # PROD-19.1: the workspace gate's metadata read of every Secret an object
+  # names, so a runner Job never mounts one of another workspace or one with
+  # no workspace (the signing key, the console's keys). No `list`, no `watch`.
+  # RBAC has no metadata-only `get`: the grant can read data, the code reads
+  # only labels, and the controller could already mount any Secret in a Job.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get"]
   # The `ProtectionPolicy` reconciler's watch and `patch_status`. No `get`, no
   # `update`.
   - apiGroups: ["logweir.dev"]
@@ -315,9 +377,10 @@ rules:
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: logweir-viewer
+  namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
@@ -328,159 +391,18 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources:
       - approvals
+      - backupdestinations
       - backups
       - backupschedules
       - kafkaclusters
-      - restores
-      - trustrosters
-    verbs: ["get", "list", "watch"]
-  # Read only.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
       - preflights
       - protectionpolicies
       - recoverycatalogs
+      - restores
       - retentionpolicies
+      - switchovers
       - topicdiscoveries
-      - trustpolicies
     verbs: ["get", "list", "watch"]
-  # PROD-04.2: a switchover's groups, outcomes and record key. Read only.
-  - apiGroups: ["logweir.dev"]
-    resources: ["switchovers"]
-    verbs: ["get", "list", "watch"]
----
-# Source: logweir/templates/human-roles.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-operator
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: human-role
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backups
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["create"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["backupschedules"]
-    verbs: ["update", "patch"]
-  # `patch` and not `update`: a destination's access grants and a check's
-  # `cancelRequested` are merge patches; what may change is the CRD's CEL rule.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
-      - preflights
-      - topicdiscoveries
-    verbs: ["create"]
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
-      - preflights
-      - topicdiscoveries
-    verbs: ["patch"]
-  # Declare protection, connect an archive…
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - protectionpolicies
-      - recoverycatalogs
-    verbs: ["create"]
-  # …tune an objective (no seal on that spec)…
-  - apiGroups: ["logweir.dev"]
-    resources: ["protectionpolicies"]
-    verbs: ["update", "patch"]
-  # …and flip the ONE field a catalog leaves mutable, `spec.syncRequest`.
-  # `patch` without `update`.
-  # `retentionpolicies` is NOT here — its writes are
-  # `logweir-retention-admin`'s.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - recoverycatalogs
-    verbs: ["patch"]
-  # PROD-04.2: request a switchover. It runs only under its own Approval
-  # (subject kind `Switchover`), which `logweir-approver` creates.
-  - apiGroups: ["logweir.dev"]
-    resources: ["switchovers"]
-    verbs: ["create"]
----
-# Source: logweir/templates/human-roles.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-approver
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: human-role
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["approvals"]
-    verbs: ["create"]
-  # Approval context, read only.
-  - apiGroups: ["logweir.dev"]
-    resources: ["preflights"]
-    verbs: ["get", "list"]
----
-# Source: logweir/templates/human-roles.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-trust-admin
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: human-role
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
----
-# Source: logweir/templates/human-roles.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-retention-admin
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: human-role
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["retentionpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
----
-# Source: logweir/templates/clusterrolebinding.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: weirkeeper
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: control-plane
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: weirkeeper
-subjects:
-  - kind: ServiceAccount
-    name: weirkeeper
-    namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
 # The bootstrap account cannot list Secrets and cannot read arbitrary names.
@@ -512,6 +434,27 @@ rules:
     resources: ["configmaps"]
     resourceNames: ["company-logweir-trust"]
     verbs: ["get", "patch"]
+---
+# Source: logweir/templates/controller-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: weirkeeper
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: weirkeeper
+subjects:
+  - kind: ServiceAccount
+    name: weirkeeper
+    namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -586,10 +529,13 @@ spec:
             # is where `templates/policy.yaml` renders `weirkeeper-policy`.
             - name: LOGWEIR_POLICY_CONFIGMAP
               value: ""
+            # The one namespace the controller watches, and the workspaces in it.
             - name: LOGWEIR_INSTALLATION_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: LOGWEIR_WORKSPACES
+              value: "default"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

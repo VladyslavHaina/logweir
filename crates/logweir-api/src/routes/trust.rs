@@ -455,12 +455,15 @@ pub struct TrustPolicyResponse {
     pub item: TrustPolicyView,
 }
 
-/// The pseudo-namespace a cluster-scoped decision is recorded under in the
-/// audit record. It is not a Kubernetes namespace and no grant can name it: a
-/// namespace name is a DNS-1123 label, and `*` is not one.
+/// The pseudo-workspace a cluster-scoped decision is recorded under in the
+/// audit record. No grant can name it: a workspace name is a DNS-1123 label,
+/// and `*` is not one.
 pub const CLUSTER_SCOPE: &str = "*";
 
-/// Authorize a cluster-scoped read, and return the namespaces it may show.
+/// Authorize a cluster-scoped read, and return the namespaces it may show:
+/// the install's one namespace, to an administrator of any workspace
+/// (PROD-19.1: trust is per install, and a `TrustPolicy` names Kubernetes
+/// namespaces, never workspaces).
 ///
 /// **D0 REQUIRES INSTALLATION-ADMIN ONLY, AND THIS MODEL CANNOT SAY THAT.**
 /// D0's matrix row for installation trust is "none | none | none |
@@ -470,8 +473,8 @@ pub const CLUSTER_SCOPE: &str = "*";
 /// model allows, and it is written down rather than implied:
 ///
 /// 1. the actor must hold `trustPolicy.read` — which only
-///    [`Role::Administrator`] holds — in at least one bound namespace;
-/// 2. the returned list is the namespaces it administers, and
+///    [`Role::Administrator`] holds — in at least one workspace;
+/// 2. the returned list is the install's namespace, and
 ///    [`in_scope`] serves only policies that govern one of them or are the
 ///    installation `default`; and
 /// 3. [`view`] filters every namespace-bearing list to that set.
@@ -487,13 +490,13 @@ pub const CLUSTER_SCOPE: &str = "*";
 pub fn authorize_cluster(state: &AppState, actor: &Actor) -> Result<Vec<String>, ApiError> {
     let authorizer = state.authorizer();
     let administered: Vec<String> = authorizer
-        .namespaces(actor)
+        .workspaces(actor)
         .into_iter()
-        .filter(|ns| authorizer.allows(actor, ns, Action::ReadTrustPolicies))
+        .filter(|ws| authorizer.allows(actor, ws, Action::ReadTrustPolicies))
         .collect();
     let roles: Vec<String> = administered
         .first()
-        .map(|ns| authorizer.roles(actor, ns))
+        .map(|ws| authorizer.roles(actor, ws))
         .unwrap_or_default()
         .iter()
         .map(|role| role.as_str().to_string())
@@ -514,13 +517,13 @@ pub fn authorize_cluster(state: &AppState, actor: &Actor) -> Result<Vec<String>,
         return Err(ApiError::new(
             ProblemCode::Forbidden,
             "Reading the installation's trust policies requires the administrator role in at \
-             least one bound namespace.",
+             least one workspace.",
         ));
     }
     actor
         .audit
         .note("clusterScopeCarrier", &administered.join(","));
-    Ok(administered)
+    Ok(vec![state.kube().namespace().to_string()])
 }
 
 /// Whether any role in this build may read a trust policy. A compile-time
@@ -546,7 +549,7 @@ pub async fn list(
     let scope = CursorScope {
         actor_id: actor.id(),
         route: ROUTE_LIST.to_string(),
-        namespace: CLUSTER_SCOPE.to_string(),
+        workspace: CLUSTER_SCOPE.to_string(),
         filters: query
             .label_selector
             .as_ref()

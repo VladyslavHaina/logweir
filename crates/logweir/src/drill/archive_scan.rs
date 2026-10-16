@@ -1,5 +1,6 @@
 //! The one pass over the restored partitions' archive segments before phase 2:
-//! transaction markers (PROD-01.1a) and record times (PROD-01.1b).
+//! transaction markers (PROD-01.1a), record times (PROD-01.1b) and the schema
+//! IDs the restored records carry (PROD-03.2, when a snapshot is imported).
 //!
 //! Every segment of every selected partition is streamed once through the
 //! bounded `kbak::scan_segment` (one stored segment and a few hundred KiB held
@@ -49,6 +50,7 @@ pub fn run(
     facts: &BackupSetFacts,
     window: &ReplaySelection,
     count_markers: bool,
+    mut schema_ids: Option<&mut logweir_core::schema_registry::NeededIds>,
 ) -> Result<ArchiveScan, DrillError> {
     let limits = ScanLimits {
         max_decompressed: caps::SEGMENT,
@@ -101,11 +103,14 @@ pub fn run(
                 let mut found = 0u64;
                 let mut times: Option<SegmentTimes> = None;
                 let read = scan_segment(&bytes, &limits, SHAPE_PREFIX, &mut |r| {
-                    times = Some(SegmentTimes::add(
-                        times,
-                        r.timestamp,
-                        window.selects_timestamp(r.timestamp),
-                    ));
+                    let selected = window.selects_timestamp(r.timestamp);
+                    times = Some(SegmentTimes::add(times, r.timestamp, selected));
+                    // The first bytes of every restored key and value: the
+                    // framed schema IDs the snapshot holds are the import's.
+                    if let Some(ids) = schema_ids.as_deref_mut().filter(|_| selected) {
+                        ids.observe(&topic.name, true, r.key.as_deref());
+                        ids.observe(&topic.name, false, r.value.as_deref());
+                    }
                     if markers_here
                         && is_control_shaped(r.key.as_deref(), r.value.as_deref(), &r.header_keys)
                     {

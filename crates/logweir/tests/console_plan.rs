@@ -138,6 +138,37 @@ fn each_opt_in_arrives_under_the_key_the_runner_reads() {
     }
 }
 
+/// OD-23 (`plan-registry.golden.yaml`): the target connection's Schema
+/// Registry arrives as `target.schema_registry` (the controller holds the plan
+/// to the connection's, `ConnectionPlanMismatch` otherwise), and the byte-rate
+/// limit as `restore.rate_limit_bytes_per_sec`. CONTROL: the plain golden
+/// carries neither.
+#[test]
+fn the_registry_and_the_rate_limit_arrive_under_the_keys_the_runner_reads() {
+    let s = spec("plan-registry.golden.yaml");
+    let f = fields("plan-registry-fields.json");
+    let registry = s
+        .target
+        .schema_registry
+        .as_ref()
+        .expect("target.schema_registry");
+    assert_eq!(
+        registry.url,
+        f["target"]["schemaRegistry"]["url"].as_str().unwrap()
+    );
+    assert_eq!(
+        registry.username.as_deref(),
+        f["target"]["schemaRegistry"]["username"].as_str()
+    );
+    assert_eq!(
+        s.restore.rate_limit_bytes_per_sec,
+        f["rateLimitBytesPerSec"].as_u64()
+    );
+    let plain = spec("plan.golden.yaml");
+    assert!(plain.target.schema_registry.is_none());
+    assert_eq!(plain.restore.rate_limit_bytes_per_sec, None);
+}
+
 /// THEME A'S CLONE WITH THE SOURCE'S CONFIGURATION (`plan-clone.golden.yaml`):
 /// the runner reads the lifetime as the clone form, in scratch mode, and the
 /// configuration choice with the requester's owner statement. A runner from

@@ -326,23 +326,6 @@ pub enum IdentityCmd {
         #[arg(long)]
         revoke_trust_binding: Option<String>,
     },
-    /// Copy the already established installation signer into one explicitly
-    /// authorized runner namespace. Refuses missing, incomplete, or different
-    /// target identities; intended only for the chart's short-lived hook Job.
-    Distribute {
-        /// Namespace containing the primary installation signing Secret.
-        #[arg(long)]
-        source_namespace: String,
-        /// Authorized runner namespace receiving the same signing identity.
-        #[arg(long)]
-        target_namespace: String,
-        /// Fixed retained Secret name in both namespaces.
-        #[arg(long, default_value = "logweir-signing-key")]
-        secret_name: String,
-        /// Key in the retained Secret.
-        #[arg(long, default_value = "signing.pem")]
-        secret_key: String,
-    },
 }
 
 /// `#[allow(clippy::large_enum_variant)]`, and the reason is clap.
@@ -531,7 +514,22 @@ pub enum RestoreCmd {
     /// Exit 0: every recorded topic deleted, already gone, or left for good by
     /// the ID rule; 1: a delete failed or an ID could not be read (try again);
     /// 3: refused, nothing deleted; 4: the attestation was not persisted.
+    ///
+    /// For an interrupted restore (PROD-07.2), `--run-id` names the
+    /// reconcile's scorecard, whose `target.creation` lists the topics the
+    /// interrupted run created and left.
     Cleanup(RestoreCleanupArgs),
+    /// Reconcile an interrupted restore (PROD-07.2): with the run's own flags
+    /// and `--run-id <the interrupted run>`, verify the topics it created and
+    /// left (complete coverage, nothing restored) and sign an ordinary
+    /// scorecard listing them with per-partition counts. Writes nothing to the
+    /// target.
+    ///
+    /// Exit 0: every kept partition is exact (pass), the run's own scorecard
+    /// was found and passed, or there is nothing to verify
+    /// (`reconcile-none=`); 2: a signed scorecard that did not pass; 1: try
+    /// again (`TargetStillGrowing`, a read that failed); 3: refused.
+    Reconcile(RestoreRunArgs),
 }
 
 /// `logweir restore cleanup`'s flags.
@@ -649,7 +647,7 @@ pub struct RestoreRunArgs {
     /// uploads it beside the scorecard at
     /// `logweir/drills/<run_id>.offsets.json` and records that key and its
     /// sha256 in the signed document. Default: `offsets.json` in this run's
-    /// workdir, beside the restore checkpoint.
+    /// workdir.
     ///
     /// The report is WRITTEN and never applied: tag 1 commits no consumer-group
     /// offset on any cluster.
@@ -732,6 +730,20 @@ pub struct RestoreRunArgs {
         conflicts_with = "line_token"
     )]
     pub runner_line_token: Option<logweir_core::refusal_detail::LineToken>,
+    /// **PROD-07.2.** `restore run`: the run id to use, which the controller
+    /// names so it can find the run's targets record after its pod is gone
+    /// (absent, one is minted). `restore reconcile`: the interrupted run.
+    #[arg(long, value_parser = parse_run_id)]
+    pub run_id: Option<String>,
+}
+
+/// One run id segment (`logweir_core::ids::is_run_id_segment`).
+fn parse_run_id(value: &str) -> Result<String, String> {
+    if logweir_core::ids::is_run_id_segment(value) {
+        Ok(value.to_string())
+    } else {
+        Err("a run id is ASCII letters, digits, `-` and `_`".to_string())
+    }
 }
 
 impl From<RestoreRunArgs> for crate::drill::RunArgs {
@@ -756,6 +768,7 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
             evidence_keys: a.evidence_keys,
             kafka_topic_resources: a.kafka_topic_resources,
             strimzi_cluster: a.strimzi_cluster,
+            run_id: a.run_id,
         }
     }
 }
@@ -976,6 +989,10 @@ pub enum SwitchoverCmd {
         scorecard_key: String,
         #[arg(long, default_value = "")]
         namespace: String,
+        /// The `Switchover`'s workspace label, which an authorization
+        /// document v2 must name.
+        #[arg(long, default_value = "")]
+        workspace: String,
         #[arg(long, default_value = "")]
         name: String,
         #[arg(long, default_value = "")]

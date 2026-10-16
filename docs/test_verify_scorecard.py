@@ -907,7 +907,7 @@ def test_the_version_line_names_the_current_invariant_set():
         sc, sig = _signed_scorecard(d)
         r = run(sc, sig, FIX / "public.pem")
         assert r.returncode == 0, r.stderr
-        assert "verify_scorecard.py 1.34.0" in r.stdout, r.stdout
+        assert "verify_scorecard.py 1.35.0" in r.stdout, r.stdout
         assert "redactions" in r.stdout, r.stdout
         assert "trimmed-empty partial_reason" in r.stdout, r.stdout
         assert "outcome-entailment" in r.stdout, r.stdout
@@ -2360,9 +2360,14 @@ def test_script_version_was_bumped_with_the_payload_type_map():
     # 1.34.0 (L1) takes the public key file as the Rust reader does: one
     # `PUBLIC KEY` block, then only whitespace (text before it is RFC 7468's
     # explanatory text). Map still six.
+    #
+    # 1.35.0 (PROD-03.1, 03.2) adds the receipt's four `schema_registry` arms
+    # (46-49, format 1.9.0) and the scorecard's three `target.schemas` arms
+    # (SC-1 to SC-3, format 1.13.0 and 2.5.0), their shape checks and lines.
+    # Map still six.
     mod = _verifier_module()
     assert len(mod.PAYLOAD_TYPES) == 6, sorted(mod.PAYLOAD_TYPES)
-    assert mod.SCRIPT_VERSION == "1.34.0", mod.SCRIPT_VERSION
+    assert mod.SCRIPT_VERSION == "1.35.0", mod.SCRIPT_VERSION
     assert "backup-receipt" in mod.PAYLOAD_TYPES
     assert mod.PAYLOAD_TYPES["backup-receipt"] == BACKUP_RECEIPT_TYPE
     assert mod.PAYLOAD_TYPES["catalog-point"] == CATALOG_POINT_TYPE
@@ -5362,3 +5367,32 @@ def test_arm_44_refuses_a_low_watermark_above_its_high():
         'source_watermarks["orders"] partition 0 has low 10 above high 9: a partition\'s low '
         "watermark is never above its high"
     )
+
+
+def test_the_schema_registry_minors_are_the_rust_readers():
+    """PROD-03.1/03.2: the first minors that define the receipt's
+    `schema_registry` and the scorecard's `target.schemas` are the Rust
+    constants."""
+    import re
+    receipt = (ROOT / "crates/logweir-core/src/backup_receipt.rs").read_text()
+    scorecard = (ROOT / "crates/logweir-core/src/scorecard.rs").read_text()
+    mod = _verifier_module()
+    assert re.search(r"pub const SCHEMA_REGISTRY_SINCE_MINOR: u64 = (\d+);", receipt).group(1) == str(
+        mod.RECEIPT_SCHEMA_REGISTRY_SINCE_MINOR
+    )
+    assert re.search(r"pub const SCHEMAS_SINCE_MINOR: u64 = (\d+);", scorecard).group(1) == str(
+        mod.SCORECARD_SCHEMAS_SINCE_MINOR
+    )
+    assert re.search(r"pub const SCHEMAS_SINCE_MINOR_OF_MAJOR_2: u64 = (\d+);", scorecard).group(
+        1
+    ) == str(mod.SCORECARD_SCHEMAS_SINCE_MINOR_OF_MAJOR_2)
+
+
+def test_an_absent_schema_registry_reads_not_captured():
+    """SR-10: a receipt without the block reads "registry not captured", never
+    captured; a scorecard without `target.schemas` prints no schemas line."""
+    mod = _verifier_module()
+    assert mod._schema_registry_lines(None)[0].startswith(
+        "schema_registry: registry not captured:"
+    )
+    assert mod._schemas_lines(None) == []

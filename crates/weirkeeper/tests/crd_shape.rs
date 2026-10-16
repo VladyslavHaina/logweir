@@ -2741,13 +2741,14 @@ fn restore_status_declares_the_objectives_block_and_the_partial_reason() {
             "partialReason",
             "positionsMapping",
             "result",
+            "schemas",
             "selection",
             "unsampledTopics"
         ],
         "`status.integrity` carries `partialReason` beside `level` and `result` — a `partial` \
          with no reason is a badge an auditor cannot act on — and, since PROD-08.1a, the \
          signed `coverage`, a complete verification's `complete` block and FX-23's \
-         `unsampledTopics`, and since PROD-11.1b the signed replay `selection`, and since DUI-50 whether it binds a `positionsMapping`"
+         `unsampledTopics`, and since PROD-11.1b the signed replay `selection`, and since DUI-50 whether it binds a `positionsMapping`, and since PROD-03.2 the imported `schemas`"
     );
     // The selection's marker and its bounded rows.
     let selection = at(integrity, &["properties", "selection"]);

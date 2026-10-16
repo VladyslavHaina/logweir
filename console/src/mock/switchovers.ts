@@ -1,7 +1,7 @@
 // Theme A's cutover on mock data (PROD-18.1 R7): the switchover review (a `Preflight`
 // with `operation: switchover` and its details lines), Switchovers with the controller's
 // phases (Pending, Running, then every group's outcome at once, as the controller lifts
-// them from the Job's lines), the approval routing by namespace mode, and a two-person
+// them from the Job's lines), the approval routing by workspace mode, and a two-person
 // request. Shapes are the API's (schema.d.ts, from claude/v2a-integrate at 10426a92);
 // the run's decisions follow `logweir switchover run` (§3.5): a live group is refused
 // GroupActive, a moved one TargetPositionsChanged, an applied one reads alreadyApplied.
@@ -41,18 +41,18 @@ async function sha256(text: string): Promise<string> {
 
 // ------------------------------------------------------- approval modes (shared)
 
-/** The namespace modes. The same global the restores mock reads, so both agree; the walk
- *  flips a namespace to two-person or strict through it (mock builds only). */
+/** The workspace modes. The same global the restores mock reads, so both agree; the walk
+ *  flips a workspace to two-person or strict through it (mock builds only). */
 type Mode = "confirm" | "two-person" | "strict" | "legacy";
 const g = globalThis as { __lwMockApprovalMode?: Record<string, Mode> };
 g.__lwMockApprovalMode ??= { "team-a": "confirm", "team-b": "two-person" };
-const modeOf = (ns: string): Mode => g.__lwMockApprovalMode?.[ns] ?? "confirm";
+const modeOf = (ws: string): Mode => g.__lwMockApprovalMode?.[ws] ?? "confirm";
 
-function policyFor(ns: string): S["ApprovalPolicyView"] {
-  const mode = modeOf(ns);
+function policyFor(ws: string): S["ApprovalPolicyView"] {
+  const mode = modeOf(ws);
   const governed = mode !== "confirm";
   return {
-    namespace: ns,
+    workspace: ws,
     name: mode === "legacy" ? "legacy-governed-v1" : mode === "confirm" ? "default-confirm-v1" : mode === "two-person" ? "prod-pair" : "prod-strict",
     mode: mode === "confirm" ? "ordinary" : "governed",
     operatorMode: mode === "legacy" ? "strict" : mode,
@@ -129,19 +129,19 @@ interface TargetGroup {
 
 const targets = new Map<string, Map<string, TargetGroup>>();
 
-function restoreOf(ns: string, name: string) {
-  return restores.find((r) => r.namespace === ns && r.name === name);
+function restoreOf(ws: string, name: string) {
+  return restores.find((r) => r.namespace === ws && r.name === name);
 }
 
-function topicsOf(ns: string, restore: string): string[] {
-  return restoreOf(ns, restore)?.newTopics ?? ["orders", "orders-dlq", "payments"];
+function topicsOf(ws: string, restore: string): string[] {
+  return restoreOf(ws, restore)?.newTopics ?? ["orders", "orders-dlq", "payments"];
 }
 
-function targetOf(ns: string, restore: string): Map<string, TargetGroup> {
-  const key = `${ns}/${restore}`;
+function targetOf(ws: string, restore: string): Map<string, TargetGroup> {
+  const key = `${ws}/${restore}`;
   let t = targets.get(key);
   if (!t) {
-    const topics = topicsOf(ns, restore);
+    const topics = topicsOf(ws, restore);
     const mapped = (group: string) => new Map((MAPPING[group]?.entries ?? []).filter((e) => e.offset !== undefined).map((e) => [`${topics[e.topic]}/${e.partition}`, e.offset!]));
     t = new Map<string, TargetGroup>([
       ["orders-audit", { exists: true, type: "classic", state: "Empty", members: 0, committed: new Map([[`${topics[0]}/0`, 1_199_950]]) }],
@@ -175,20 +175,20 @@ function decide(t: TargetGroup | undefined, planned: [string, number][]): Decisi
   return { admissible: true, already: false };
 }
 
-function plannedOf(ns: string, restore: string, group: string): [string, number][] {
-  const topics = topicsOf(ns, restore);
+function plannedOf(ws: string, restore: string, group: string): [string, number][] {
+  const topics = topicsOf(ws, restore);
   return (MAPPING[group]?.entries ?? []).filter((e) => e.offset !== undefined).map((e) => [`${topics[e.topic]}/${e.partition}`, e.offset!]);
 }
 
 /** The details lines `detail_lines` writes: one per group and restored topic. */
-function detailLines(ns: string, restore: string): Record<string, unknown>[] {
-  const topics = topicsOf(ns, restore);
-  const target = targetOf(ns, restore);
+function detailLines(ws: string, restore: string): Record<string, unknown>[] {
+  const topics = topicsOf(ws, restore);
+  const target = targetOf(ws, restore);
   if (shippingStopped) Object.assign(target.get("orders-shipping")!, { members: 0, state: "Empty" });
   const out: Record<string, unknown>[] = [];
   for (const [group, m] of Object.entries(MAPPING)) {
     const t = target.get(group);
-    const d = decide(t, plannedOf(ns, restore, group));
+    const d = decide(t, plannedOf(ws, restore, group));
     const byTopic = new Map<string, Entry[]>();
     for (const e of m.entries) byTopic.set(topics[e.topic]!, [...(byTopic.get(topics[e.topic]!) ?? []), e]);
     for (const [topic, entries] of byTopic) {
@@ -234,27 +234,27 @@ function row(id: string, state: S["CheckVerdict"], code: string, message: string
   return { id, category: "switchover", state, gating: "blocking", authority: id === "switchover.restore" ? "controller" : "checkJob", code, message, ...(remedy ? { remedy } : {}), observedAt: iso(Date.now()) };
 }
 
-function startReview(ns: string, body: S["SwitchoverPreflightRequest"]): Review {
+function startReview(ws: string, body: S["SwitchoverPreflightRequest"]): Review {
   reviewSerial += 1;
   const id = `pf-sw${(NOW / MINUTE + reviewSerial).toString(36).slice(-4)}${hex(reviewSerial + 930, 6)}`;
-  const r = restoreOf(ns, body.restoreName);
+  const r = restoreOf(ws, body.restoreName);
   let checks: S["CheckEntryView"][];
   let lines: Record<string, unknown>[] = [];
   let verdict: Preflight["state"] = "ready";
   const restoreRow = (code: string, message: string) => row("switchover.restore", "notReady", code, message, "Name the verified Restore whose consumer positions a switchover would apply.");
-  if (!r) checks = [restoreRow("RestoreNotFound", `no Restore named \`${body.restoreName}\` exists in this namespace`)];
+  if (!r) checks = [restoreRow("RestoreNotFound", `no Restore named \`${body.restoreName}\` exists in this workspace`)];
   else if (body.restoreUid && body.restoreUid !== r.uid) checks = [restoreRow("RestoreReplaced", `Restore ${r.name} has another UID than the one reviewed: it was deleted and created again`)];
   else if (r.target.mode === "scratch") checks = [restoreRow("RestoreIsScratch", `Restore ${r.name} is a scratch drill: its topics are deleted, so there is nothing to switch over to`)];
   else if (!r.operation.terminal || !r.operation.verifiedSuccess) checks = [restoreRow("RestoreNotSucceeded", `Restore ${r.name} is not Succeeded with a Valid verdict`)];
   else if (!MAPPED.has(r.name)) {
     checks = [
       row("switchover.restore", "ready", "RestoreAdmissible", `Restore ${r.name} succeeded with a Valid verdict`),
-      row("switchover.evidence", "notReady", "RestoreEvidenceRefused", `VerificationNotComplete: integrity.verification.coverage is ${r.coverage.recorded ?? "not recorded"}, not complete; no positions mapping is written`, "Restore again with `coverage: complete` from a point that captured these consumer groups, or fix the namespace's evidence trust; the message names the switchover's own reason."),
+      row("switchover.evidence", "notReady", "RestoreEvidenceRefused", `VerificationNotComplete: integrity.verification.coverage is ${r.coverage.recorded ?? "not recorded"}, not complete; no positions mapping is written`, "Restore again with `coverage: complete` from a point that captured these consumer groups, or fix the workspace's evidence trust; the message names the switchover's own reason."),
       row("switchover.target", "unknown", "BlockedByPrerequisite", "the restore's evidence did not verify, so there is no mapping to read"),
       row("switchover.groups", "unknown", "BlockedByPrerequisite", "the restore's evidence did not verify, so there is no mapping to read"),
     ];
   } else {
-    lines = detailLines(ns, r.name);
+    lines = detailLines(ws, r.name);
     const groups = new Map(lines.map((l) => [l.group as string, l]));
     const refused = [...groups.values()].filter((l) => !l.admissible);
     const positions = lines.reduce((n, l) => n + (l.positions as unknown[]).length, 0);
@@ -265,7 +265,7 @@ function startReview(ns: string, body: S["SwitchoverPreflightRequest"]): Review 
       row("runner.contract", "ready", "ContractVersionAccepted", "the check runner speaks this controller's contract"),
       row("switchover.restore", "ready", "RestoreAdmissible", `Restore ${r.name} succeeded with a Valid verdict and writes evidence to a saved destination`),
       row("switchover.evidence", "ready", "RestoreEvidenceVerified", `the restore's scorecard verifies, its verification is complete and the positions mapping it binds verifies (${Object.keys(MAPPING).length} group(s)) [mappingSha256=${MAPPING_SHA}; scorecardSha256=${SCORECARD}]`),
-      row("switchover.target", "ready", "TargetIsTheRestores", `the target answers the restore's cluster id and ${topicsOf(ns, r.name).length} restored topic(s) carry the IDs recorded at creation [clusterId=${hex(913, 8)}-${hex(914, 4)}-${hex(915, 4)}-${hex(916, 4)}-${hex(917, 12)}]`),
+      row("switchover.target", "ready", "TargetIsTheRestores", `the target answers the restore's cluster id and ${topicsOf(ws, r.name).length} restored topic(s) carry the IDs recorded at creation [clusterId=${hex(913, 8)}-${hex(914, 4)}-${hex(915, 4)}-${hex(916, 4)}-${hex(917, 12)}]`),
       refused.length
         ? row("switchover.groups", "notReady", "GroupNotAdmissible", `${refused[0]!.reason}: ${refused[0]!.target} (${refused[0]!.message}); ${refused.length} of ${groups.size} group(s) cannot be applied now. ${summary}`, "Stop every member of the named group (or choose another target group), give the target principal DESCRIBE and READ on the group, and review again; the details list every group and position.")
         : row("switchover.groups", "ready", "GroupsAdmissible", `${summary}; every group can be applied now`),
@@ -275,7 +275,7 @@ function startReview(ns: string, body: S["SwitchoverPreflightRequest"]): Review 
   if (failedEarly) verdict = "notReady";
   const item: Preflight = {
     id,
-    namespace: ns,
+    namespace: ws,
     uid: crypto.randomUUID(),
     resourceVersion: String(66000 + reviewSerial),
     createdAt: iso(Date.now()),
@@ -294,7 +294,7 @@ function startReview(ns: string, body: S["SwitchoverPreflightRequest"]): Review 
     detailsAvailable: false,
   };
   const review = { item, createdMs: Date.now(), lines, verdict, checks };
-  reviews.set(`${ns}/${id}`, review);
+  reviews.set(`${ws}/${id}`, review);
   return review;
 }
 
@@ -319,7 +319,7 @@ function reviewNow(r: Review): Preflight {
 
 interface Kept {
   item: Switchover;
-  ns: string;
+  ws: string;
   createdMs: number;
   /** Under a governed mode: when the approval arrived (null: still waiting). */
   approvedMs: number | null;
@@ -334,12 +334,12 @@ const switchovers: Kept[] = [];
 let swoSerial = 0;
 
 async function seed() {
-  const ns = "team-a";
-  const restore = restoreOf(ns, "orders-recovery-q4m8x");
+  const ws = "team-a";
+  const restore = restoreOf(ws, "orders-recovery-q4m8x");
   if (!restore || switchovers.length) return;
   const at = NOW - 50 * MINUTE;
   switchovers.push({
-    ns,
+    ws,
     createdMs: at,
     approvedMs: at,
     requester: "alice",
@@ -347,7 +347,7 @@ async function seed() {
     plan: [],
     item: {
       name: "swo-3k9d2f7a",
-      namespace: ns,
+      namespace: ws,
       uid: "4b1f6c2e-9a7d-4e3b-8c15-2d6f0a9e7b41",
       restore: { name: restore.name, uid: restore.uid },
       approvalName: "swo-approval-6e1a90c4",
@@ -397,7 +397,7 @@ async function seed() {
   switchovers[0]!.item.planHash = await sha256(switchovers[0]!.item.planBytes!);
   // An attempt on a restore deleted since: refused before any commit.
   switchovers.push({
-    ns,
+    ws,
     createdMs: NOW - 26 * HOUR,
     approvedMs: NOW - 26 * HOUR,
     requester: "alice",
@@ -405,7 +405,7 @@ async function seed() {
     plan: [],
     item: {
       name: "swo-8h1c5e0b",
-      namespace: ns,
+      namespace: ws,
       uid: "c7e2a9d1-3f6b-4a8e-9b2c-5d1e7f0a3c64",
       restore: { name: "orders-recovery-p2z6w", uid: "e1d3c5b7-a9f1-4e2d-8c6b-0a2f4e6d8b1c" },
       approvalName: "swo-approval-2b7d4e19",
@@ -445,7 +445,7 @@ function switchoverNow(k: Kept): Switchover {
   if (e < 1.5) return { ...k.item, phase: "Pending", reason: null };
   if (e < 5) return { ...k.item, phase: "Running", reason: "JobCreated" };
   // The run: each group in plan order, against the target as it is now.
-  const target = targetOf(k.ns, k.item.restore.name);
+  const target = targetOf(k.ws, k.item.restore.name);
   const groups: S["SwitchoverGroupView"][] = k.plan.map((p) => {
     const t = target.get(p.target);
     if (p.target === "orders-shipping" && shippingRejoins && t) {
@@ -478,33 +478,33 @@ function switchoverNow(k: Kept): Switchover {
   return k.item;
 }
 
-async function create(ns: string, request: Request): Promise<Response> {
+async function create(ws: string, request: Request): Promise<Response> {
   const body = (await request.json()) as S["CreateSwitchoverRequest"];
   const key = request.headers.get("Idempotency-Key") ?? "";
   if (key.length < 8) return problem(400, "idempotency_key_required", "An Idempotency-Key header of 8 to 128 characters is required.");
   const errors: S["FieldError"][] = [];
   if ((await sha256(body.planBytes)) !== body.planHash) errors.push({ field: "planHash", code: "plan_hash_mismatch", message: "is not the SHA-256 of planBytes exactly as submitted" });
   if (!/^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$/.test(body.approvalRef.name)) errors.push({ field: "approvalRef.name", code: "invalid_name", message: "must be a Kubernetes object name" });
-  const policy = policyFor(ns);
-  if (policy.ticketRequired && !body.ticket?.trim()) errors.push({ field: "ticket", code: "required", message: "a change ticket is required by this namespace's policy" });
-  if (policy.legacy && body.ticket) errors.push({ field: "ticket", code: "not_accepted", message: "an unbound namespace signs nothing; `logweir drill approve --ticket` carries it" });
+  const policy = policyFor(ws);
+  if (policy.ticketRequired && !body.ticket?.trim()) errors.push({ field: "ticket", code: "required", message: "a change ticket is required by this workspace's policy" });
+  if (policy.legacy && body.ticket) errors.push({ field: "ticket", code: "not_accepted", message: "an unbound workspace signs nothing; `logweir drill approve --ticket` carries it" });
   if (!body.planBytes.includes(`uid: "${body.restoreRef.uid}"`)) errors.push({ field: "restoreRef", code: "plan_mismatch", message: "is not the plan's own restore block" });
   if (errors.length) return problem(422, "validation_failed", "One or more fields are invalid.", errors);
-  const replay = switchovers.find((k) => k.ns === ns && (k.item as { __key?: string }).__key === key);
+  const replay = switchovers.find((k) => k.ws === ws && (k.item as { __key?: string }).__key === key);
   if (replay) return json(200, { item: switchoverNow(replay), replayed: true, requestId: requestId() });
-  const running = switchovers.find((k) => k.ns === ns && k.item.restore.name === body.restoreRef.name && !["Succeeded", "PartiallyApplied", "Failed", "Refused"].includes(switchoverNow(k).phase ?? ""));
+  const running = switchovers.find((k) => k.ws === ws && k.item.restore.name === body.restoreRef.name && !["Succeeded", "PartiallyApplied", "Failed", "Refused"].includes(switchoverNow(k).phase ?? ""));
   swoSerial += 1;
   const name = `swo-${(await sha256(key)).slice(7, 15)}`;
   const mode = policy.operatorMode;
   const kept: Kept = {
-    ns,
+    ws,
     createdMs: Date.now(),
     approvedMs: mode === "confirm" ? Date.now() : null,
     requester: "alice",
     ticket: body.ticket ?? undefined,
     plan: planOf(body.planBytes),
     settled: false,
-    item: { name, namespace: ns, uid: crypto.randomUUID(), restore: body.restoreRef, approvalName: body.approvalRef.name, planHash: body.planHash, planBytes: body.planBytes, groups: [], phase: null },
+    item: { name, namespace: ws, uid: crypto.randomUUID(), restore: body.restoreRef, approvalName: body.approvalRef.name, planHash: body.planHash, planBytes: body.planBytes, groups: [], phase: null },
   };
   Object.defineProperty(kept.item, "__key", { value: key, enumerable: false });
   if (running) {
@@ -530,7 +530,7 @@ async function create(ns: string, request: Request): Promise<Response> {
 }
 
 function scopeOf(k: Kept): S["SwitchoverScopeView"] {
-  const restore = restoreOf(k.ns, k.item.restore.name);
+  const restore = restoreOf(k.ws, k.item.restore.name);
   const parsed = k.item.planBytes ? planOf(k.item.planBytes) : [];
   return {
     restore: { name: k.item.restore.name, uid: k.item.restore.uid, planHash: restore?.planHash ?? `sha256:${hex(904, 64)}`, scorecardSha256: SCORECARD, mappingSha256: MAPPING_SHA },
@@ -547,7 +547,7 @@ function scopeOf(k: Kept): S["SwitchoverScopeView"] {
             .filter(([key]) => key.split("/")[0] === topic)
             .map(([key, offset]) => {
               const partition = Number(key.split("/")[1]);
-              const entry = MAPPING[p.source]?.entries.find((e) => topicsOf(k.ns, k.item.restore.name)[e.topic] === topic && e.partition === partition);
+              const entry = MAPPING[p.source]?.entries.find((e) => topicsOf(k.ws, k.item.restore.name)[e.topic] === topic && e.partition === partition);
               return { partition, offset, approximate: entry?.cls === "approximate", expected: null };
             }),
         })),
@@ -562,12 +562,12 @@ async function approvalRequest(k: Kept): Promise<S["SwitchoverApprovalRequestVie
   return {
     switchover: k.item.name,
     switchoverUid: k.item.uid,
-    namespace: k.ns,
+    workspace: k.ws,
     approvalName: k.item.approvalName,
     confirmationName: `${k.item.approvalName}-confirmation`,
     confirmationSha256: await sha256(`${k.item.uid}:${k.item.planHash}`),
-    policy: policyFor(k.ns).name,
-    policyDigest: policyFor(k.ns).digest ?? "",
+    policy: policyFor(k.ws).name,
+    policyDigest: policyFor(k.ws).digest ?? "",
     planHash: k.item.planHash,
     requester: "https://dex.logweir.local#alice",
     requesterEmail: "alice@example.com",
@@ -599,8 +599,8 @@ export async function switchoversMock(request: Request): Promise<Response | null
   const path = url.pathname.replace(/^.*?\/api\/v1/, "");
   const method = request.method;
   let m: RegExpMatchArray | null;
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/approval-policy$/))) return json(200, { item: policyFor(m[1]!), requestId: requestId() });
-  if (method === "POST" && (m = at(path, /^\/namespaces\/([^/]+)\/preflights$/))) {
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/approval-policy$/))) return json(200, { item: policyFor(m[1]!), requestId: requestId() });
+  if (method === "POST" && (m = at(path, /^\/workspaces\/([^/]+)\/preflights$/))) {
     const body = (await request.clone().json()) as S["CreatePreflightRequest"];
     if (body.operation !== "switchover") return null;
     if (!body.switchover?.restoreName) return problem(422, "validation_failed", "One or more fields are invalid.", [{ field: "switchover.restoreName", code: "required", message: "name the restore to review" }]);
@@ -608,46 +608,46 @@ export async function switchoversMock(request: Request): Promise<Response | null
     if (reviews.size > 0) shippingStopped = true;
     return json(202, { item: reviewNow(startReview(m[1]!, body.switchover)), replayed: false, requestId: requestId() });
   }
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/preflights\/([^/:]+)$/))) {
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/preflights\/([^/:]+)$/))) {
     const r = reviews.get(`${m[1]}/${m[2]}`);
     return r ? json(200, { item: reviewNow(r), requestId: requestId() }) : null;
   }
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/preflights\/([^/:]+)\/details$/))) {
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/preflights\/([^/:]+)\/details$/))) {
     const r = reviews.get(`${m[1]}/${m[2]}`);
     if (!r) return null;
     if (!reviewNow(r).detailsAvailable) return problem(404, "not_found", "This preflight has no details.");
     return json(200, { items: r.lines.map((entry) => ({ entry })), page: { limit: 200, snapshot: `sha256:${hex(950, 64)}` }, requestId: requestId() });
   }
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/switchovers$/))) {
-    const ns = m[1]!;
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/switchovers$/))) {
+    const ws = m[1]!;
     if (method === "GET") {
-      const items = switchovers.filter((k) => k.ns === ns).map(switchoverNow).map((s) => ({ ...s, planBytes: undefined }));
+      const items = switchovers.filter((k) => k.ws === ws).map(switchoverNow).map((s) => ({ ...s, planBytes: undefined }));
       return json(200, { items, page: { limit: 50, snapshot: String(67000 + items.length) }, requestId: requestId() });
     }
-    if (method === "POST") return create(ns, request);
+    if (method === "POST") return create(ws, request);
   }
-  if (method === "GET" && (m = at(path, /^\/namespaces\/([^/]+)\/switchovers\/([^/]+)$/))) {
-    const k = switchovers.find((x) => x.ns === m![1] && x.item.name === m![2]);
+  if (method === "GET" && (m = at(path, /^\/workspaces\/([^/]+)\/switchovers\/([^/]+)$/))) {
+    const k = switchovers.find((x) => x.ws === m![1] && x.item.name === m![2]);
     return k ? json(200, { item: switchoverNow(k), requestId: requestId() }) : problem(404, "not_found", `No Switchover named ${m[2]} in ${m[1]}.`);
   }
-  if ((m = at(path, /^\/namespaces\/([^/]+)\/switchovers\/([^/]+)\/(approval-request|console-approval|approval)$/))) {
-    const k = switchovers.find((x) => x.ns === m![1] && x.item.name === m![2]);
+  if ((m = at(path, /^\/workspaces\/([^/]+)\/switchovers\/([^/]+)\/(approval-request|console-approval|approval)$/))) {
+    const k = switchovers.find((x) => x.ws === m![1] && x.item.name === m![2]);
     if (!k) return problem(404, "not_found", `No Switchover named ${m[2]} in ${m[1]}.`);
-    const mode = modeOf(k.ns);
+    const mode = modeOf(k.ws);
     if (m[3] === "approval-request" && method === "GET") {
-      if (mode !== "two-person") return problem(409, "policy_mismatch", `${k.ns} is not a two-person namespace; no request is shown here.`);
+      if (mode !== "two-person") return problem(409, "policy_mismatch", `${k.ws} is not a two-person workspace; no request is shown here.`);
       return json(200, { item: await approvalRequest(k), requestId: requestId() });
     }
     if (m[3] === "console-approval" && method === "POST") {
-      if (mode !== "two-person") return problem(409, "policy_mismatch", `${k.ns} is not a two-person namespace.`);
+      if (mode !== "two-person") return problem(409, "policy_mismatch", `${k.ws} is not a two-person workspace.`);
       const body = (await request.json()) as S["ConsoleApprovalRequest"];
       const shown = await approvalRequest(k);
       if (body.confirmationSha256 !== shown.confirmationSha256) return problem(409, "state_conflict", "The request changed since it was shown; read it again.");
       if (k.approvedMs === null) k.approvedMs = Date.now();
-      return json(201, { item: { name: k.item.approvalName, namespace: k.ns }, replayed: false, requestId: requestId() });
+      return json(201, { item: { name: k.item.approvalName, namespace: k.ws }, replayed: false, requestId: requestId() });
     }
     if (m[3] === "approval" && method === "POST") {
-      if (mode === "confirm" || mode === "two-person") return problem(409, "policy_mismatch", "This namespace approves in the console, not with files.");
+      if (mode === "confirm" || mode === "two-person") return problem(409, "policy_mismatch", "This workspace approves in the console, not with files.");
       return problem(422, "validation_failed", "One or more fields are invalid.", [{ field: "sidecarBytes", code: "invalid", message: "the mock verifies no signature" }]);
     }
   }

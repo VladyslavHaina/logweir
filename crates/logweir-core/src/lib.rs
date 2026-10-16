@@ -85,6 +85,9 @@ pub mod replay_selection;
 pub mod runner_line;
 pub mod schema;
 pub mod schema_dependency;
+/// PROD-03.1/03.2: the Schema Registry snapshot, its receipt and scorecard
+/// blocks, the restore's closure, classifier and import (`OD-23-core.md` §1).
+pub mod schema_registry;
 pub mod scorecard;
 pub mod spec;
 pub mod switchover;

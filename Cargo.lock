@@ -1830,10 +1830,12 @@ dependencies = [
  "serde_yaml",
  "tempfile",
  "thiserror 1.0.69",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "ulid",
  "ureq",
+ "webpki-roots 0.26.11",
  "zstd",
 ]
 

@@ -32,7 +32,7 @@ async fn plan_bytes_are_stored_byte_for_byte_and_never_reserialized() {
         let body = support::restore_body(&plan);
         let created = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/restores"),
+                &format!("/api/v1/workspaces/{NS_A}/restores"),
                 Some(&key),
                 &body.to_string(),
             )
@@ -70,7 +70,7 @@ async fn plan_bytes_are_stored_byte_for_byte_and_never_reserialized() {
             plan.as_bytes()
         );
         let read = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/restores/{name}"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/restores/{name}"))
             .await
             .json();
         assert_eq!(
@@ -79,7 +79,7 @@ async fn plan_bytes_are_stored_byte_for_byte_and_never_reserialized() {
         );
         // Lists omit the bytes but keep the hash.
         let list = app
-            .get(&format!("/api/v1/namespaces/{NS_A}/restores"))
+            .get(&format!("/api/v1/workspaces/{NS_A}/restores"))
             .await
             .json();
         let row = list["items"]
@@ -107,7 +107,7 @@ async fn saved_restore_destinations_are_validated_and_stored_as_a_pair() {
     body["evidenceDestinationRef"] = json!({"name": "evidence"});
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("saved-destinations-01"),
             &body.to_string(),
         )
@@ -136,13 +136,13 @@ async fn saved_restore_destinations_are_validated_and_stored_as_a_pair() {
         json!({"url": "logweir-destination://primary"})
     );
     let read = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/restores/{name}"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/restores/{name}"))
         .await
         .json();
     assert_eq!(read["item"]["sourceDestinationRef"]["name"], "primary");
     assert_eq!(read["item"]["evidenceDestinationRef"]["name"], "evidence");
     let list = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/restores"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/restores"))
         .await
         .json();
     let row = list["items"]
@@ -182,7 +182,7 @@ async fn saved_restore_destinations_are_validated_and_stored_as_a_pair() {
         }
         let response = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/restores"),
+                &format!("/api/v1/workspaces/{NS_A}/restores"),
                 Some(&format!("saved-destination-refusal-{code}")),
                 &refused.to_string(),
             )
@@ -212,7 +212,7 @@ async fn a_plan_hash_that_does_not_match_the_bytes_is_refused() {
     ));
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("plan-mismatch-01"),
             &body.to_string(),
         )
@@ -229,7 +229,7 @@ async fn a_plan_hash_that_does_not_match_the_bytes_is_refused() {
         let mut b = support::restore_body(&plan);
         b[field] = value;
         app.post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("plan-invalid-001"),
             &b.to_string(),
         )
@@ -239,7 +239,7 @@ async fn a_plan_hash_that_does_not_match_the_bytes_is_refused() {
     let mut b = support::restore_body(&plan);
     b["target"]["topicNaming"]["prefix"] = json!("");
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/restores"),
+        &format!("/api/v1/workspaces/{NS_A}/restores"),
         Some("plan-invalid-002"),
         &b.to_string(),
     )
@@ -277,7 +277,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     ]);
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-ok-000001"),
             &ok.to_string(),
         )
@@ -306,7 +306,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     ]);
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-dup-000001"),
             &duplicate.to_string(),
         )
@@ -345,7 +345,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     ]);
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-cross-00001"),
             &crossed.to_string(),
         )
@@ -364,7 +364,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     renamed["topicMapping"] = json!([{"source": "orders", "target": "restore-elsewhere-orders"}]);
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-ren-000001"),
             &renamed.to_string(),
         )
@@ -382,7 +382,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     identity["topicMapping"] = json!([{"source": "orders", "target": "orders"}]);
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-idn-000001"),
             &identity.to_string(),
         )
@@ -397,7 +397,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
         json!([{"source": long_source, "target": format!("{prefix}{long_source}")}]);
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-ill-000001"),
             &illegal.to_string(),
         )
@@ -412,7 +412,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
         b["topicMapping"] = json!([{"source": bad, "target": format!("{prefix}{bad}")}]);
         let refused = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/restores"),
+                &format!("/api/v1/workspaces/{NS_A}/restores"),
                 Some("mapping-src-000001"),
                 &b.to_string(),
             )
@@ -436,7 +436,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     scratch["topicMapping"] = json!([{"source": "orders", "target": format!("{prefix}orders")}]);
     let refused = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-scratch-0001"),
             &scratch.to_string(),
         )
@@ -460,7 +460,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     scratch_bare["target"]["mode"] = json!("scratch");
     let ok_scratch = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-scratch-0002"),
             &scratch_bare.to_string(),
         )
@@ -476,7 +476,7 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     // field, no mapping errors, 201.
     let plain = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("mapping-absent-0001"),
             &support::restore_body(&plan).to_string(),
         )
@@ -558,7 +558,7 @@ async fn connections_project_secret_names_only_and_create_typed_objects() {
         }),
     );
     let list = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/connections"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/connections"))
         .await
         .json();
     let item = &list["items"][0];
@@ -578,7 +578,7 @@ async fn connections_project_secret_names_only_and_create_typed_objects() {
 
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/connections"),
+            &format!("/api/v1/workspaces/{NS_A}/connections"),
             Some("connection-key-9"),
             &support::connection_body().to_string(),
         )
@@ -618,7 +618,7 @@ async fn connections_project_secret_names_only_and_create_typed_objects() {
         json!({"role": "source", "bootstrapServers": ["kafka:9092"], "auth": {"mode": "plaintext", "tls": false, "password": "x"}}),
     ] {
         app.post(
-            &format!("/api/v1/namespaces/{NS_A}/connections"),
+            &format!("/api/v1/workspaces/{NS_A}/connections"),
             Some("connection-bad-1"),
             &body.to_string(),
         )
@@ -633,7 +633,7 @@ async fn set_suspension_patches_only_spec_suspend_under_a_precondition() {
     let app = TestApp::new();
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/schedules"),
+            &format!("/api/v1/workspaces/{NS_A}/schedules"),
             Some("schedule-susp-01"),
             &support::schedule_body().to_string(),
         )
@@ -645,7 +645,7 @@ async fn set_suspension_patches_only_spec_suspend_under_a_precondition() {
         .unwrap()
         .to_string();
     assert_eq!(created["item"]["suspended"], true);
-    let command = format!("/api/v1/namespaces/{NS_A}/schedules/{name}:set-suspension");
+    let command = format!("/api/v1/workspaces/{NS_A}/schedules/{name}:set-suspension");
 
     // Stale version: 412, nothing changed.
     let stale = app
@@ -722,26 +722,26 @@ async fn set_suspension_patches_only_spec_suspend_under_a_precondition() {
         .assert_problem(422, "validation_failed");
     // Unknown commands and malformed names.
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/{name}:delete"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/{name}:delete"),
         None,
         "{}",
     )
     .await
     .assert_problem(404, "not_found");
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/{name}"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/{name}"),
         None,
         "{}",
     )
     .await
     .assert_problem(404, "not_found");
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/schedules/{name}:set-suspension"
+        "/api/v1/workspaces/{NS_A}/schedules/{name}:set-suspension"
     ))
     .await
     .assert_problem(404, "not_found");
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/schedules/absent:set-suspension"),
+        &format!("/api/v1/workspaces/{NS_A}/schedules/absent:set-suspension"),
         None,
         &json!({"suspended": true, "expectedResourceVersion": "5"}).to_string(),
     )
@@ -762,7 +762,7 @@ async fn schedule_validation_uses_the_controller_cron_parser() {
         let key = format!("cron-ok-key-{i}");
         let r = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/schedules"),
+                &format!("/api/v1/workspaces/{NS_A}/schedules"),
                 Some(&key),
                 &body.to_string(),
             )
@@ -778,7 +778,7 @@ async fn schedule_validation_uses_the_controller_cron_parser() {
         body["schedule"] = json!(schedule);
         let r = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/schedules"),
+                &format!("/api/v1/workspaces/{NS_A}/schedules"),
                 Some("cron-bad-key"),
                 &body.to_string(),
             )
@@ -803,8 +803,8 @@ async fn approvals_hide_documents_except_on_the_packet_route() {
         }),
     );
     for path in [
-        format!("/api/v1/namespaces/{NS_A}/approvals"),
-        format!("/api/v1/namespaces/{NS_A}/approvals/approval-1"),
+        format!("/api/v1/workspaces/{NS_A}/approvals"),
+        format!("/api/v1/workspaces/{NS_A}/approvals/approval-1"),
     ] {
         let response = app.get(&path).await;
         assert_eq!(response.status, 200);
@@ -820,7 +820,7 @@ async fn approvals_hide_documents_except_on_the_packet_route() {
         assert!(!text.contains("payloadType"), "{text}");
     }
     let meta = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/approvals/approval-1"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/approvals/approval-1"))
         .await
         .json();
     assert_eq!(meta["item"]["verified"], true);
@@ -829,7 +829,7 @@ async fn approvals_hide_documents_except_on_the_packet_route() {
 
     let packet = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/approvals/approval-1/packet"
+            "/api/v1/workspaces/{NS_A}/approvals/approval-1/packet"
         ))
         .await
         .json();
@@ -845,7 +845,7 @@ async fn approvals_hide_documents_except_on_the_packet_route() {
 }
 
 #[tokio::test]
-async fn session_and_namespaces_come_from_configuration_only() {
+async fn session_and_workspaces_come_from_configuration_only() {
     let app = TestApp::new();
     let session = app.get("/api/v1/session").await;
     assert_eq!(session.status, 200);
@@ -854,7 +854,7 @@ async fn session_and_namespaces_come_from_configuration_only() {
     assert_eq!(v["actor"]["issuer"], "urn:logweir:local-admin");
     assert_eq!(v["actor"]["subject"], "admin");
     assert!(v["expiresAt"].is_null() && v["csrfToken"].is_null());
-    let names: Vec<&str> = v["namespaces"]
+    let names: Vec<&str> = v["workspaces"]
         .as_array()
         .unwrap()
         .iter()
@@ -911,8 +911,8 @@ async fn session_and_namespaces_come_from_configuration_only() {
     ] {
         assert_eq!(caps[disabled], false, "{disabled}");
     }
-    let namespaces = app.get("/api/v1/namespaces").await.json();
-    assert_eq!(namespaces["items"], v["namespaces"]);
+    let namespaces = app.get("/api/v1/workspaces").await.json();
+    assert_eq!(namespaces["items"], v["workspaces"]);
     // Neither route asked Kubernetes anything: no core Namespace list.
     assert!(app.fake.requests().is_empty());
 }

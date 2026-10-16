@@ -97,8 +97,7 @@ fn restore_plan() -> RestorePlan {
         window_floor_source: WindowFloorSource::ArchiveManifest,
         source_partitions: Default::default(),
         default_replication_factor: 1,
-        checkpoint_state: "/var/lib/logweir/checkpoint".into(),
-        checkpoint_interval_secs: 30,
+        rate_limit_bytes_per_sec: None,
         offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     }
 }
@@ -209,13 +208,13 @@ mod rendered_engine_config_has_no_unnamed_dollar_brace {
             RenderError::DollarBrace(format!("drill-demo{PAYLOAD_SUFFIX}"))
         );
 
-        // ---- restore: restore.checkpoint_state, a PathBuf rendered as a
+        // ---- restore: restore.offset_report, a PathBuf rendered as a
         // string like any other.
         let mut p = restore_plan();
-        p.checkpoint_state = format!("/var/lib/logweir/{PAYLOAD_SUFFIX}/checkpoint").into();
+        p.offset_report = format!("/var/lib/logweir/{PAYLOAD_SUFFIX}/offsets").into();
         assert_eq!(
             render_restore::render(&p).unwrap_err(),
-            RenderError::DollarBrace(format!("/var/lib/logweir/{PAYLOAD_SUFFIX}/checkpoint"))
+            RenderError::DollarBrace(format!("/var/lib/logweir/{PAYLOAD_SUFFIX}/offsets"))
         );
 
         // ---- and the clean fixtures still render, in all three documents.

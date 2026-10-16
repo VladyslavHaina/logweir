@@ -1430,6 +1430,7 @@ fn readiness_row(before: Option<BTreeMap<String, String>>) -> Value {
                 client_cert_file: None,
                 client_key_file: None,
                 principal: format!("User:{}", s.scram_user),
+                schema_registry: None,
             },
             source_destination: DestinationPlan {
                 location_digest: location.location_digest(),

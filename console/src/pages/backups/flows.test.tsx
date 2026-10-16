@@ -58,12 +58,12 @@ function json(status: number, body: unknown) {
 }
 const copy = <T,>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
-/** A router with the R4 routes under `/<ns>/`, starting at `path`. */
+/** A router with the R4 routes under `/<ws>/`, starting at `path`. */
 function renderAt(path: string) {
   const root = createRootRoute({ component: Outlet });
-  const ns = createRoute({ getParentRoute: () => root, path: "$ns", component: Outlet });
+  const ws = createRoute({ getParentRoute: () => root, path: "$ws", component: Outlet });
   const router = createRouter({
-    routeTree: root.addChildren([ns.addChildren([...backupRoutes(ns as never)])]),
+    routeTree: root.addChildren([ws.addChildren([...backupRoutes(ws as never)])]),
     history: createMemoryHistory({ initialEntries: [path] }),
   });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -95,7 +95,7 @@ function reads(session: unknown, extra: (r: Request, path: string, body: unknown
     const own = extra(r, path, body);
     if (own) return own;
     if (path === "/session") return json(200, session);
-    if (path.startsWith("/namespaces/team-a/schedules")) return json(200, schedulesList);
+    if (path.startsWith("/workspaces/team-a/schedules")) return json(200, schedulesList);
     return null;
   };
 }
@@ -118,7 +118,7 @@ describe("Back up now from the list", () => {
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => (release = r));
     reads(operator, (r) => (r.method === "POST" ? (gate.then(() => started(r.headers.get("Idempotency-Key"))) as unknown as Response) : null));
-    renderWith(<BackUpNow ns="team-a" open onClose={() => {}} />);
+    renderWith(<BackUpNow ws="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     const select = await within(dialog).findByLabelText(/Schedule/);
     await within(dialog).findByRole("option", { name: /orders-hourly/ });
@@ -148,7 +148,7 @@ describe("Back up now from the list", () => {
       calls += 1;
       return calls === 1 ? json(503, { code: "kubernetes_unavailable", detail: "the API server did not answer", status: 503, requestId: "r1" }) : started(r.headers.get("Idempotency-Key"), true);
     });
-    renderWith(<BackUpNow ns="team-a" open onClose={() => {}} />);
+    renderWith(<BackUpNow ws="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: /orders-hourly/ });
     fireEvent.change(within(dialog).getByLabelText(/Schedule/), { target: { value: "orders-hourly" } });
@@ -167,7 +167,7 @@ describe("Back up now from the list", () => {
         ? json(409, { code: "policy_changed", detail: "the schedule changed", status: 409, requestId: "r", policy: { currentGeneration: 7 } })
         : null,
     );
-    renderWith(<BackUpNow ns="team-a" open onClose={() => {}} />);
+    renderWith(<BackUpNow ws="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     await within(dialog).findByRole("option", { name: /orders-hourly/ });
     fireEvent.change(within(dialog).getByLabelText(/Schedule/), { target: { value: "orders-hourly" } });
@@ -191,7 +191,7 @@ describe("Connect an archive", () => {
 
   it("refuses an empty form beside its fields and sends nothing", async () => {
     reads(operator);
-    renderWith(<ConnectArchive ns="team-a" open onClose={() => {}} />);
+    renderWith(<ConnectArchive ws="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     // DUI-40.1: the Sync mode helper names its command as code, never in raw backticks.
     expect(within(dialog).getByText("logweir catalog sync", { selector: "code" })).toBeTruthy();
@@ -210,7 +210,7 @@ describe("Connect an archive", () => {
       if (calls === 1) throw new TypeError("Failed to fetch");
       return json(201, { item: { ...copy(catalogDoc.item), name: "archive-b" }, replayed: false, requestId: "r" });
     });
-    renderWith(<ConnectArchive ns="team-a" open onClose={() => {}} />);
+    renderWith(<ConnectArchive ws="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     fill(dialog, "archive-a", "primary");
     fireEvent.click(within(dialog).getByRole("button", { name: "Connect archive" }));
@@ -233,7 +233,7 @@ describe("Connect an archive", () => {
       if (calls === 1) throw new TypeError("Failed to fetch");
       return json(200, { item: { ...copy(catalogDoc.item), name: "archive-a" }, replayed: true, requestId: "r" });
     });
-    renderWith(<ConnectArchive ns="team-a" open onClose={() => {}} />);
+    renderWith(<ConnectArchive ws="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     fill(dialog, "archive-a", "primary");
     fireEvent.click(within(dialog).getByRole("button", { name: "Connect archive" }));
@@ -258,7 +258,7 @@ describe("Connect an archive", () => {
           })
         : null,
     );
-    renderWith(<ConnectArchive ns="team-a" open onClose={() => {}} />);
+    renderWith(<ConnectArchive ws="team-a" open onClose={() => {}} />);
     const dialog = await screen.findByRole("dialog");
     fill(dialog, "archive-a", "nowhere");
     fireEvent.click(within(dialog).getByRole("button", { name: "Connect archive" }));
@@ -275,13 +275,13 @@ describe("what each role is offered", () => {
   };
 
   it("offers Back up now and Restore a point only to a role that holds them", async () => {
-    reads(operator, (_r, path) => (path.startsWith("/namespaces/team-a/backups") ? list() : null));
+    reads(operator, (_r, path) => (path.startsWith("/workspaces/team-a/backups") ? list() : null));
     renderAt("/team-a/backups");
     await screen.findByRole("button", { name: "Back up now" });
     expect(screen.getByRole("button", { name: "Restore a point" })).toBeTruthy();
     cleanup();
     // NEGATIVE CONTROL: the viewer's grant holds neither.
-    reads(viewer, (_r, path) => (path.startsWith("/namespaces/team-a/backups") ? list() : null));
+    reads(viewer, (_r, path) => (path.startsWith("/workspaces/team-a/backups") ? list() : null));
     renderAt("/team-a/backups");
     await screen.findByText(/A list row carries the controller's verdict/);
     expect(screen.queryByRole("button", { name: "Back up now" })).toBeNull();
@@ -289,11 +289,11 @@ describe("what each role is offered", () => {
   });
 
   it("offers Connect an archive only with the catalogConnect grant", async () => {
-    reads(operator, (_r, path) => (path.startsWith("/namespaces/team-a/catalogs") ? json(200, catalogsList) : null));
+    reads(operator, (_r, path) => (path.startsWith("/workspaces/team-a/catalogs") ? json(200, catalogsList) : null));
     renderAt("/team-a/catalog");
     await screen.findByRole("button", { name: "Connect an archive" });
     cleanup();
-    reads(viewer, (_r, path) => (path.startsWith("/namespaces/team-a/catalogs") ? json(200, catalogsList) : null));
+    reads(viewer, (_r, path) => (path.startsWith("/workspaces/team-a/catalogs") ? json(200, catalogsList) : null));
     renderAt("/team-a/catalog");
     await screen.findByText(/needs the operator or administrator role/);
     expect(screen.queryByRole("button", { name: "Connect an archive" })).toBeNull();
@@ -318,20 +318,20 @@ describe("what each role is offered", () => {
 describe("one backup's page", () => {
   const detail = (operation: unknown, session: unknown = operator) =>
     reads(session, (_r, path) => {
-      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, backupDoc);
-      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
-      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, operation);
-      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      if (path === "/workspaces/team-a/backups/orders-hourly-20260912-080000") return json(200, backupDoc);
+      if (path.startsWith("/workspaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/workspaces/team-a/operations/backup/")) return json(200, operation);
+      if (path.startsWith("/workspaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
       return null;
     });
 
   it("DUI-41.2: the Check it yourself note names its command as code, never in raw backticks", async () => {
     reads(operator, (_r, path) => {
-      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, backupDoc);
-      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
-      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, operationBackup);
-      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
-      if (path.startsWith("/namespaces/team-a/destinations/")) return json(200, { ...destinationDoc, item: { ...destinationDoc.item, locationDigest: backupDoc.item.locationDigest ?? null } });
+      if (path === "/workspaces/team-a/backups/orders-hourly-20260912-080000") return json(200, backupDoc);
+      if (path.startsWith("/workspaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/workspaces/team-a/operations/backup/")) return json(200, operationBackup);
+      if (path.startsWith("/workspaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/destinations/")) return json(200, { ...destinationDoc, item: { ...destinationDoc.item, locationDigest: backupDoc.item.locationDigest ?? null } });
       return null;
     });
     renderAt("/team-a/backups/orders-hourly-20260912-080000");
@@ -423,10 +423,10 @@ describe("one backup's page", () => {
       conditions: [{ type: "Failed", status: "True", reason: "GuardRefused", message: "the `runner` container exited 3", lastTransitionTime: "2026-09-12T08:01:00Z" }],
     });
     reads(operator, (_r, path) => {
-      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
-      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
-      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, op);
-      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      if (path === "/workspaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
+      if (path.startsWith("/workspaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/workspaces/team-a/operations/backup/")) return json(200, op);
+      if (path.startsWith("/workspaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
       return null;
     });
     renderAt("/team-a/backups/orders-hourly-20260912-080000");
@@ -453,10 +453,10 @@ describe("one backup's page", () => {
     const op = copy(operationBackup) as { item: Record<string, unknown> };
     Object.assign(op.item, { state: "refused", stateReason: "GuardRefused", verifiedSuccess: false, message: ODD, result: { status: "refused", exitCode: 3, exitReason: "GuardRefused" } });
     reads(operator, (_r, path) => {
-      if (path === "/namespaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
-      if (path.startsWith("/namespaces/team-a/backups")) return json(200, backupsList);
-      if (path.startsWith("/namespaces/team-a/operations/backup/")) return json(200, op);
-      if (path.startsWith("/namespaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
+      if (path === "/workspaces/team-a/backups/orders-hourly-20260912-080000") return json(200, doc);
+      if (path.startsWith("/workspaces/team-a/backups")) return json(200, backupsList);
+      if (path.startsWith("/workspaces/team-a/operations/backup/")) return json(200, op);
+      if (path.startsWith("/workspaces/team-a/catalogs")) return json(200, { items: [], page: { limit: 200 }, requestId: "r" });
       return null;
     });
     renderAt("/team-a/backups/orders-hourly-20260912-080000");
@@ -477,9 +477,9 @@ describe("one backup's page", () => {
 describe("one catalog's page", () => {
   it("keeps its status when the point list is refused, and never shows the refusal as an empty view", async () => {
     reads(operator, (_r, path) => {
-      if (path === "/namespaces/team-a/catalogs/primary") return json(200, catalogDoc);
-      if (path.startsWith("/namespaces/team-a/catalogs/primary/points")) return json(503, { code: "kubernetes_unavailable", detail: "the point pages could not be read", status: 503, requestId: "r" });
-      if (path.startsWith("/namespaces/team-a/catalogs/primary/signers")) return json(200, signers);
+      if (path === "/workspaces/team-a/catalogs/primary") return json(200, catalogDoc);
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/points")) return json(503, { code: "kubernetes_unavailable", detail: "the point pages could not be read", status: 503, requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/signers")) return json(200, signers);
       return null;
     });
     renderAt("/team-a/catalog/primary");
@@ -490,9 +490,9 @@ describe("one catalog's page", () => {
 
   it("offers no control that trusts an untrusted signer", async () => {
     reads(operator, (_r, path) => {
-      if (path === "/namespaces/team-a/catalogs/primary") return json(200, catalogDoc);
-      if (path.startsWith("/namespaces/team-a/catalogs/primary/points")) return json(200, { items: [], page: { limit: 200 }, truncated: false, viewExpired: false, requestId: "r" });
-      if (path.startsWith("/namespaces/team-a/catalogs/primary/signers")) return json(200, signers);
+      if (path === "/workspaces/team-a/catalogs/primary") return json(200, catalogDoc);
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/points")) return json(200, { items: [], page: { limit: 200 }, truncated: false, viewExpired: false, requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/signers")) return json(200, signers);
       return null;
     });
     renderAt("/team-a/catalog/primary");
@@ -510,9 +510,9 @@ describe("one catalog's page", () => {
 describe("FX-38: one catalog's page says what its view does not prove", () => {
   const show = (catalog: unknown, points: unknown) => {
     reads(operator, (_r, path) => {
-      if (path === "/namespaces/team-a/catalogs/primary") return json(200, catalog);
-      if (path.startsWith("/namespaces/team-a/catalogs/primary/points")) return json(200, points);
-      if (path.startsWith("/namespaces/team-a/catalogs/primary/signers")) return json(200, signers);
+      if (path === "/workspaces/team-a/catalogs/primary") return json(200, catalog);
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/points")) return json(200, points);
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/signers")) return json(200, signers);
       return null;
     });
     renderAt("/team-a/catalog/primary");

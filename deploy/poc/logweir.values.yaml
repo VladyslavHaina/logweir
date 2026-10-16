@@ -2,7 +2,7 @@
 # PoC profile. README.md step 6 has the exact command; in short:
 #
 #   helm upgrade --install logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" \
-#     -n logweir-system -f deploy/poc/logweir.values.yaml --wait --timeout 15m
+#     -n logweir -f deploy/poc/logweir.values.yaml --wait --timeout 15m
 #
 # THE IMAGES ARE NOT IN THIS FILE. The published chart (versions.env's
 # LOGWEIR_CHART at LOGWEIR_CHART_VERSION) already names the four Logweir images
@@ -28,19 +28,14 @@ runnerImagePullPolicy: IfNotPresent
 
 environment: poc
 
-# ---------------------------------------------------- where backups execute
-# `logweir-poc` is the main execution namespace; `logweir-pair` is the second,
-# bound to the two-person policy below (PROD-16.2). Both must exist before the
-# install or upgrade that names them (the chart copies the signing identity and
-# the runner account into each). The controller is scoped to them (D0 stage 5):
-# it cannot create Jobs in logweir-system, where the console's keys live.
-kubernetes:
-  namespace: logweir-poc
-  connectionsNamespace: logweir-poc   # G3: the demo archive credential lands where Backups run
-identity:
-  authorizedRunnerNamespaces: [logweir-poc, logweir-pair]
-controller:
-  watchNamespaces: [logweir-poc, logweir-pair]
+# ------------------------------------------------- one namespace, four workspaces
+# OD-23: everything lives in the release namespace `logweir`: the controller,
+# the console and its keys, every Logweir object and every runner Job. The four
+# workspaces are four environments; `prd` is two-person, the rest one-person
+# (approvalPolicy below). Whoever may create Pods, Jobs or Secret-naming
+# Logweir objects in `logweir` holds every key (docs/kubernetes.md
+# *Workspaces*): people use the console.
+workspaces: [dev, tst, stg, prd]
 retention:
   enabled: true                  # the account an Enforce policy would need; deletes nothing by itself
 
@@ -53,7 +48,6 @@ admissionPolicy:
 # -------------------------------------------------------- the shared console
 api:
   enabled: true
-  namespaces: [logweir-poc, logweir-pair]
   console:
     enabled: true
     imagePullPolicy: IfNotPresent
@@ -93,41 +87,45 @@ api:
       caBundle: { configMap: logweir-dex-ca, key: ca.crt }
       systemRoots: false
     roles:
-      revision: "poc-2026-10-11.1"
-      # One Dex user per role, bound by subject (`<issuer>#<sub>`; dex.values.yaml
-      # says why). The `groups` entries are what a real connector's groups bind
-      # to; they match nobody under Dex's static users.
+      revision: "poc-2026-10-16.1"
+      # One Dex user per binding, by subject (`<issuer>#<sub>`; dex.values.yaml
+      # says why). PROD-19.1 §9: `operator` operates `dev` only; `viewer` views
+      # `tst`; `approver` approves in `stg`; `bob` operates `stg` and approves
+      # in `prd`; `alice` operates and approves in `prd`, so the console can
+      # show she may never approve her own request; `admin` administers all
+      # four; `norole` has no binding.
       bindings:
-        - role: viewer
-          namespace: logweir-poc
-          groups: ["logweir-poc-viewers"]
-          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAxLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDESBWxvY2Fs"]
         - role: operator
-          namespace: logweir-poc
-          groups: ["logweir-poc-operators"]
+          workspace: dev
           subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAyLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDISBWxvY2Fs"]
+        - role: viewer
+          workspace: tst
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAxLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDESBWxvY2Fs"]
         - role: approver
-          namespace: logweir-poc
-          groups: ["logweir-poc-approvers"]
+          workspace: stg
           subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDAzLTRhMWUtOWUxYS0wMDAwMDAwMDAwMDMSBWxvY2Fs"]
-        - role: administrator
-          namespace: logweir-poc
-          groups: ["logweir-poc-admins"]
-          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
-        # logweir-pair (two-person, PROD-16.2): `alice` requests (operator) and
-        # is also an approver, so the console can show that she may never
-        # approve her own request; `bob` approves; `admin` is an administrator
-        # there and, not being an approver, cannot approve either.
         - role: operator
-          namespace: logweir-pair
+          workspace: stg
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA3LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDcSBWxvY2Fs"]
+        - role: operator
+          workspace: prd
           subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA2LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDYSBWxvY2Fs"]
         - role: approver
-          namespace: logweir-pair
+          workspace: prd
           subjects:
             - "https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA2LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDYSBWxvY2Fs"
             - "https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA3LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDcSBWxvY2Fs"
         - role: administrator
-          namespace: logweir-pair
+          workspace: dev
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
+        - role: administrator
+          workspace: tst
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
+        - role: administrator
+          workspace: stg
+          subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
+        - role: administrator
+          workspace: prd
           subjects: ["https://dex.localtest.me#CiQxZjBjOWE0ZS0wMDA0LTRhMWUtOWUxYS0wMDAwMDAwMDAwMDQSBWxvY2Fs"]
     ingress:
       enabled: true
@@ -155,31 +153,33 @@ api:
       limits: { memory: 256Mi }
 
 # -------------------------------------------------------- approval policy
-# `logweir-poc` restores are authorised by the console's own confirmation of
-# the signed-in requester (Ordinary). On a fresh install the identity hook
-# generates the confirmation key and trusts it in the TrustPolicy
-# logweir-installation (README.md, step 8). `logweir-pair` restores need a SECOND person
+# `dev`, `tst` and `stg` restores are authorised by the console's own
+# confirmation of the signed-in requester (one person). On a fresh install the
+# identity hook generates the confirmation key and trusts it in the TrustPolicy
+# logweir-installation (README.md, step 8). `prd` restores need a SECOND person
 # signed in to this console (two-person, PROD-16.2): `alice` asks, `bob`
 # approves with one click; the same console key signs both, no personal key.
 approvalPolicy:
   allowOrdinaryConfirmation: true
   policies:
-    - name: poc-ordinary
-      mode: Ordinary
+    - name: one-person
+      mode: confirm
       maxAgeSeconds: 900
-    - name: poc-pair
+    - name: two-person
       mode: two-person
       maxAgeSeconds: 900
-  namespaces:
-    logweir-poc: poc-ordinary
-    logweir-pair: poc-pair
+  workspaces:
+    dev: one-person
+    tst: one-person
+    stg: one-person
+    prd: two-person
   confirmationKeySecret: logweir-console-confirmation
 
 # ------------------------------------------- something to back up (demo only)
-# Two throwaway KRaft brokers and a MinIO archive, in logweir-system. They are
-# reached from logweir-poc by Service name; the connection, destination and
-# credentials are created in logweir-poc through the console (README.md,
-# step 9). Remove both for a real installation.
+# Two throwaway KRaft brokers and a MinIO archive, in `logweir`. Each
+# workspace's connections, destination and credentials are created through the
+# console (README.md, step 10); every workspace reaches the same two brokers.
+# Remove both for a real installation.
 demoKafka:
   enabled: true
 minio:

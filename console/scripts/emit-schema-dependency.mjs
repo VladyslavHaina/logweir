@@ -10,7 +10,7 @@
 //
 //     == catalog ==
 //     Schema-dependent topics
-//     <the warning sentence>
+//     <the warning sentence, unless the point's backup captured the registry>
 //     <pointId>: <topic (sides: schema ids ...; basis)>, ...
 //
 // A point with no schema-dependent topic prints no topic line, as the page shows none. It
@@ -30,4 +30,7 @@ if (typeof point.pointId !== "string" || !Array.isArray(point.topics)) {
   process.exit(2);
 }
 const topics = schemaDependentTopics(point);
-process.stdout.write(["== catalog ==", "Schema-dependent topics", SCHEMA_REGISTRY_NOT_CAPTURED, ...(topics.length > 0 ? [`${point.pointId}: ${topics.join(", ")}`] : []), ""].join("\n"));
+// OD-23 (PROD-03.1): the page warns only for a point whose backup did not capture the registry.
+const captured = point.schemaRegistry?.captured === true;
+const line = topics.length > 0 ? [`${point.pointId}: ${topics.join(", ")}${captured ? " (registry captured)" : ""}`] : [];
+process.stdout.write(["== catalog ==", "Schema-dependent topics", ...(captured ? [] : [SCHEMA_REGISTRY_NOT_CAPTURED]), ...line, ""].join("\n"));

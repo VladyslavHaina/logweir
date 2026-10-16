@@ -81,9 +81,9 @@ export function connectRefusalWords(error: unknown, name: string): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolean; onClose: () => void }) {
-  const connect = useConnectArchive(ns);
-  const choices = useDestinationChoices(ns);
+export function ConnectArchive({ ws, open, onClose }: { ws: string; open: boolean; onClose: () => void }) {
+  const connect = useConnectArchive(ws);
+  const choices = useDestinationChoices(ws);
   const [held, setHeld] = useState<{ key: string; body: string } | null>(null);
   const [made, setMade] = useState<CatalogResponse | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -94,8 +94,8 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
   });
   const { errors } = form.formState;
   const list = choices.data ?? null;
-  // DUI-10: one destination has one catalog per namespace; a second one never syncs.
-  const catalogs = useCatalogs(ns);
+  // DUI-10: one destination has one catalog per workspace; a second one never syncs.
+  const catalogs = useCatalogs(ws);
   const chosen = useWatch({ control: form.control, name: "destination" });
   const holder = catalogOf(catalogs.data, chosen.trim());
   const [duplicated, setDuplicated] = useState<string | null>(null);
@@ -161,7 +161,7 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
             {made.replayed
               ? "That submission had already created this catalog, so the API answered with the one it made the first time rather than creating a second. "
               : ""}
-            <Link to="/$ns/catalog/$name" params={{ ns, name: made.item.name }} onClick={onClose}>
+            <Link to="/$ws/catalog/$name" params={{ ws, name: made.item.name }} onClick={onClose}>
               {made.item.name}
             </Link>{" "}
             exists now. Syncing is the controller's; this page does not wait for it.
@@ -218,7 +218,7 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
                 "catalog-destination",
                 errors.destination?.message,
                 list !== null && list.length === 0
-                  ? "No saved destination exists in this namespace yet: create one on Destinations first; it names the bucket the archive is in."
+                  ? "No saved destination exists in this workspace yet: create one on Destinations first; it names the bucket the archive is in."
                   : choices.isError
                     ? "The saved destinations could not be read, so type the destination's name. Its credential is the one the sync uses; a read-only one is enough."
                     : "The saved destination whose bucket holds the archive. Its credential is the one the sync uses; a read-only one is enough.",
@@ -231,12 +231,12 @@ export function ConnectArchive({ ns, open, onClose }: { ns: string; open: boolea
                   className="lw-gap-top"
                   title={`${chosen.trim()} already has catalog ${holder}`}
                 >
-                  One destination has one catalog per namespace: a second one runs no sync and publishes no view. Use {holder}, or delete it
+                  One destination has one catalog per workspace: a second one runs no sync and publishes no view. Use {holder}, or delete it
                   first.
                 </Alert>
               )}
               {list !== null && list.length === 0 && (
-                <a href={`#/${ns}/destinations`} className="lw-small">
+                <a href={`#/${ws}/destinations`} className="lw-small">
                   Open Destinations
                 </a>
               )}

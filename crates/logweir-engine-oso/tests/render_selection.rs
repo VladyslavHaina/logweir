@@ -35,8 +35,7 @@ fn plan(subsets: &[(&str, &[i32])]) -> RestorePlan {
             .map(|(t, ps)| (t.to_string(), ps.to_vec()))
             .collect(),
         default_replication_factor: 1,
-        checkpoint_state: "/w/run/checkpoint.json".into(),
-        checkpoint_interval_secs: 30,
+        rate_limit_bytes_per_sec: None,
         offset_report: "/w/run/offsets.json".into(),
     }
 }
@@ -90,10 +89,6 @@ fn a_plan_without_a_subset_is_one_unfiltered_run() {
     assert_eq!(run.config_file_name(), "restore.yaml");
     assert_eq!(doc, &render_restore::render(&p).unwrap());
     assert!(line(doc, "source_partitions").is_none(), "{doc}");
-    assert_eq!(
-        line(doc, "checkpoint_state"),
-        Some("/w/run/checkpoint.json")
-    );
     assert_eq!(line(doc, "offset_report"), Some("/w/run/offsets.json"));
     assert_eq!(include(doc), vec!["audit", "orders", "payments"]);
 }
@@ -104,30 +99,21 @@ fn one_shared_subset_is_one_filtered_run() {
     let p = plan(&[("audit", &[0]), ("orders", &[0]), ("payments", &[0])]);
     let doc = render_restore::render(&p).expect("one run renders through `render`");
     assert_eq!(line(&doc, "source_partitions"), Some("[0]"));
-    assert_eq!(
-        line(&doc, "checkpoint_state"),
-        Some("/w/run/checkpoint.json")
-    );
+    assert_eq!(line(&doc, "offset_report"), Some("/w/run/offsets.json"));
 }
 
 /// DIFFERENT subsets on two topics are two filtered runs, and the topic
 /// without a subset is a third, unfiltered one, first. Each run names only
-/// its own topics and has its own checkpoint and offset report. `render`
+/// its own topics and has its own offset report. `render`
 /// refuses the plan rather than hand back one run's document as the plan's.
 /// KILLS: one document for every topic (the engine would filter the
-/// unrestricted topic too), a shared checkpoint or report path, a topic in
+/// unrestricted topic too), a shared report path, a topic in
 /// two runs.
 #[test]
 fn different_subsets_are_different_runs_with_their_own_files() {
     let p = plan(&[("orders", &[0, 2]), ("payments", &[1])]);
     let all = render_restore::render_all(&p).unwrap();
-    type Row<'a> = (
-        String,
-        Vec<String>,
-        Option<&'a str>,
-        Option<&'a str>,
-        Option<&'a str>,
-    );
+    type Row<'a> = (String, Vec<String>, Option<&'a str>, Option<&'a str>);
     let summary: Vec<Row> = all
         .iter()
         .map(|(run, doc)| {
@@ -135,7 +121,6 @@ fn different_subsets_are_different_runs_with_their_own_files() {
                 run.config_file_name(),
                 include(doc),
                 line(doc, "source_partitions"),
-                line(doc, "checkpoint_state"),
                 line(doc, "offset_report"),
             )
         })
@@ -147,7 +132,6 @@ fn different_subsets_are_different_runs_with_their_own_files() {
                 "restore.run-0.yaml".to_string(),
                 vec!["audit".to_string()],
                 None,
-                Some("/w/run/checkpoint.run-0.json"),
                 Some("/w/run/offsets.run-0.json"),
             ),
             // Subsets in ascending order: [0, 2] sorts before [1].
@@ -155,14 +139,12 @@ fn different_subsets_are_different_runs_with_their_own_files() {
                 "restore.run-1.yaml".to_string(),
                 vec!["orders".to_string()],
                 Some("[0, 2]"),
-                Some("/w/run/checkpoint.run-1.json"),
                 Some("/w/run/offsets.run-1.json"),
             ),
             (
                 "restore.run-2.yaml".to_string(),
                 vec!["payments".to_string()],
                 Some("[1]"),
-                Some("/w/run/checkpoint.run-2.json"),
                 Some("/w/run/offsets.run-2.json"),
             ),
         ]

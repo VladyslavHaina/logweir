@@ -60,7 +60,7 @@ export function ConnectionSelect({
           if (c) onSelect({ uid: c.uid, name: c.name });
         }}
       >
-        {(refused || all.length === 0) && <FormSelectOption value="" label={all.length === 0 ? "No connection in this namespace" : "Choose a connection"} isPlaceholder />}
+        {(refused || all.length === 0) && <FormSelectOption value="" label={all.length === 0 ? "No connection in this workspace" : "Choose a connection"} isPlaceholder />}
         {all.map((c) => (
           <FormSelectOption key={c.uid} value={c.uid} label={optionCaption(c)} />
         ))}

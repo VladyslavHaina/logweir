@@ -40,7 +40,7 @@ async fn a_discovery_is_created_against_a_connection_that_exists() {
     seed_connection(&app);
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries"),
+            &format!("/api/v1/workspaces/{NS_A}/connections/source/topic-discoveries"),
             Some("discovery-key-00001"),
             r#"{"expectedTopics": ["orders", "payments"]}"#,
         )
@@ -79,7 +79,7 @@ async fn a_discovery_is_created_against_a_connection_that_exists() {
 async fn a_discovery_against_a_connection_that_does_not_exist_is_404_and_stores_nothing() {
     let app = TestApp::new();
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/connections/absent/topic-discoveries"),
+        &format!("/api/v1/workspaces/{NS_A}/connections/absent/topic-discoveries"),
         Some("discovery-key-00002"),
         "{}",
     )
@@ -93,7 +93,7 @@ async fn a_discovery_against_a_connection_that_does_not_exist_is_404_and_stores_
 async fn malformed_parameters_are_refused_by_field() {
     let app = TestApp::new();
     seed_connection(&app);
-    let path = format!("/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries");
+    let path = format!("/api/v1/workspaces/{NS_A}/connections/source/topic-discoveries");
     for (body, field) in [
         (r#"{"maxTopics": 0}"#, "maxTopics"),
         (r#"{"maxTopics": 50001}"#, "maxTopics"),
@@ -112,7 +112,7 @@ async fn malformed_parameters_are_refused_by_field() {
 async fn a_fresh_identical_discovery_is_reused_rather_than_repeated() {
     let app = TestApp::new();
     seed_connection(&app);
-    let path = format!("/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries");
+    let path = format!("/api/v1/workspaces/{NS_A}/connections/source/topic-discoveries");
     let first = app.post(&path, Some("discovery-reuse-0001"), "{}").await;
     assert_eq!(first.status.as_u16(), 202);
     let id = first.json()["item"]["id"].as_str().unwrap().to_string();
@@ -161,7 +161,7 @@ async fn the_create_rate_is_bounded_per_actor_and_namespace() {
     let namespace = support::NS_B;
     seed_connection_in(&app, namespace);
     logweir_api::routes::reset_check_rate_limits();
-    let path = format!("/api/v1/namespaces/{namespace}/connections/source/topic-discoveries");
+    let path = format!("/api/v1/workspaces/{namespace}/connections/source/topic-discoveries");
     for i in 0..6 {
         let response = app
             .post(
@@ -218,7 +218,7 @@ async fn the_topics_page_is_bounded_ordered_and_searchable() {
 
     let first = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0001/topics?limit=2"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0001/topics?limit=2"
         ))
         .await;
     assert_eq!(first.status.as_u16(), 200, "{}", first.text());
@@ -236,7 +236,7 @@ async fn the_topics_page_is_bounded_ordered_and_searchable() {
 
     let next = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0001/topics?limit=2&cursor={cursor}"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0001/topics?limit=2&cursor={cursor}"
         ))
         .await;
     assert_eq!(next.json()["items"][0]["name"], "bulk-00002");
@@ -245,7 +245,7 @@ async fn the_topics_page_is_bounded_ordered_and_searchable() {
     // Internal topics are excluded by default and only appear when asked for.
     let all = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0001/topics?limit=200"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0001/topics?limit=200"
         ))
         .await;
     let all_body = all.json();
@@ -259,7 +259,7 @@ async fn the_topics_page_is_bounded_ordered_and_searchable() {
     assert_eq!(all_body["scan"]["complete"], true);
     let internal = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0001/topics?limit=200&internal=include"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0001/topics?limit=200&internal=include"
         ))
         .await;
     assert!(internal.text().contains("__consumer_offsets"));
@@ -267,7 +267,7 @@ async fn the_topics_page_is_bounded_ordered_and_searchable() {
     // `q` is a case-insensitive substring; `prefix` skips whole chunks.
     let q = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0001/topics?q=ORDER"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0001/topics?q=ORDER"
         ))
         .await;
     assert_eq!(q.json()["items"].as_array().unwrap().len(), 1);
@@ -276,7 +276,7 @@ async fn the_topics_page_is_bounded_ordered_and_searchable() {
 
     let prefix = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0001/topics?prefix=orders"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0001/topics?prefix=orders"
         ))
         .await;
     assert_eq!(prefix.json()["items"].as_array().unwrap().len(), 1);
@@ -287,7 +287,7 @@ async fn the_topics_page_is_bounded_ordered_and_searchable() {
     // `errored` selects the entries whose metadata could not be read.
     let errored = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0001/topics?errored=only"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0001/topics?errored=only"
         ))
         .await;
     assert_eq!(errored.json()["items"].as_array().unwrap().len(), 1);
@@ -311,7 +311,7 @@ async fn a_topics_cursor_is_bound_to_the_actor_the_result_and_the_filters() {
     );
     let first = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2"
         ))
         .await;
     let cursor = first.json()["page"]["nextCursor"]
@@ -322,7 +322,7 @@ async fn a_topics_cursor_is_bound_to_the_actor_the_result_and_the_filters() {
     // A CHANGED FILTER IS A DIFFERENT LIST. Reusing the cursor with `q` set is
     // refused rather than answered from a position that meant something else.
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2&q=bulk&cursor={cursor}"
+        "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2&q=bulk&cursor={cursor}"
     ))
     .await
     .assert_problem(400, "cursor_invalid");
@@ -332,7 +332,7 @@ async fn a_topics_cursor_is_bound_to_the_actor_the_result_and_the_filters() {
     bytes[1] = if bytes[1] == b'A' { b'B' } else { b'A' };
     let tampered = String::from_utf8(bytes).unwrap();
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2&cursor={tampered}"
+        "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2&cursor={tampered}"
     ))
     .await
     .assert_problem(400, "cursor_invalid");
@@ -340,7 +340,7 @@ async fn a_topics_cursor_is_bound_to_the_actor_the_result_and_the_filters() {
     // And it expires.
     app.clock.advance(901);
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2&cursor={cursor}"
+        "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0002/topics?limit=2&cursor={cursor}"
     ))
     .await
     .assert_problem(410, "cursor_expired");
@@ -348,9 +348,10 @@ async fn a_topics_cursor_is_bound_to_the_actor_the_result_and_the_filters() {
 }
 
 /// THE INTEGRITY RULE, WITH ITS THREE MUTANTS. A chunk that is not owned by
-/// this discovery, is not immutable, or whose bytes do not hash to the digest
-/// the status indexes, is refused — the page is never served from bytes whose
-/// provenance did not hold.
+/// this discovery is another object's and reads as gone (the adapter's owner
+/// check, which is also the workspace boundary); one that is not immutable,
+/// or whose bytes do not hash to the digest the status indexes, is refused —
+/// the page is never served from bytes whose provenance did not hold.
 #[tokio::test]
 async fn a_chunk_that_fails_its_integrity_check_refuses_the_page() {
     for mutant in ["owner", "immutable", "digest"] {
@@ -376,10 +377,14 @@ async fn a_chunk_that_fails_its_integrity_check_refuses_the_page() {
 
         let response = app
             .get(&format!(
-                "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0003/topics"
+                "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0003/topics"
             ))
             .await;
-        response.assert_problem(409, "result_integrity_failed");
+        if mutant == "owner" {
+            response.assert_problem(410, "cursor_expired");
+        } else {
+            response.assert_problem(409, "result_integrity_failed");
+        }
         assert!(
             !response.text().contains("planted"),
             "the refused page still leaked a row ({mutant})"
@@ -406,7 +411,7 @@ async fn a_collected_chunk_is_gone_rather_than_half_a_page() {
     state["status"]["result"]["chunks"][0]["name"] = json!("lwc-td-0004-gone");
     app.fake.seed("topicdiscoveries", NS_A, state);
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0004/topics"
+        "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0004/topics"
     ))
     .await
     .assert_problem(410, "cursor_expired");
@@ -426,7 +431,7 @@ async fn the_read_never_lists_config_maps() {
     );
     app.fake.clear_requests();
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0005/topics"
+        "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0005/topics"
     ))
     .await;
     for request in app.fake.requests() {
@@ -456,7 +461,7 @@ async fn a_result_goes_stale_when_its_connection_binding_changes() {
     );
     let fresh = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0006"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0006"
         ))
         .await;
     assert_eq!(fresh.json()["item"]["stale"], false);
@@ -469,7 +474,7 @@ async fn a_result_goes_stale_when_its_connection_binding_changes() {
     app.fake.seed("kafkaclusters", NS_A, cluster);
     let stale = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0006"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0006"
         ))
         .await;
     assert_eq!(stale.json()["item"]["stale"], true);
@@ -479,7 +484,7 @@ async fn a_result_goes_stale_when_its_connection_binding_changes() {
     app.clock.advance(3600);
     let expired = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-0006"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-0006"
         ))
         .await;
     let expired_body = expired.json();
@@ -516,7 +521,7 @@ async fn a_failed_attempt_never_hides_the_last_successful_inventory() {
     );
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries?latest=true"
+            "/api/v1/workspaces/{NS_A}/connections/source/topic-discoveries?latest=true"
         ))
         .await;
     let v = response.json();
@@ -572,7 +577,7 @@ async fn a_discovery_publishes_the_broker_count_its_result_recorded() {
 
     let latest = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries?latest=true"
+            "/api/v1/workspaces/{NS_A}/connections/source/topic-discoveries?latest=true"
         ))
         .await;
     assert_eq!(latest.status.as_u16(), 200, "{}", latest.text());
@@ -585,7 +590,7 @@ async fn a_discovery_publishes_the_broker_count_its_result_recorded() {
     assert_eq!(v["latestAttempt"]["brokerCount"], expected, "{v}");
     let one = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-counted"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-counted"
         ))
         .await
         .json();
@@ -627,7 +632,7 @@ async fn a_discovery_publishes_the_broker_count_its_result_recorded() {
     );
     let v = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/connections/source/topic-discoveries?latest=true"
+            "/api/v1/workspaces/{NS_A}/connections/source/topic-discoveries?latest=true"
         ))
         .await
         .json();
@@ -655,7 +660,7 @@ async fn cancel_is_idempotent_and_exact_owner() {
         "source",
         "urn:test#another-operator",
     );
-    let path = format!("/api/v1/namespaces/{NS_A}/topic-discoveries/td-mine:cancel");
+    let path = format!("/api/v1/workspaces/{NS_A}/topic-discoveries/td-mine:cancel");
 
     let first = app.post(&path, None, "{}").await;
     assert_eq!(first.status.as_u16(), 200, "{}", first.text());
@@ -693,7 +698,7 @@ async fn cancel_is_idempotent_and_exact_owner() {
     // ANOTHER ACTOR'S CHECK IS NOT THIS ACTOR'S TO STOP.
     let theirs = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/topic-discoveries/td-theirs:cancel"),
+            &format!("/api/v1/workspaces/{NS_A}/topic-discoveries/td-theirs:cancel"),
             None,
             "{}",
         )
@@ -713,14 +718,14 @@ async fn a_cancel_refuses_an_idempotency_key_and_a_bad_command() {
     let app = TestApp::new();
     seed_running_discovery(&app.fake, NS_A, "td-mine", "source", LOCAL_ADMIN_ACTOR);
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/topic-discoveries/td-mine:cancel"),
+        &format!("/api/v1/workspaces/{NS_A}/topic-discoveries/td-mine:cancel"),
         Some("cancel-key-000001"),
         "{}",
     )
     .await
     .assert_problem(400, "idempotency_key_invalid");
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/topic-discoveries/td-mine:stop"),
+        &format!("/api/v1/workspaces/{NS_A}/topic-discoveries/td-mine:stop"),
         None,
         "{}",
     )
@@ -734,7 +739,7 @@ async fn the_operation_route_serves_a_check_without_inventing_a_verification() {
     seed_running_discovery(&app.fake, NS_A, "td-mine", "source", LOCAL_ADMIN_ACTOR);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/operations/discovery/td-mine"
+            "/api/v1/workspaces/{NS_A}/operations/discovery/td-mine"
         ))
         .await;
     let v = response.json();
@@ -763,7 +768,7 @@ async fn an_unrecognised_phase_is_never_read_as_success() {
     app.fake.seed("topicdiscoveries", NS_A, object);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-odd"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-odd"
         ))
         .await;
     assert_eq!(response.status.as_u16(), 200, "{}", response.text());
@@ -799,7 +804,7 @@ async fn a_completeness_claim_without_an_attestation_is_published_as_unknown() {
 
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-attest"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-attest"
         ))
         .await;
     let visibility = &response.json()["item"]["visibility"];
@@ -816,7 +821,7 @@ async fn a_completeness_claim_without_an_attestation_is_published_as_unknown() {
     app.fake.seed("topicdiscoveries", NS_A, object);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-attest"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-attest"
         ))
         .await;
     let visibility = &response.json()["item"]["visibility"];
@@ -836,7 +841,7 @@ async fn a_completeness_claim_without_an_attestation_is_published_as_unknown() {
     app.fake.seed("topicdiscoveries", NS_A, object);
     let response = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-attest"
+            "/api/v1/workspaces/{NS_A}/topic-discoveries/td-attest"
         ))
         .await;
     assert_eq!(response.json()["item"]["visibility"]["state"], "limited");
@@ -882,7 +887,7 @@ async fn an_administrator_may_cancel_a_check_an_operator_started() {
             ..support::SharedOptions::default()
         },
     );
-    let path = format!("/api/v1/namespaces/{NS_A}/topic-discoveries/td-operators:cancel");
+    let path = format!("/api/v1/workspaces/{NS_A}/topic-discoveries/td-operators:cancel");
 
     // Another OPERATOR still cannot.
     let operator = app.session_cookie("u-op-2", &["lw-a-operators"]);
@@ -893,7 +898,7 @@ async fn an_administrator_may_cancel_a_check_an_operator_started() {
     assert!(refused.json()["detail"]
         .as_str()
         .unwrap()
-        .contains("administrator of this namespace may cancel any"));
+        .contains("administrator of this workspace may cancel any"));
     assert_eq!(
         fake.object("topicdiscoveries", NS_A, "td-operators")
             .unwrap()["spec"]["cancelRequested"],

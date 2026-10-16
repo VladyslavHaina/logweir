@@ -16,10 +16,10 @@
 #      the `--set` values, so the two paths still render the same objects. Every image pinned; no `kubectl patch` in the profile;
 #      the console's host alias, trusted proxy Service, egress peer and CA
 #      bundle agree with the Traefik render and with each other.
-#   2. The two upgrade-rehearsal baselines with THEIR OWN charts (git archive at
-#      R1_COMMIT / R2_COMMIT) and their values under rehearsals/, and the
-#      candidate chart REFUSING R2's unmigrated shared-console values
-#      (release-note item 6) — the refusal the rehearsal must meet live.
+#   2. The values file renders ONE namespace with four workspaces (OD-23):
+#      every namespaced object in LOGWEIR_NAMESPACE but the trusted-proxy Role
+#      and its binding in the ingress namespace, LOGWEIR_WORKSPACES
+#      `dev,tst,stg,prd`, and `prd` alone bound two-person.
 #   3. Traefik, cert-manager and Dex at their pinned versions. The upstream
 #      charts are read from `charts-dir` when it holds the pinned tarballs, and
 #      are otherwise pulled into a temporary directory (network access to their
@@ -221,38 +221,23 @@ else
   echo "FAIL: could not obtain $LOGWEIR_CHART $LOGWEIR_CHART_VERSION:" >&2; cat "$work/published-pull.log" >&2; fail=1
 fi
 
-echo "== 2. The upgrade-rehearsal baselines, each with its own chart =="
-for r in R1 R2; do
-  commit_var="${r}_COMMIT"; commit="${!commit_var}"
-  lower="$(echo "$r" | tr 'R' 'r')"
-  values="$(find deploy/poc/rehearsals -name "$lower-*.values.yaml" 2>/dev/null | head -1)"
-  if [ -z "$values" ]; then echo "FAIL: no rehearsals/ values file for $r" >&2; fail=1; continue; fi
-  if ! git cat-file -e "$commit^{commit}" 2>/dev/null; then
-    echo "FAIL: $r's commit $commit is not in this clone (fetch the full history, or the tag)" >&2
-    fail=1; continue
+echo "== 2. One namespace, four workspaces =="
+if [ -f "$work/logweir-checkout.yaml" ]; then
+  outside="$(awk -v ns="$LOGWEIR_NAMESPACE" -v ing="$INGRESS_NAMESPACE" '
+    /^---/ { kind = ""; name = "" }
+    /^kind: / { kind = $2 }
+    /^  name: / { if (name == "") name = $2 }
+    /^  namespace: / { if ($2 != ns && !($2 == ing && name == "logweir-api-trusted-proxy")) print kind "/" name " in " $2 }
+  ' "$work/logweir-checkout.yaml")"
+  if [ -n "$outside" ]; then
+    echo "FAIL: the PoC render puts objects outside $LOGWEIR_NAMESPACE:" >&2; echo "$outside" >&2; fail=1
+  else
+    echo "   ok: every namespaced object is in $LOGWEIR_NAMESPACE, but the trusted-proxy read in $INGRESS_NAMESPACE"
   fi
-  mkdir -p "$work/$r"
-  git archive "$commit" charts/logweir | tar -x -C "$work/$r"
-  RELEASE=logweir render "baseline-$lower" "$work/$r/charts/logweir" "$LOGWEIR_NAMESPACE" -f "$values"
-done
-if [ -f "$work/baseline-r1.yaml" ]; then
-  need "the R1 baseline" "$work/baseline-r1.yaml" "docker.io/vladyslavhaina/weirkeeper:$R1_TAG"
-  if grep -q 'logweir-console' "$work/baseline-r1.yaml"; then
-    echo "FAIL: the R1 baseline renders a console; v0.1.5 had none" >&2; fail=1
-  fi
-fi
-[ -f "$work/baseline-r2.yaml" ] && need "the R2 baseline" "$work/baseline-r2.yaml" \
-  "docker.io/vladyslavhaina/logweir-console:$R2_TAG" "mode: shared"
-# Item 6, statically: the candidate refuses R2's unmigrated shared console.
-if helm template logweir charts/logweir -n "$LOGWEIR_NAMESPACE" -f deploy/poc/rehearsals/r2-f49849d.values.yaml \
-     --set identity.renderedOffline=false \
-     > /dev/null 2> "$work/item6.err"; then
-  echo "FAIL: the candidate chart ACCEPTED R2's unmigrated shared-console values (release-note item 6)" >&2
-  fail=1
-elif grep -q 'requires controller.watchNamespaces' "$work/item6.err"; then
-  echo "   ok: the candidate refuses R2's unmigrated shared console, naming controller.watchNamespaces (item 6)"
-else
-  echo "FAIL: the candidate refused R2's values for another reason:" >&2; cat "$work/item6.err" >&2; fail=1
+  need "the Logweir render" "$work/logweir-checkout.yaml" \
+    'value: "dev,tst,stg,prd"' \
+    "prd: two-person" \
+    "dev: one-person"
 fi
 
 echo "== 3. Traefik, cert-manager and Dex, pinned =="
@@ -360,7 +345,7 @@ else
   fail=1
 fi
 # The retired controller may be NAMED in a comment (why it is gone), never used.
-if grep -rn -i 'nginx' deploy/poc/*.yaml deploy/poc/*.env deploy/poc/rehearsals/ | grep -v -E ':[0-9]+:[[:space:]]*#' > "$work/nginx.hits"; then
+if grep -rn -i 'nginx' deploy/poc/*.yaml deploy/poc/*.env | grep -v -E ':[0-9]+:[[:space:]]*#' > "$work/nginx.hits"; then
   echo "FAIL: the profile still uses the retired ingress-nginx:" >&2
   cat "$work/nginx.hits" >&2
   fail=1

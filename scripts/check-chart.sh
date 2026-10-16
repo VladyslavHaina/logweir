@@ -409,26 +409,26 @@ refuses "a broad bootstrap API CIDR (0.0.0.0/0)" "/identity/kubernetesApiCIDRs/0
 # allowlist, one advisory row), so the chart refuses the same values at install:
 # keeping no discovery, a partial attestation (it would match nothing while
 # looking relied on), a hard topic cap above the parser's, and a total below the
-# per-namespace ceiling (cross-field, so `_validate.tpl` and not the schema).
+# per-workspace ceiling (cross-field, so `_validate.tpl` and not the schema).
 refuses "checks.discovery.keepPerConnection=0" "/checks/discovery/keepPerConnection': minimum: got 0, want 1" \
   --set 'checks.discovery.keepPerConnection=0'
 refuses "a visibility attestation naming only its id" "/checks/discovery/visibilityAttestations/0': missing properties" \
   --set-string 'checks.discovery.visibilityAttestations[0].id=att-partial'
 refuses "checks.discovery.hardMaxTopics above the parser's ceiling" "/checks/discovery/hardMaxTopics': maximum" \
   --set 'checks.discovery.hardMaxTopics=100000'
-refuses "checks.maxActiveTotal below checks.maxActivePerNamespace" "must be at least checks.maxActivePerNamespace" \
+refuses "checks.maxActiveTotal below checks.maxActivePerWorkspace" "must be at least checks.maxActivePerWorkspace" \
   --set 'checks.maxActiveTotal=2'
 
 # The manual-run blocks render only away from the binaries' defaults, so an
 # image-only rollback of a default install reads the documents it always did
 # (chart_lint holds the default render to carrying neither); a non-default
 # value IS rendered, or the knob would do nothing.
-if renders "runs.maxManualBackupsActivePerNamespace=6" "$tmp/runs-nondefault.yaml" \
-  --set 'runs.maxManualBackupsActivePerNamespace=6'; then
-  if grep -q '"maxManualBackupsActivePerNamespace": 6' "$tmp/runs-nondefault.yaml"; then
+if renders "runs.maxManualBackupsActivePerWorkspace=6" "$tmp/runs-nondefault.yaml" \
+  --set 'runs.maxManualBackupsActivePerWorkspace=6'; then
+  if grep -q '"maxManualBackupsActivePerWorkspace": 6' "$tmp/runs-nondefault.yaml"; then
     echo "   rc=0  (a non-default runs.* renders the runs block)"
   else
-    echo "FAIL: runs.maxManualBackupsActivePerNamespace=6 did not render the policy's runs block" >&2
+    echo "FAIL: runs.maxManualBackupsActivePerWorkspace=6 did not render the policy's runs block" >&2
     fail=1
   fi
 fi
@@ -598,21 +598,18 @@ CONSOLE_LOCAL=(--set api.console.mode=localAdmin)
 # with the re-pin to a runner that carries them (rev 2fe8d907); the rows below
 # still state it, so they keep their meaning if the default ever moves again.
 FEATURE=(--set identity.bootstrapFeatures.consoleKey=true)
-# PLAT-17.2 (D0 stage 5): a shared console renders only beside a controller
-# scoped AWAY from the release namespace, so the base shared shape binds its
-# viewers in an execution namespace the controller watches and the console is
-# bound in — never in `$NAMESPACE`, which holds the console's keys.
-CONSOLE_EXEC_NS=team-a
+# OD-23: one namespace, workspaces inside it. The base shared shape binds its
+# viewers in workspace team-a.
+CONSOLE_WS=team-a
 CONSOLE_SHARED=(
   --set api.console.mode=shared
-  --set "api.namespaces={$CONSOLE_EXEC_NS}"
-  --set "controller.watchNamespaces={$CONSOLE_EXEC_NS}"
+  --set "workspaces={$CONSOLE_WS}"
   --set api.console.oidc.issuer=https://idp.example.com/realms/logweir
   --set api.console.oidc.clientId=logweir-console
   --set api.console.oidc.clientSecret=logweir-console-oidc
   --set api.console.roles.revision=2026-09-21.1
   --set api.console.roles.bindings[0].role=viewer
-  --set "api.console.roles.bindings[0].namespace=$CONSOLE_EXEC_NS"
+  --set "api.console.roles.bindings[0].workspace=$CONSOLE_WS"
   --set "api.console.roles.bindings[0].groups[0]=logweir-viewers"
 )
 # Release-notes item 74: `notify` is withdrawn with the alert sinks, and a
@@ -649,21 +646,21 @@ refuses "an Ordinary approval policy without the installation floor" \
   "is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true" \
   --set approvalPolicy.policies[0].name=team-ordinary \
   --set approvalPolicy.policies[0].mode=Ordinary
-refuses "a namespace bound to an undeclared approval policy" \
+refuses "a workspace bound to an undeclared approval policy" \
   "which approvalPolicy.policies does not declare" \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=Governed \
-  --set "approvalPolicy.namespaces.$NAMESPACE=nothing"
+  --set "approvalPolicy.workspaces.default=nothing"
 # PROD-16.1: with the managed identity the hook GENERATES the console key, so
 # the refusal is for an install with neither the managed identity nor a named
 # key Secret; the same values with the identity render (the managed key).
-refuses "a console-served namespace bound to a policy with no confirmation key" \
+refuses "a workspace bound to a policy with no confirmation key" \
   "approvalPolicy.confirmationKeySecret is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
   --set identity.enabled=false \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=Governed \
-  --set "approvalPolicy.namespaces.$NAMESPACE=prod-governed"
+  --set "approvalPolicy.workspaces.default=prod-governed"
 refuses "default: confirm with no confirmation key" \
   "approvalPolicy.default is confirm and there is no console confirmation key" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" \
@@ -692,7 +689,7 @@ render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_LOCAL[@]}" "${FEATURE[@]}" \
   --set approvalPolicy.policies[0].name=prod-governed \
   --set approvalPolicy.policies[0].mode=strict \
-  --set "approvalPolicy.namespaces.$NAMESPACE=prod-governed" \
+  --set "approvalPolicy.workspaces.default=prod-governed" \
   > "$tmp/managed-key.yaml" 2> "$tmp/managed-key.err"
 rc=$?
 if [ "$rc" -ne 0 ] || ! grep -q "secretName: logweir-console-confirmation" "$tmp/managed-key.yaml" \
@@ -934,10 +931,14 @@ elif ! grep -q "^kind: Ingress$" "$tmp/console-optout.yaml" || grep -F -q "trust
 else
   echo "   rc=0  (the deliberate opt-out, api.console.trustedProxy=none, renders the Ingress with no proxy named)"
 fi
-refuses "a product role binding for a namespace the console is not bound in" "which is not one the console is bound in" \
+refuses "a product role binding for a workspace the install does not have" "names workspace \"qa\", which is not in workspaces" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
-  --set "api.console.roles.bindings[0].namespace=some-other-namespace"
+  --set "api.console.roles.bindings[0].workspace=qa"
+refuses "a product role binding that still names a namespace" "names a namespace; it is renamed workspace" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set "api.console.roles.bindings[0].namespace=team-a"
 refuses "a wildcard in a product role binding" "contains \`*\` or \`?\`" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
@@ -946,17 +947,56 @@ refuses "a shared-console NetworkPolicy with no ingress-controller selector" "ne
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.networkPolicy.enabled=true
-# PLAT-17.2 — D0 stage 5. The shared console is not rendered inside the
-# controller's Job-create authority, nor with a trusted-proxy gate that has
-# nothing to trust.
-refuses "a shared console with the controller unscoped" "requires controller.watchNamespaces" \
+# OD-23 (PROD-19.1 §5, C1 and C2): ONE NAMESPACE, WORKSPACES INSIDE IT. Every
+# value that named another namespace, and every per-namespace one, is refused
+# by name, saying where it went; `null` (how --reuse-values clears one) renders.
+refuses "the removed kubernetes.namespace" "kubernetes.namespace is removed" \
+  --set kubernetes.namespace=team-a
+refuses "the removed kubernetes.connectionsNamespace" "kubernetes.connectionsNamespace is removed" \
+  --set kubernetes.connectionsNamespace=team-a
+refuses "the removed controller.watchNamespaces" "controller.watchNamespaces is removed" \
+  --set "controller.watchNamespaces={team-a}"
+refuses "the removed identity.authorizedRunnerNamespaces" "identity.authorizedRunnerNamespaces is removed" \
+  --set "identity.authorizedRunnerNamespaces={team-a}"
+refuses "the removed api.namespaces" "api.namespaces is removed" \
+  --set "api.namespaces={team-a}"
+refuses "the renamed approvalPolicy.namespaces" "renamed approvalPolicy.workspaces" \
+  --set approvalPolicy.policies[0].name=p --set approvalPolicy.policies[0].mode=strict \
+  --set "approvalPolicy.namespaces.team-a=p"
+for cap in checks.maxActivePerNamespace checks.maxEvidenceFetchActivePerNamespace \
+  runs.maxManualBackupsActivePerNamespace runs.maxManualRestoresActivePerNamespace; do
+  refuses "the renamed $cap" "renamed ${cap%PerNamespace}PerWorkspace" --set "$cap=3"
+done
+renders "the control --set controller.watchNamespaces=null" "$tmp/watch-null.yaml" \
+  --set controller.watchNamespaces=null \
+  && echo "   rc=0  (controller.watchNamespaces=null renders: the control)"
+refuses "an empty workspaces list" "/workspaces': minItems" --set-json 'workspaces=[]'
+refuses "a duplicate workspace" "/workspaces': items at 0 and 1 are equal" --set "workspaces={dev,dev}"
+refuses "a workspace that is not a DNS label" "/workspaces/0': 'Dev_1' does not match pattern" --set "workspaces={Dev_1}"
+refuses "an approval binding for a workspace the install does not have" \
+  "approvalPolicy.workspaces.qa binds a workspace that is not in workspaces" \
+  --set approvalPolicy.policies[0].name=p --set approvalPolicy.policies[0].mode=strict \
+  --set "workspaces={dev,prd}" --set "approvalPolicy.workspaces.qa=p"
+# AND FOUR WORKSPACES, BOUND AND APPROVED PER WORKSPACE, RENDER (C2): the
+# controller's list, the console's list and the approval bindings, from one value.
+if renders "four workspaces with bindings and approval bindings" "$tmp/four.yaml" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
-  --set-string api.console.publicBaseUrl=https://console.example.com \
-  --set "controller.watchNamespaces=null"
-refuses "a shared console whose controller may create Jobs in the key namespace" "includes the release namespace" \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
-  --set-string api.console.publicBaseUrl=https://console.example.com \
-  --set "controller.watchNamespaces={$CONSOLE_EXEC_NS,$NAMESPACE}"
+  --set-string api.console.publicBaseUrl=https://console.example.com --set api.console.trustedProxy=none \
+  --set "workspaces={dev,tst,stg,prd}" \
+  --set "api.console.roles.bindings[0].workspace=prd" \
+  --set approvalPolicy.allowOrdinaryConfirmation=true \
+  --set approvalPolicy.policies[0].name=one-person --set approvalPolicy.policies[0].mode=confirm \
+  --set approvalPolicy.policies[1].name=two-person --set approvalPolicy.policies[1].mode=two-person \
+  --set approvalPolicy.workspaces.prd=two-person --set approvalPolicy.workspaces.dev=one-person; then
+  if grep -F -q 'value: "dev,tst,stg,prd"' "$tmp/four.yaml" \
+    && grep -A4 -F -- '    workspaces:' "$tmp/four.yaml" | grep -F -q -- '      - prd' \
+    && grep -A2 -F -- '    workspaces:' "$tmp/four.yaml" | grep -F -q -- '      prd: two-person'; then
+    echo "   rc=0  (four workspaces render: LOGWEIR_WORKSPACES, the console's list, prd bound two-person)"
+  else
+    echo "FAIL: four workspaces did not reach LOGWEIR_WORKSPACES, the console's list and the approval bindings" >&2
+    fail=1
+  fi
+fi
 # PROD-17.1 C4 — `ui.*` IS WITHDRAWN AND REFUSED BY NAME, whatever it carries
 # (an upgraded values file that kept `ui.enabled: false` included), pointing at
 # the console. The control is the same render without the block.
@@ -993,11 +1033,6 @@ if renders "the control: kafka.target.markerTopic" "$tmp/marker-target.yaml" \
     echo "   rc=0  (control: kafka.target.markerTopic renders onto the target)"
   fi
 fi
-refuses "a product role binding in a namespace no controller reconciles" "which is not in controller.watchNamespaces" \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
-  --set-string api.console.publicBaseUrl=https://console.example.com \
-  --set "api.namespaces={$CONSOLE_EXEC_NS,team-b}" \
-  --set "api.console.roles.bindings[0].namespace=team-b"
 refuses "a trusted-proxy requirement with no range to trust" "requireTrustedProxy needs" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
@@ -1013,8 +1048,6 @@ refuses "a trusted-proxy range of everybody (IPv6)" "wider than /48" \
 refuses "a trusted-proxy requirement in the in-cluster administrator mode" "belongs to api.console.mode=shared" \
   "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.requireTrustedProxy=true
-refuses "a watched namespace that is not a namespace name" "does not match pattern" \
-  --set "controller.watchNamespaces={Team_A}"
 
 # THE PoC CHART GAPS (G1, G2, G3, G6) — each refusal names its value.
 SHARED_URL=(--set-string api.console.publicBaseUrl=https://console.example.com)
@@ -1061,16 +1094,11 @@ refuses "an OIDC egress peer with no pod selector" "missing property 'podLabels'
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set "api.console.networkPolicy.oidcPeers[0].namespace=traefik" \
   --set "api.console.networkPolicy.oidcPeers[0].port=8443"
-refuses "connection objects in a namespace the scoped controller does not watch" "does not include: the controller would never read them" \
-  --set kafka.enabled=true --set-string kafka.bootstrapServers=b1:9092 \
-  --set "controller.watchNamespaces={team-a}"
-refuses "the demo archive credential outside the watched namespaces" "does not include: the controller would never read them" \
-  --set minio.enabled=true --set "controller.watchNamespaces={team-a}"
 
 # AND THE SAME VALUES, SET RIGHT, RENDER WHAT THEY SAY. One shared console with
 # every PoC gap value: the CA bundle from a Secret, a host alias, an OIDC egress
 # peer by selector, the ingress by its Service, and the connection objects in
-# the watched namespace.
+# the release namespace, labelled with the first workspace.
 render \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" "${SHARED_URL[@]}" \
   --set api.console.oidc.caBundle.secret=issuer-ca --set api.console.oidc.systemRoots=false \
@@ -1083,7 +1111,6 @@ render \
   --set api.console.trustedProxyService.namespace=traefik --set api.console.trustedProxyService.name=traefik \
   --set api.console.requireTrustedProxy=true \
   --set kafka.enabled=true --set-string kafka.bootstrapServers=b1:9092 --set minio.enabled=true \
-  --set kubernetes.connectionsNamespace=team-a \
   > "$tmp/console-gaps.yaml" 2> "$tmp/console-gaps.err"
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -1108,16 +1135,17 @@ else
       fail=1
     fi
   done
-  # The two connection objects land in the watched namespace, not the release one.
+  # The two connection objects land in the release namespace, in workspace team-a.
   kc_ns="$(awk '/^kind: KafkaCluster$/{k=1} k && /^  namespace:/{print $2; exit}' "$tmp/console-gaps.yaml")"
   s3_ns="$(awk '/^kind: Secret$/{k=1} k && /^  name: logweir-s3$/{n=1} n && /^  namespace:/{print $2; exit} /^---/{k=0;n=0}' "$tmp/console-gaps.yaml")"
-  if [ "$kc_ns" != "team-a" ] || [ "$s3_ns" != "team-a" ]; then
-    echo "FAIL: connectionsNamespace=team-a put the KafkaCluster in '$kc_ns' and logweir-s3 in '$s3_ns'" >&2
+  kc_ws="$(awk '/^kind: KafkaCluster$/{k=1} k && /logweir.dev\/workspace:/{print $2; exit}' "$tmp/console-gaps.yaml")"
+  if [ "$kc_ns" != "$NAMESPACE" ] || [ "$s3_ns" != "$NAMESPACE" ] || [ "$kc_ws" != '"team-a"' ]; then
+    echo "FAIL: the KafkaCluster landed in '$kc_ns' (workspace $kc_ws) and logweir-s3 in '$s3_ns'; both belong in $NAMESPACE, workspace team-a" >&2
     gaps_ok=0
     fail=1
   fi
   if [ "$gaps_ok" -eq 1 ]; then
-    echo "   rc=$rc  (the PoC gap values render: CA bundle, host alias, egress peer, proxy Service, connections in team-a)"
+    echo "   rc=$rc  (the PoC gap values render: CA bundle, host alias, egress peer, proxy Service, connections in workspace team-a)"
   fi
 fi
 
@@ -1499,7 +1527,7 @@ check_console_grants() {
   # Approval its ordinary confirmation IS, the governed confirmation object and
   # the approver's countersigned Approval on `POST .../restores/{name}/approval`),
   # the two named merge patches plus the two `CancellableCheck`
-  # kinds, D3 W11's three namespaced reads and its ONE write, the cluster-scoped
+  # kinds, a Restore's cancel and clean-up annotations (PROD-07.2), D3 W11's three namespaced reads and its ONE write, the cluster-scoped
   # `TrustPolicy` read, the ONE roster read (`get trustrosters@default`: the
   # rule's `resourceNames` is part of the pair, so the name list cannot be
   # dropped — PREFLIGHT-TRUSTROSTER-STALE), and the two core objects with one
@@ -1511,7 +1539,7 @@ check_console_grants() {
     'get backupschedules'    'list backupschedules'    'create backupschedules'    'patch backupschedules' \
     'get kafkaclusters'      'list kafkaclusters'      'create kafkaclusters' \
     'get preflights'         'list preflights'         'create preflights'         'patch preflights' \
-    'get restores'           'list restores'           'create restores' \
+    'get restores'           'list restores'           'create restores'           'patch restores' \
     'get switchovers'        'list switchovers'        'create switchovers' \
     'get topicdiscoveries'   'list topicdiscoveries'   'create topicdiscoveries'   'patch topicdiscoveries' \
     'get protectionpolicies' 'list protectionpolicies' \
@@ -1736,7 +1764,7 @@ check_trust_creators || fail=1
 # each control is the same render with the other answer, and renders exactly
 # what its case says is absent.
 echo "== 12. an offline render is refused unless identity.renderedOffline says what it is =="
-OFFLINE_SHAPE=(-f "$EXAMPLES/console.values.yaml" --set-json 'identity.authorizedRunnerNamespaces=["team-a"]')
+OFFLINE_SHAPE=(-f "$EXAMPLES/console.values.yaml")
 offline_diagnostic="identity.renderedOffline is unset and this render cannot ask the cluster"
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" "${OFFLINE_SHAPE[@]}" > /dev/null 2> "$tmp/offline-unset.err"
 rc=$?
@@ -1779,18 +1807,17 @@ if [ "$offline_ok" -eq 1 ]; then
   off="$tmp/offline-true.yaml"; pre="$tmp/offline-false.yaml"
   # The offline install: the hook Jobs still run and still manage the console
   # key, but nothing the chart renders can empty a filled object or grant.
-  got="placeholders=$(placeholders "$off") grant=$(grant "$off") trust-arg=$(arg "$off" --installation-trust-policy) marker-arg=$(arg "$off" --mark-fresh-install-confirm) console-arg=$(arg "$off" --console-secret-name) distribute=$(grep -c -E "^  name: $RELEASE-identity-distribute-" "$off")"
-  if [ "$got" != "placeholders=0 grant=0 trust-arg=0 marker-arg=0 console-arg=1 distribute=1" ]; then
-    echo "FAIL: identity.renderedOffline=true must render no placeholder and no trust grant, and still both hook Jobs; got $got" >&2
+  got="placeholders=$(placeholders "$off") grant=$(grant "$off") trust-arg=$(arg "$off" --installation-trust-policy) marker-arg=$(arg "$off" --mark-fresh-install-confirm) console-arg=$(arg "$off" --console-secret-name)"
+  if [ "$got" != "placeholders=0 grant=0 trust-arg=0 marker-arg=0 console-arg=1" ]; then
+    echo "FAIL: identity.renderedOffline=true must render no placeholder and no trust grant, and still the hook Job; got $got" >&2
     offline_ok=0
   fi
-  # Control: the same values as a preview render all five placeholders (the
-  # signer, its public record, the console key, its public record, team-a's
-  # copy), the grant (three names: the ClusterRole, the binding, its roleRef)
+  # Control: the same values as a preview render all four placeholders (the
+  # signer, its public record, the console key, its public record), the grant (three names: the ClusterRole, the binding, its roleRef)
   # and both trust arguments.
   got_pre="placeholders=$(placeholders "$pre") grant=$(grant "$pre") trust-arg=$(arg "$pre" --installation-trust-policy) marker-arg=$(arg "$pre" --mark-fresh-install-confirm) console-arg=$(arg "$pre" --console-secret-name)"
-  if [ "$got_pre" != "placeholders=5 grant=3 trust-arg=1 marker-arg=1 console-arg=1" ]; then
-    echo "FAIL: control: the preview of the same values must render the five placeholders, the grant and both trust arguments; got $got_pre" >&2
+  if [ "$got_pre" != "placeholders=4 grant=3 trust-arg=1 marker-arg=1 console-arg=1" ]; then
+    echo "FAIL: control: the preview of the same values must render the four placeholders, the grant and both trust arguments; got $got_pre" >&2
     offline_ok=0
   fi
   # Adoption works offline too: the external Secret is still named, and the

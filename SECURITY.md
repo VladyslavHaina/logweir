@@ -42,13 +42,21 @@ These are **accepted residuals**, not undiscovered bugs. They are stated
 here, in `README.md` and in `docs/kubernetes.md` so that nobody has to discover
 them; a report that one of them is true is not a vulnerability report.
 
-- **`weirkeeper` is a signing oracle wherever it holds Job CRUD over the
-  namespace that holds `logweir-signing-key`.** The controller has no `get` on
-  Secrets anywhere and never reads the key — but it creates Jobs, and a Job it
-  creates can mount the Secret and sign whatever it likes with no Logweir crate
-  involved. Job create in that namespace is equivalent to holding the key. The
-  hardened layout is to put `logweir-signing-key` in a namespace where
-  `weirkeeper` has no Job CRUD, which removes the oracle.
+- **Residual O1: whoever can create Pods or Jobs, read Secrets, or create a
+  Secret or a Logweir object naming one in the install's namespace holds every
+  key.** An install is one namespace (OD-23), so `logweir-signing-key`, the
+  console's session, cursor and confirmation keys and the OIDC client secret
+  all live where `weirkeeper` creates Jobs. The controller has no `get` on
+  Secrets and never reads a key, but a Pod in that namespace can mount any of
+  them, sign evidence and forge any approval mode, a two-person workspace's
+  included. **The console path is closed:** a Secret a Logweir object names is
+  mounted only when its `logweir.dev/workspace` label equals the referrer's,
+  the key Secrets carry no workspace label, and the console reads no Secret and
+  labels every Secret it creates with the request's workspace, so a compromised
+  console cannot make a runner mount a key. `kubectl` users with Secret, Pod or
+  Job rights in the namespace remain administrators of every workspace: give
+  people the console, and that access only to such administrators
+  ([docs/kubernetes.md, *Workspaces*](docs/kubernetes.md#workspaces)).
 - **A cluster-admin defeats every control described here.** They can mount the
   signing Secret and sign, edit the `TrustRoster`, or delete an admission
   policy. Nothing in this design constrains that subject, and nothing claims
@@ -61,7 +69,7 @@ them; a report that one of them is true is not a vulnerability report.
   install with a console — whoever controls the console pod, its
   `logweir-console-confirmation` key Secret, or the identity provider can
   confirm a restore with no second person, exactly as an `Ordinary` binding
-  always accepted. Namespaces that cannot accept that are bound `strict`
+  always accepted. Workspaces that cannot accept that are bound `strict`
   (a personal-key approval), or the installation sets
   `approvalPolicy.default: strict`.
 - **Two-person approval in the console is two identities of one identity
@@ -75,16 +83,16 @@ them; a report that one of them is true is not a vulnerability report.
   — or can obtain two accounts there, or can edit the role-binding table or
   the approval-policy document — can produce both the request and the
   approval alone.** A stolen console key signs a complete two-person
-  authorization for any restore in any two-person (or `confirm`) namespace
-  that trusts it, naming any two identities it likes; it cannot authorise
-  anything in a `strict` namespace, whose second signature comes from a
+  authorization for any restore in any two-person (or `confirm`) workspace
+  of an install that trusts it, naming any two identities it likes; it cannot authorise
+  anything in a `strict` workspace, whose second signature comes from a
   personal `GovernedApproval` key the console never holds. Revoking the
   console key for `KeyCompromise` withdraws every record it signed
   (`docs/kubernetes.md` §8). The comparison of the two people is made on the
   issuer and the subject only, after folding case, and an identity that cannot
   be compared is refused rather than guessed at; it does not detect one human
   with two accounts. The mode guards against one person acting alone or by
-  mistake through the console. Namespaces where the console or the identity
+  mistake through the console. Workspaces where the console or the identity
   provider must not be enough are bound `strict`. The setting is refused
   outside the shared console, and the in-cluster administrator console
   neither requests nor approves under it.

@@ -3,10 +3,10 @@
 `application/vnd.logweir.backup-receipt+json;version=1.0.0`
 
 The machine-readable schema is
-[`schemas/logweir-backup-receipt-1.8.0.json`](../../schemas/logweir-backup-receipt-1.8.0.json),
+[`schemas/logweir-backup-receipt-1.9.0.json`](../../schemas/logweir-backup-receipt-1.9.0.json),
 regenerated from the Rust type by `just schema` and `diff -u`'d against the
 checked-in file by CI on every build, so this document and the schema cannot
-drift apart silently. Every older schema, `-1.0.0.json` to `-1.7.0.json`, is
+drift apart silently. Every older schema, `-1.0.0.json` to `-1.8.0.json`, is
 frozen beside it and never regenerated
 (`crates/logweir-core/tests/schema_drift.rs` keeps each what it was). The
 payload type keeps `version=1.0.0`: it names the major-1 envelope, and a new
@@ -80,6 +80,7 @@ values. The payload type keeps `version=1.0.0`.
 | 1.6.0 | PROD-01.4a | [`generations`](#generations--the-topics-id-before-and-after-the-engine-format-160) | every receipt from PROD-01.4a: this build signs none below 1.6.0 | 36–40 |
 | 1.7.0 | PROD-04.1 | [`consumer_positions`](#consumer_positions--consumer-position-evidence-format-170), which binds the positions document (its own format 1.0.0) | a receipt whose backup selected consumer groups; a backup that selects none writes the document it wrote before PROD-04.1, byte for byte | 30–35, and CP-1 to CP-14 over the document |
 | 1.8.0 | PROD-02.1 | [`source_watermarks` and the empty capture](#source_watermarks-and-the-empty-capture-format-180) | a receipt whose watermark read answered for every partition within the 32 KiB budget | 41–45; arm 4 admits the empty window only beside the block |
+| 1.9.0 | PROD-03.1 | [`schema_registry`](#schema_registry--the-source-registrys-snapshot-format-190) | a receipt whose source connection names a Schema Registry, captured or not | 46–49 |
 
 1.4.0 is MINOR under OD-7's third case: a reader built before it refuses a
 receipt naming a new mode through arm 5a, the safer verdict, and never reads it
@@ -101,6 +102,7 @@ so every reader that verifies a receipt still verifies a new one.
 | 1.6.0 | Accepts it and ignores the block; a 1.6.0 receipt naming a PROD-01.3 mode is accepted by readers from PROD-01.3 on, exactly as a 1.4.0 one. It prints no topic ID: use script 1.25.0 or a `logweir` from PROD-01.4a on | An older runner writes 1.3.0 to 1.5.0 receipts again, with no IDs; its points read "not established by ID" against their neighbours |
 | 1.7.0 | Accepts it, ignores the block and prints no `consumer_positions` line (script 1.25.0 and earlier): for positions use script 1.26.0 or a `logweir` from PROD-04.1 on ([the recovery path](#recovering-positions-with-the-source-offline)) | An older runner ignores `source.consumer_groups`, and `--consumer-group` is an unknown flag to it. An older controller refuses a frozen plan whose execution inputs carry `consumerGroups` (`PlanConfigMapConflict`): let such runs finish, or remove `spec.consumerGroups` from the schedule, before rolling it back |
 | 1.8.0 | Refuses an empty capture through arm 4 and reads an ordinary 1.8.0 receipt as the 1.7.0 document under it. Script 1.30.0 knows the block | An older runner writes receipts with no block, and fails a backup of an emptied source exit 1 as before PROD-02.1 |
+| 1.9.0 | Accepts it, ignores the block and prints no `schema_registry` line: measured on 2026-10-16 with `v0.4.1`'s readers (`verify_scorecard.py` 1.34.0 and the `logweir` of runner image `sha-4bb185d5`) over `receipt_1_9_with_schema_registry.json` and `receipt_1_9_registry_not_captured.json`, both `VALID`, exit 0; `backup_receipt.rs::a_block_a_later_minor_adds_is_ignored_by_a_reader_that_does_not_know_it` holds the rule (unknown fields ignored) on every build. For the snapshot line use script 1.35.0 or a `logweir` from PROD-03.1 on | Receipts already written stay valid. 0.5.0 has no in-place rollback ([release-notes.md](../release-notes.md) item 137); an older install's runner captures no registry, and its points read "registry not captured" |
 
 **Old receipts are never reinterpreted.** No reader infers a block a receipt
 lacks: a receipt before 1.1.0 has every topic's capture coverage UNKNOWN to
@@ -117,7 +119,7 @@ infers a pin for a receipt that does not carry one.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `format_version` | string | Semver of **this** format, `1.0.0` to `1.8.0`: see [Versions](#versions). Independent of the scorecard's. |
+| `format_version` | string | Semver of **this** format, `1.0.0` to `1.9.0`: see [Versions](#versions). Independent of the scorecard's. |
 | `run_id` | string | ULID of the run that produced this receipt. Also the object key stem in the evidence bucket. |
 | `backup_id` | string | The engine's identifier for the archive this run wrote — the **execution** id under Kubernetes. **Not** `run_id`: `archive.manifest_key` is keyed on this, and a set written by an older build can carry receipts from two runs. Since RECEIPT-DUP was fixed, at most one run per `backup_id` reaches the engine (see [the execution claim](#the-execution-claim-one-engine-run-per-backup_id)), so a new execution signs exactly one receipt. |
 | `requested_at` | RFC 3339 | When the run was requested. |
@@ -150,7 +152,7 @@ interpolated into a document Logweir then signs and publishes.
 | Field | Type | Meaning |
 |---|---|---|
 | `engine.id` | string | `oso-cli`. |
-| `engine.version` | string | The engine's `--version` token, at or above the supported floor: `0.23.3+logweir.4` for Logweir's build (PROD-00.2; `+logweir.3` before patch 0001's rustls 0.23.46, `+logweir.2` before PROD-00.3g's patch 0003, `+logweir.1` before FX-21's patch 0002), `0.23.3` for OSO's release. |
+| `engine.version` | string | The engine's `--version` token, at or above the supported floor: `0.23.3+logweir.5` for Logweir's build (PROD-00.2; `+logweir.4` before patches 0004 to 0007, `+logweir.3` before patch 0001's rustls 0.23.46, `+logweir.2` before PROD-00.3g's patch 0003, `+logweir.1` before FX-21's patch 0002), `0.23.3` for OSO's release. |
 | `engine.digest` | string | `sha256:…`: Logweir's build-input digest (`third_party/kafka-backup-build.env`) for Logweir's build, the image digest from `third_party/kafka-backup-binary.digest` for OSO's release. Inside the runner image both fields are what the image declares in `/etc/logweir/engine-identity`. |
 
 `digest` is why this block is worth signing. Pinning is by digest and never by
@@ -583,6 +585,26 @@ over the bound every reader caps it at
 
 ---
 
+## `schema_registry` — the source registry's snapshot (format 1.9.0)
+
+Present exactly when the source connection names a Schema Registry
+(`KafkaCluster.spec.schemaRegistry`, PROD-03.1). After the engine, the runner
+reads every subject (soft-deleted included) and every version with its ID, type,
+schema text and references through the registry's REST API, and writes them
+create-only beside this receipt as `<run_id>.schema-registry.json`
+(`{format: 1, captured_at, registry_url, versions: [...]}`). The block names it:
+`captured`, `snapshot_key`, `snapshot_sha256`, `subjects`, `versions`,
+`unresolved_references` (references to subject-versions the snapshot lacks,
+`<subject>@<version>`, at most 32) and `ids_not_in_snapshot` (schema IDs
+`schema_dependency` saw in the records that the snapshot lacks, at most 32).
+A capture that did not complete is `captured: false` with `reason`
+(`registryUnreachable`, `registryUnauthorized`, `snapshotTooLarge` over 100 000
+versions or 32 MiB, `snapshotIncomplete`); it never fails the backup. Either
+list non-empty, or `captured: false`, is incomplete registry coverage. A
+restore into a connection with a registry imports what its records reference,
+keeping the IDs (`docs/formats/drill-scorecard.md`, `target.schemas`). Absent:
+the registry was not captured.
+
 ## `consumer_positions` — consumer position evidence (format 1.7.0)
 
 **Why it exists (PROD-04.1).** A restore that brings a topic back still leaves
@@ -826,7 +848,7 @@ survive the source cluster. With the source gone:
 
 ---
 
-## The forty-five arms, and the positions document's fourteen
+## The forty-nine arms, and the positions document's fourteen
 
 `logweir_core::backup_receipt::BackupReceipt::validate_invariants` implements
 these, and `docs/verify_scorecard.py::check_backup_receipt_invariants` mirrors
@@ -836,15 +858,15 @@ BOTH readers — compared byte-for-byte by
 over arms 1–4, `arm_5_refuses_an_auth_mode_outside_the_closed_two` and
 `arm_5_is_versioned_by_the_prod_01_3_modes` over arm 5, one `arm_N_…` test per
 arm 6–40, and
-`validate_invariants_has_exactly_forty_seven_return_err_statements` over the
-total — forty-five arms, forty-seven statements, because arm 5 is three since
+`validate_invariants_has_exactly_fifty_one_return_err_statements` over the
+total — forty-nine arms, fifty-one statements, because arm 5 is three since
 1.4.0), by `crates/logweir/tests/two_reader_parity_receipt.rs::two_reader_parity_over_the_backup_receipt_corpus`
 over the documents in `e2e/fixtures/invariants/backup-receipt-index.json`
 (a refusing case for each half of arms 15–19, not only for each arm),
 and by `scripts/check-verifier-parity.sh`'s second loop — and they are not to be
 reworded. `scripts/check-invariant-corpus.sh` additionally derives the arm list
 from both readers' source and refuses to balance if they are not the same
-forty-five arms in the same order.
+forty-nine arms in the same order.
 
 Arms 6–11 read `config_coverage` and NOTHING ELSE, and run only when it is
 present — so every receipt without it, which is every receipt written before
@@ -1182,6 +1204,26 @@ index order.
 
     > `covered.from_ms 1757415739000 equals covered.to_ms 1757415739000, an empty capture, but records["payments"] is 3: an empty capture counts no record for any topic and recorded equal low and high watermarks for every partition`
 
+Arms 46–49 read `schema_registry` (format 1.9.0, PROD-03.1) and nothing else,
+and run only when it is present.
+
+46. **`schema_registry` is present only under a minor of at least 9.**
+
+    > `schema_registry is present but format_version "1.8.0" predates it: the field is defined from 1.9.0`
+
+47. **A reason exactly when not captured, from the closed set.**
+
+    > `schema_registry.reason is present exactly when captured is false, and is registryUnreachable, registryUnauthorized, snapshotTooLarge or snapshotIncomplete`
+
+48. **A captured block names its snapshot beside this receipt and counts no
+    more subjects than versions; an uncaptured one names and counts nothing.**
+
+    > `schema_registry names its snapshot (logweir/backups/<backup_id>/<run_id>.schema-registry.json and its sha256) and counts no more subjects than versions exactly when captured, and names and counts nothing otherwise`
+
+49. **The two lists are bounded, sorted and distinct.**
+
+    > `schema_registry.unresolved_references and ids_not_in_snapshot list at most 32 entries each, sorted and distinct, every reference at most 256 characters and every ID from 1 to 16777215`
+
 A block that serde itself cannot read — a `timestamp_type` without its `source`,
 a `coverage` that is not a string — is refused before any arm by both readers
 (`drill verify` exits 1 with serde's message; `verify_scorecard.py` exits 1 with
@@ -1225,12 +1267,13 @@ The `--scorecard` flag keeps its name even when it names a receipt. Renaming it
 would break every existing invocation, every document and
 `scripts/check-verifier-parity.sh` in exchange for a better word.
 
-**What each reader checks.** Both readers run **all forty-five arms above**
+**What each reader checks.** Both readers run **all forty-nine arms above**
 over a `--payload-type backup-receipt` document; each group of arms arrived in
 both readers together (1–5 in Task 5b, 6–11 in FX-4, 12–21 in PROD-05.1, 22–29
-in PROD-03.0, 36–40 in PROD-01.4a, 30–35 in PROD-04.1, 41–45 in PROD-02.1), so
+in PROD-03.0, 36–40 in PROD-01.4a, 30–35 in PROD-04.1, 41–45 in PROD-02.1,
+46–49 in PROD-03.1), so
 the two never disagreed in between. `logweir drill verify` prints `checked:
-the signature AND all forty-five backup-receipt invariants …`;
+the signature AND all forty-nine backup-receipt invariants …`;
 `docs/verify_scorecard.py` prints `verifier: verify_scorecard.py
 <SCRIPT_VERSION> (backup-receipt invariant set: …)`. Both print, in the same
 words, one line per topic for each block, or one line saying the block is not

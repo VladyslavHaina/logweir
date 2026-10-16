@@ -1,4 +1,4 @@
-// Every recovery catalog in the namespace: the durable inventory of recovery
+// Every recovery catalog in the workspace: the durable inventory of recovery
 // points in an archive, as this cluster last managed to read it, and the one
 // write this area offers, connecting an existing archive.
 import { useState } from "react";
@@ -33,12 +33,12 @@ export function whereFrom(c: Pick<Catalog, "destinationRef" | "legacyArchive">):
 }
 
 export const CONNECT_READ_ONLY_SENTENCE =
-  "This login may read the recovery catalog in this namespace and not connect an archive to it: that needs the operator or administrator role.";
+  "This login may read the recovery catalog in this workspace and not connect an archive to it: that needs the operator or administrator role.";
 
 export function CatalogList() {
-  const { ns } = useParams({ from: "/$ns/catalog" });
-  const catalogs = useCatalogs(ns);
-  const flags = useFlags(ns);
+  const { ws } = useParams({ from: "/$ws/catalog" });
+  const catalogs = useCatalogs(ws);
+  const flags = useFlags(ws);
   const narrow = useNarrow();
   const [connecting, setConnecting] = useState(false);
   const mayConnect = flags?.catalogConnect === true;
@@ -55,10 +55,10 @@ export function CatalogList() {
     <>
       <PageHeader
         title="Recovery catalog"
-        description="Every recovery catalog in this namespace: the inventory of recovery points in an archive, as this cluster last read it. The archive is the truth; a catalog is the view of it."
+        description="Every recovery catalog in this workspace: the inventory of recovery points in an archive, as this cluster last read it. The archive is the truth; a catalog is the view of it."
         actions={items.length > 0 ? connectButton("primary") : undefined}
       />
-      {connecting && <ConnectArchive ns={ns} open={connecting} onClose={() => setConnecting(false)} />}
+      {connecting && <ConnectArchive ws={ws} open={connecting} onClose={() => setConnecting(false)} />}
       <PageSection>
         <Card>
           {catalogs.isPending ? (
@@ -76,7 +76,7 @@ export function CatalogList() {
               label="Recovery catalogs"
               items={items.map((c) => ({
                 key: c.uid || c.name,
-                href: `#/${ns}/catalog/${c.name}`,
+                href: `#/${ws}/catalog/${c.name}`,
                 title: c.name,
                 meta: (
                   <>
@@ -110,7 +110,7 @@ export function CatalogList() {
                 {items.map((c) => (
                   <Tr key={c.uid || c.name}>
                     <Td dataLabel="Name">
-                      <Link to="/$ns/catalog/$name" params={{ ns, name: c.name }} className="lw-break">
+                      <Link to="/$ws/catalog/$name" params={{ ws, name: c.name }} className="lw-break">
                         {c.name}
                       </Link>
                       <div className="lw-subtle lw-small">

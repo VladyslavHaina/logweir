@@ -188,12 +188,16 @@ fn the_tool_and_the_product_compute_one_kafka_binding() {
             .iter()
             .map(|s| s.as_str().expect("server").to_string())
             .collect();
+        let registry = spec["schemaRegistry"]["url"]
+            .as_str()
+            .map(|url| (url, spec["schemaRegistry"]["username"].as_str()));
         assert_eq!(
             logweir_core::connection::credential_binding(
                 case["uid"].as_str().expect("uid"),
                 &servers,
                 &resolved,
                 ca.as_deref(),
+                registry,
             ),
             case["binding"].as_str().expect("binding"),
             "{case}"

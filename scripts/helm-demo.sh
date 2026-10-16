@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 # `just helm-demo` — THE HELM CHART, WALKED END TO END ON A REAL CLUSTER.
-# Task 35 (post-plan).
+# Task 35 (post-plan); one namespace with workspaces since OD-23 (PROD-19.1).
 #
 # The chart (`charts/logweir`) has been installed with its optional components
-# on — `minio.enabled`, `demoKafka.enabled` and the console in its loopback
-# administrator mode (`api.console.enabled`, `api.console.mode=localAdmin`;
-# `examples/demo.values.yaml`) — and this script walks the product over it: two keypairs, the four Secrets
-# (the archive credential bound to its location), two KafkaClusters that the
-# controller probes to `status.reachable: true`, the cluster-scoped TrustRoster
-# allowing the target's observed cluster id, a BackupSchedule and the Backup it fires, a Restore
-# whose plan bytes come from the PAGE's own emitter, an approval minted on the
-# host with the shipped CLI, the Restore's terminal status with
+# on — `minio.enabled`, `demoKafka.enabled`, the console in its loopback
+# administrator mode (`api.console.mode=localAdmin`) and two workspaces,
+# `default` and `other` (`examples/demo.values.yaml`) — and this script walks
+# the product over it, in the release namespace and workspace `default`: an
+# approver keypair, the chart's archive credential bound to its location, two
+# KafkaClusters the controller probes to `status.reachable: true`, the
+# cluster-scoped TrustRoster (the chart's signing key, the approver key, the
+# target's observed cluster id), a BackupSchedule and the Backup it fires, a
+# Backup in `other` naming `default`'s connection refused `WorkspaceMismatch`,
+# a Restore whose plan bytes come from the console's own emitter, an approval
+# minted on the host with the shipped CLI, the Restore's terminal status with
 # `status.outcome: pass`, BOTH readers over the scorecard, the console
-# answering through a port-forward, and a teardown that leaves the cluster
-# holding no `logweir-*` namespace.
+# answering through a port-forward (and refusing `default`'s Backup from
+# `other`), and a teardown that leaves the cluster holding no `logweir-*`
+# namespace.
 #
 # Two drivers run it: `just helm-demo` on the laptop (docker-desktop) and
 # `.github/workflows/helm-demo.yml` on the `kind` cluster that workflow creates.
@@ -26,14 +30,16 @@
 #                           `kubectl --context "$LOGWEIR_KUBE_CONTEXT" …`
 #                           (STANDING RULE 12 — the variable is always passed).
 #   LOGWEIR_HELM_RELEASE    the release name. Default `logweir`.
-#   LOGWEIR_HELM_NAMESPACE  the release namespace. Default `logweir-system`.
+#   LOGWEIR_HELM_NAMESPACE  the release namespace, the install's one namespace.
+#                           Default `logweir-system`.
 #
 # `LOGWEIR_PYTHON` is the repository-wide interpreter knob every script honours
 # (`docs/verify_scorecard.py` needs `cryptography`); it is not a parameter of
-# this walk. Everything else is derived: the demo namespace is `logweir-helm`,
-# the archive is `s3://kafka-backups/helm-demo` on the chart's MinIO, the two
-# brokers are the chart's, and the keys live in `.demo/helm/` (`.gitignore`
-# covers `.demo/`; the teardown deletes them).
+# this walk. Everything else is derived: every object lives in the release
+# namespace, the archive is `s3://kafka-backups/helm-demo` on the chart's
+# MinIO, the two brokers are the chart's, the signing key is the chart's
+# (its public half read from `logweir-signing-trust`), and the approver key
+# lives in `.demo/helm/` (`.gitignore` covers `.demo/`; the teardown deletes it).
 #
 # ===========================================================================
 # STANDING RULE 20: EVERY EXIT CODE ON ITS OWN LINE, NEVER THROUGH A PIPE
@@ -41,9 +47,8 @@
 # `crates/logweir/tests/gate_lint.rs::gate_lint_no_masked_exit_codes` runs the
 # I29 tokeniser over every file under `scripts/`, this one included. The shape
 # is `set +e; <tool> … > file; rc=$?; set -e; echo "    rc=$rc  (…)"`, and the
-# `logweir` binary is the BARE WORD (put on `$PATH` by the preflight, exactly
-# as `scripts/demo-steps.sh` does) so the tokeniser's literal-prefix rule
-# guards every line that runs it.
+# `logweir` binary is the BARE WORD (put on `$PATH` by the preflight) so the
+# tokeniser's literal-prefix rule guards every line that runs it.
 #
 # NEVER A BACKGROUNDED WAIT. Every wait is a bounded foreground poll. The ONE
 # process this script backgrounds is the `kubectl port-forward` of step 9; its
@@ -52,13 +57,15 @@
 # ===========================================================================
 # WHAT THIS PROVES, AND WHAT IT DOES NOT
 # ===========================================================================
-# It proves the chart's objects work together: the runner reaches the chart's
-# brokers by the names the brokers advertise, the archive lands on the chart's
-# MinIO, the controller's evidence handle verifies against it, and the console
-# serves the page and its product API through a port-forward. Run with
-# `examples/author-only.values.yaml` it is AUTHOR-ONLY (Global Constraint 37):
-# the images were built and loaded on this host, never pulled, so nothing here
-# is evidence for spec §16 clause 1, and no checklist row moves.
+# It proves the chart's objects work together in one namespace: the runner
+# reaches the chart's brokers by the names the brokers advertise, the archive
+# lands on the chart's MinIO, the controller's evidence handle verifies against
+# it, the workspace label separates `default` from `other` at the controller
+# and the API, and the console serves the page and its product API through a
+# port-forward. Run with `examples/author-only.values.yaml` it is AUTHOR-ONLY
+# (Global Constraint 37): the images were built and loaded on this host, never
+# pulled, so nothing here is evidence for spec §16 clause 1, and no checklist
+# row moves.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -69,17 +76,24 @@ export LOGWEIR_KUBE_CONTEXT LOGWEIR_HELM_RELEASE LOGWEIR_HELM_NAMESPACE
 PYTHON="${LOGWEIR_PYTHON:-python3}"
 
 REL="$LOGWEIR_HELM_RELEASE"
-SYS="$LOGWEIR_HELM_NAMESPACE"
-NS=logweir-helm
+NS="$LOGWEIR_HELM_NAMESPACE"
+# The walk's workspace is the first of demo.values.yaml's list, the one the
+# chart labels its logweir-s3 with; `other` only has to be unable to use it.
+WS=default
+WS_OTHER=other
 OUT=.demo/helm
 CHART=charts/logweir
 ARCHIVE_BUCKET=kafka-backups
 BACKUP_PREFIX=helm-demo
 ARCHIVE_URL="s3://${ARCHIVE_BUCKET}/${BACKUP_PREFIX}"
-S3_ENDPOINT="http://${REL}-minio.${SYS}.svc:9000"
+S3_ENDPOINT="http://${REL}-minio.${NS}.svc:9000"
 S3_REGION=us-east-1
-SOURCE_BOOTSTRAP="${REL}-kafka-source.${SYS}.svc.cluster.local:9092"
-TARGET_BOOTSTRAP="${REL}-kafka-target.${SYS}.svc.cluster.local:9092"
+SOURCE_BOOTSTRAP="${REL}-kafka-source.${NS}.svc.cluster.local:9092"
+TARGET_BOOTSTRAP="${REL}-kafka-target.${NS}.svc.cluster.local:9092"
+# The kinds this walk creates, all in the release namespace: the preflight
+# requires none to exist, and the teardown deletes them while the controller
+# still runs (their finalizers need it).
+WALK_KINDS=kafkaclusters,backupschedules,backups,restores,approvals
 # The console's localAdmin listener: loopback in the pod, reached with
 # `kubectl port-forward`. The local port must equal the listen port, because
 # the console's origin carries it (docs/install.md §5e).
@@ -89,7 +103,7 @@ CONSOLE_BASE="http://127.0.0.1:${CONSOLE_PORT}"
 MC_IMAGE="$(sed -n 's/^  mcImage:[[:space:]]*//p' "$CHART/values.yaml")"
 PF_PID=""
 
-echo "helm-demo: kubectl context $LOGWEIR_KUBE_CONTEXT, release $REL in namespace $SYS (STANDING RULE 12)"
+echo "helm-demo: kubectl context $LOGWEIR_KUBE_CONTEXT, release $REL in namespace $NS, workspace $WS (STANDING RULE 12)"
 
 die() { echo; echo "helm-demo: $*" >&2; exit 1; }
 step() { echo; echo "==> $*"; }
@@ -117,7 +131,7 @@ dump_run() {  # kind name
   echo "    rc=$rc  (kubectl logs job/$2 --tail=200)"
   cat "$OUT/failed-pod.log"
   set +e
-  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" logs deploy/weirkeeper --tail=120 > "$OUT/failed-controller.log" 2>&1
+  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" logs deploy/weirkeeper --tail=120 > "$OUT/failed-controller.log" 2>&1
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl logs deploy/weirkeeper --tail=120)"
@@ -159,7 +173,7 @@ expect_http() {  # url expected label
 mc_cat() {  # key outfile
   local pod="mc-cat-$RANDOM"
   set +e
-  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" run "$pod" --restart=Never --image="$MC_IMAGE" --env="MC_HOST_local=http://${MINIO_USER}:${MINIO_PASSWORD}@${REL}-minio.${SYS}.svc:9000" --command -- mc cat "local/${ARCHIVE_BUCKET}/$1" > "$OUT/mc-run.log" 2>&1
+  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" run "$pod" --restart=Never --image="$MC_IMAGE" --env="MC_HOST_local=http://${MINIO_USER}:${MINIO_PASSWORD}@${REL}-minio.${NS}.svc:9000" --command -- mc cat "local/${ARCHIVE_BUCKET}/$1" > "$OUT/mc-run.log" 2>&1
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl run $pod --image=<the chart's mc digest> -- mc cat $ARCHIVE_BUCKET/$1)"
@@ -194,10 +208,11 @@ mc_cat() {  # key outfile
 }
 
 # ---------------------------------------------------------------------------
-# 10/10 TEARDOWN — the EXIT trap. The demo namespace, the keys, the release,
-# the release namespace, the CRDs Helm installed from crds/ and never removes,
-# and the cluster-scoped TrustRoster; then the assertion that no `logweir-*`
-# namespace is left. Every rc printed.
+# 10/10 TEARDOWN — the EXIT trap. The walk's objects (while the controller
+# still runs, so their finalizers are honoured), the cluster-scoped
+# TrustRoster, the release, the release namespace, the CRDs Helm installed from
+# crds/ and never removes, and the approver key; then the assertion that no
+# `logweir-*` namespace is left. Every rc printed.
 # ---------------------------------------------------------------------------
 teardown() {
   echo
@@ -208,26 +223,28 @@ teardown() {
     echo "    stopped the kubectl port-forward (pid $PF_PID)"
   fi
   set +e
+  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" delete "$WALK_KINDS" --all --ignore-not-found --timeout=300s > "$OUT/teardown-objects.log" 2>&1
+  rc=$?
+  set -e
+  echo "    rc=$rc  (kubectl delete $WALK_KINDS --all -n $NS — the walk's objects, before the controller goes)"
+  set +e
   kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete trustroster default --ignore-not-found > "$OUT/teardown-roster.log" 2>&1
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl delete trustroster default)"
   set +e
+  helm uninstall "$REL" -n "$NS" --kube-context "$LOGWEIR_KUBE_CONTEXT" --wait --timeout 5m > "$OUT/teardown-helm.log" 2>&1
+  rc=$?
+  set -e
+  echo "    rc=$rc  (helm uninstall $REL -n $NS)"
+  cat "$OUT/teardown-helm.log"
+  # The retained identity objects (helm.sh/resource-policy: keep) and the
+  # walk's evidence Secret go with the namespace.
+  set +e
   kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete ns "$NS" --ignore-not-found --timeout=300s > "$OUT/teardown-ns.log" 2>&1
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl delete ns $NS)"
-  set +e
-  helm uninstall "$REL" -n "$SYS" --kube-context "$LOGWEIR_KUBE_CONTEXT" --wait --timeout 5m > "$OUT/teardown-helm.log" 2>&1
-  rc=$?
-  set -e
-  echo "    rc=$rc  (helm uninstall $REL -n $SYS)"
-  cat "$OUT/teardown-helm.log"
-  set +e
-  kubectl --context "$LOGWEIR_KUBE_CONTEXT" delete ns "$SYS" --ignore-not-found --timeout=300s > "$OUT/teardown-sys.log" 2>&1
-  rc=$?
-  set -e
-  echo "    rc=$rc  (kubectl delete ns $SYS)"
   # HELM INSTALLS crds/ ONCE AND NEVER DELETES IT. A clean cluster is the
   # precondition of the next install, so every CRD the chart ships goes here,
   # read from the chart's own directory.
@@ -236,9 +253,9 @@ teardown() {
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl delete -f $CHART/crds/ — every logweir.dev CRD the chart ships)"
-  # THE KEYS GO UNCONDITIONALLY. Minted minutes ago, attested by nothing.
+  # THE KEY GOES UNCONDITIONALLY. Minted minutes ago, attested by nothing.
   rm -f "$OUT"/*.pem
-  echo "    removed $OUT/*.pem (both keypairs this run minted)"
+  echo "    removed $OUT/*.pem (the approver keypair this run minted, the signer's public key)"
   set +e
   kubectl --context "$LOGWEIR_KUBE_CONTEXT" get ns -o name > "$OUT/teardown-ns-list.txt" 2>&1
   rc=$?
@@ -252,12 +269,14 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# 0/10 PREFLIGHT — the release is installed, both brokers, MinIO and the console are
-# Ready, the seed Jobs succeeded (a succeeded hook Job is DELETED by the chart's
-# hook-delete-policy, so "succeeded" is asserted as: the release is `deployed`,
-# no failed Job remains, and the seeds' EFFECTS are on the brokers).
+# 0/10 PREFLIGHT — the release is installed with workspaces default and other,
+# both brokers, MinIO and the console are Ready, the seed Jobs succeeded (a
+# succeeded hook Job is DELETED by the chart's hook-delete-policy, so
+# "succeeded" is asserted as: the release is `deployed`, no failed Job remains,
+# and the seeds' EFFECTS are on the brokers), and none of the walk's objects
+# exist yet.
 # ---------------------------------------------------------------------------
-step "0/10 preflight: tools, the release, the brokers, MinIO, the console, the seeds' effects"
+step "0/10 preflight: tools, the release and its workspaces, the brokers, MinIO, the console, the seeds' effects"
 mkdir -p "$OUT"
 for tool in kubectl helm openssl awk node curl; do
   command -v "$tool" >/dev/null 2>&1 || die "\`$tool\` is not on \$PATH."
@@ -273,11 +292,11 @@ PATH="$PWD/$OUT/bin:$PATH"
 export PATH
 
 set +e
-helm status "$REL" -n "$SYS" --kube-context "$LOGWEIR_KUBE_CONTEXT" -o json > "$OUT/helm-status.json" 2> "$OUT/helm-status.err"
+helm status "$REL" -n "$NS" --kube-context "$LOGWEIR_KUBE_CONTEXT" -o json > "$OUT/helm-status.json" 2> "$OUT/helm-status.err"
 rc=$?
 set -e
-echo "    rc=$rc  (helm status $REL -n $SYS -o json)"
-[ "$rc" -eq 0 ] || { cat "$OUT/helm-status.err"; die "the release $REL is not installed in $SYS. Install it first with the path at the top of $CHART/examples/demo.values.yaml (the console's key Secret, then helm install with --set identity.installationTrust.enabled=false: this walk administers trust with its own TrustRoster, which a fresh install's default TrustPolicy would supersede)"; }
+echo "    rc=$rc  (helm status $REL -n $NS -o json)"
+[ "$rc" -eq 0 ] || { cat "$OUT/helm-status.err"; die "the release $REL is not installed in $NS. Install it first with the path at the top of $CHART/examples/demo.values.yaml (the console's key Secret, then helm install with --set identity.installationTrust.enabled=false: this walk administers trust with its own TrustRoster, which a fresh install's default TrustPolicy would supersede)"; }
 release_status=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]))["info"]["status"])' "$OUT/helm-status.json")
 # The JSON is read and then REMOVED: it flattens the whole release manifest
 # onto one line, and `scripts/check-unverified-labels.sh` walks `.demo/` —
@@ -285,11 +304,11 @@ release_status=$("$PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1]
 # an unrelated "verified" together (measured on this walk's first run).
 rm -f "$OUT/helm-status.json"
 echo "    release status: $release_status"
-[ "$release_status" = "deployed" ] || die "the release is '$release_status', not deployed — a failed hook Job leaves the release in that state; \`kubectl -n $SYS get jobs\` and \`kubectl logs job/…\` say why"
+[ "$release_status" = "deployed" ] || die "the release is '$release_status', not deployed — a failed hook Job leaves the release in that state; \`kubectl -n $NS get jobs\` and \`kubectl logs job/…\` say why"
 
 for target in "deploy/weirkeeper" "statefulset/${REL}-kafka-source" "statefulset/${REL}-kafka-target" "deploy/${REL}-minio" "deploy/${REL}-api"; do
   set +e
-  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" rollout status "$target" --timeout=300s > "$OUT/rollout-${target##*/}.log" 2>&1
+  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" rollout status "$target" --timeout=300s > "$OUT/rollout-${target##*/}.log" 2>&1
   rc=$?
   set -e
   echo "    rc=$rc  (kubectl rollout status $target --timeout=300s)"
@@ -297,17 +316,24 @@ for target in "deploy/weirkeeper" "statefulset/${REL}-kafka-source" "statefulset
 done
 
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" get jobs -o jsonpath='{range .items[*]}{.metadata.name}{" failed="}{.status.failed}{" succeeded="}{.status.succeeded}{"\n"}{end}' > "$OUT/jobs.txt" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get deploy weirkeeper -o jsonpath='{.spec.template.spec.containers[*].env[?(@.name=="LOGWEIR_WORKSPACES")].value}' > "$OUT/workspaces.txt" 2>&1
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl get deploy weirkeeper — LOGWEIR_WORKSPACES: $(cat "$OUT/workspaces.txt"))"
+[ "$(cat "$OUT/workspaces.txt")" = "$WS,$WS_OTHER" ] || die "the install's workspaces are '$(cat "$OUT/workspaces.txt")', not $WS,$WS_OTHER; install with $CHART/examples/demo.values.yaml"
+
+set +e
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get jobs -o jsonpath='{range .items[*]}{.metadata.name}{" failed="}{.status.failed}{" succeeded="}{.status.succeeded}{"\n"}{end}' > "$OUT/jobs.txt" 2>&1
 rc=$?
 set -e
 echo "    rc=$rc  (kubectl get jobs — a succeeded seed Job is deleted by its hook policy, so this lists leftovers only)"
 cat "$OUT/jobs.txt"
 if grep -q 'failed=[1-9]' "$OUT/jobs.txt"; then
-  die "a seed Job failed; \`kubectl -n $SYS logs job/<name>\` says why"
+  die "a seed Job failed; \`kubectl -n $NS logs job/<name>\` says why"
 fi
 
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" exec "statefulset/${REL}-kafka-source" -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$SOURCE_BOOTSTRAP" --list > "$OUT/source-topics.txt" 2> "$OUT/source-topics.err"
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" exec "statefulset/${REL}-kafka-source" -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$SOURCE_BOOTSTRAP" --list > "$OUT/source-topics.txt" 2> "$OUT/source-topics.err"
 rc=$?
 set -e
 echo "    rc=$rc  (kafka-topics.sh --list on the source, via kubectl exec) -> $(tr '\n' ' ' < "$OUT/source-topics.txt")"
@@ -315,7 +341,7 @@ echo "    rc=$rc  (kafka-topics.sh --list on the source, via kubectl exec) -> $(
 grep -qx 'orders' "$OUT/source-topics.txt" || die "the seed Job did not create \`orders\` on the source"
 grep -qx 'payments' "$OUT/source-topics.txt" || die "the seed Job did not create \`payments\` on the source"
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" exec "statefulset/${REL}-kafka-target" -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$TARGET_BOOTSTRAP" --list > "$OUT/target-topics.txt" 2> "$OUT/target-topics.err"
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" exec "statefulset/${REL}-kafka-target" -- /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$TARGET_BOOTSTRAP" --list > "$OUT/target-topics.txt" 2> "$OUT/target-topics.err"
 rc=$?
 set -e
 echo "    rc=$rc  (kafka-topics.sh --list on the target, via kubectl exec) -> $(tr '\n' ' ' < "$OUT/target-topics.txt")"
@@ -323,16 +349,17 @@ echo "    rc=$rc  (kafka-topics.sh --list on the target, via kubectl exec) -> $(
 grep -qx 'logweir.scratch' "$OUT/target-topics.txt" || die "the seed Job did not create the marker topic \`logweir.scratch\` on the target — phase 0 refuses a scratch restore without it"
 
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" get ns "$NS" -o name > "$OUT/ns-check.txt" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get "$WALK_KINDS" -o name > "$OUT/objects-check.txt" 2> "$OUT/objects-check.err"
 rc=$?
 set -e
-echo "    rc=$rc  (kubectl get ns $NS — must NOT exist yet: check-then-take)"
-[ "$rc" -ne 0 ] || die "namespace $NS already exists; somebody else's run, or a teardown that did not finish. Delete it and re-run."
+echo "    rc=$rc  (kubectl get $WALK_KINDS -n $NS — none may exist yet: check-then-take)"
+[ "$rc" -eq 0 ] || { cat "$OUT/objects-check.err"; die "could not list the walk's kinds in $NS (rc=$rc)"; }
+[ ! -s "$OUT/objects-check.txt" ] || { cat "$OUT/objects-check.txt"; die "$NS already holds Logweir objects; somebody else's run, or a teardown that did not finish. The teardown deletes every object of these kinds, so the walk will not start over them."; }
 
 # THE CHART'S MinIO ROOT CREDENTIAL, read back from the release's own Secret so
 # this script and the chart cannot disagree about it.
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" get secret "${REL}-minio-root" -o json > "$OUT/minio-root.json" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get secret "${REL}-minio-root" -o json > "$OUT/minio-root.json" 2>&1
 rc=$?
 set -e
 echo "    rc=$rc  (kubectl get secret ${REL}-minio-root -o json)"
@@ -346,90 +373,52 @@ echo "    the chart's MinIO root user: $MINIO_USER (demo-only; the JSON it was r
 trap teardown EXIT
 
 # ---------------------------------------------------------------------------
-# 1/10 THE TWO KEYPAIRS — the four openssl commands step 4 of the demo uses.
+# 1/10 THE APPROVER KEYPAIR, AND THE SIGNER'S PUBLIC KEY. The runner Jobs sign
+#      with the chart's `logweir-signing-key` (the identity hook made it); its
+#      public half and key id are in the `logweir-signing-trust` ConfigMap
+#      (identity.publicConfigMapName), written for TrustRoster/default.
 # ---------------------------------------------------------------------------
-step "1/10 minting the signing and approver keypairs into $OUT/"
-openssl ecparam -genkey -name prime256v1 -noout > "$OUT/signing.der.pem"
-openssl pkcs8 -topk8 -nocrypt -in "$OUT/signing.der.pem" -out "$OUT/signing.pem"
+step "1/10 minting the approver keypair into $OUT/; the chart's signing key, read from logweir-signing-trust"
 openssl ecparam -genkey -name prime256v1 -noout > "$OUT/approver.der.pem"
 openssl pkcs8 -topk8 -nocrypt -in "$OUT/approver.der.pem" -out "$OUT/approver.pem"
-rm -f "$OUT/signing.der.pem" "$OUT/approver.der.pem"
-openssl ec -in "$OUT/signing.pem"  -pubout -out "$OUT/signing.pub.pem"  2>/dev/null
+rm -f "$OUT/approver.der.pem"
 openssl ec -in "$OUT/approver.pem" -pubout -out "$OUT/approver.pub.pem" 2>/dev/null
-chmod 600 "$OUT/signing.pem" "$OUT/approver.pem"
-SIGNING_KEY_ID=$(openssl ec -pubin -in "$OUT/signing.pub.pem" -outform DER 2>/dev/null | openssl dgst -sha256 -hex | awk '{print $NF}')
+chmod 600 "$OUT/approver.pem"
 APPROVER_KEY_ID=$(openssl ec -pubin -in "$OUT/approver.pub.pem" -outform DER 2>/dev/null | openssl dgst -sha256 -hex | awk '{print $NF}')
-[ -n "$SIGNING_KEY_ID" ] || die "could not compute the signing key id"
 [ -n "$APPROVER_KEY_ID" ] || die "could not compute the approver key id"
-echo "    signing key id:  $SIGNING_KEY_ID"
-echo "    approver key id: $APPROVER_KEY_ID"
-echo "    both keypairs were minted seconds ago and are attested by nothing; the teardown deletes them."
-
-# ---------------------------------------------------------------------------
-# 2/10 THE DEMO NAMESPACE, THE FOUR SECRETS (THE ARCHIVE CREDENTIAL BOUND TO
-#      ITS LOCATION), THE RUNNER ServiceAccount — then `just check-secrets`.
-# ---------------------------------------------------------------------------
-step "2/10 namespace $NS, the four Secrets, logweir-s3 bound to $ARCHIVE_URL, the runner ServiceAccount, then just check-secrets $NS"
+echo "    approver key id: $APPROVER_KEY_ID (minted seconds ago, attested by nothing; the teardown deletes it)"
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" create namespace "$NS" > "$OUT/ns.log" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get configmap logweir-signing-trust -o json > "$OUT/signing-trust.json" 2>&1
 rc=$?
 set -e
-echo "    rc=$rc  (kubectl create namespace $NS)"
-[ "$rc" -eq 0 ] || die "could not create namespace $NS (rc=$rc)"
-
-# 1. the runner's signing key — data key `signing.pem`.
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create secret generic logweir-signing-key --from-file=signing.pem="$OUT/signing.pem" > "$OUT/secret-signing.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (secret/logweir-signing-key, data key signing.pem)"
-[ "$rc" -eq 0 ] || die "could not create logweir-signing-key (rc=$rc)"
-
-# (No `logweir-approval-bundle`: since PLAT-01 the controller writes each
-# Restore its own immutable `<restore>-approval-bundle` from the verified
-# Approval and the TrustRoster's allowlist, step 4.)
-
-# 2. the per-cluster SCRAM credential — unused on PLAINTEXT, counted by check-secrets.
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create secret generic kafka-scram --from-literal=password=unused-on-the-plaintext-listener > "$OUT/secret-scram.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (secret/kafka-scram, data key password)"
-[ "$rc" -eq 0 ] || die "could not create kafka-scram (rc=$rc)"
-
-# 3. the runner's archive credential — COPIED from the chart's own
-#    `logweir-s3` in the release namespace, so the demo dials the archive with
-#    the credential the chart minted and not a literal of its own.
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" get secret logweir-s3 -o json > "$OUT/s3-secret.json" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (kubectl get secret logweir-s3 -n $SYS — the chart's)"
-[ "$rc" -eq 0 ] || die "the chart's logweir-s3 Secret is missing from $SYS (rc=$rc)"
-"$PYTHON" - "$OUT/s3-secret.json" "$NS" "$OUT/s3-secret-copy.json" <<'PY'
+echo "    rc=$rc  (kubectl get configmap logweir-signing-trust -o json — public material only)"
+[ "$rc" -eq 0 ] || { cat "$OUT/signing-trust.json"; die "the chart's logweir-signing-trust ConfigMap is missing (rc=$rc); is identity.enabled on?"; }
+SIGNING_KEY_ID=$("$PYTHON" - "$OUT/signing-trust.json" "$OUT/signing.pub.pem" <<'PY'
 import json, sys
-src, ns, out = sys.argv[1:4]
-doc = json.load(open(src))
-copy = {"apiVersion": "v1", "kind": "Secret", "type": doc.get("type", "Opaque"),
-        "metadata": {"name": doc["metadata"]["name"], "namespace": ns},
-        "data": doc["data"]}
-json.dump(copy, open(out, "w"))
+data = json.load(open(sys.argv[1])).get("data") or {}
+open(sys.argv[2], "w").write(data.get("signing.pub.pem", ""))
+print(data.get("key-id", ""))
 PY
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" create -f "$OUT/s3-secret-copy.json" > "$OUT/secret-s3.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (secret/logweir-s3 in $NS — the chart's data, copied)"
-[ "$rc" -eq 0 ] || die "could not create logweir-s3 in $NS (rc=$rc)"
-rm -f "$OUT/s3-secret.json" "$OUT/s3-secret-copy.json"
+)
+rm -f "$OUT/signing-trust.json"
+[ -n "$SIGNING_KEY_ID" ] && [ -s "$OUT/signing.pub.pem" ] || die "logweir-signing-trust carries no key-id or signing.pub.pem; the identity hook has not run"
+echo "    signing key id:  $SIGNING_KEY_ID (the chart's, generated by the identity hook)"
 
-# ... AND BOUND to the location it is used at (FX-20, docs/kubernetes.md
-# "Credential binding"): a runner refuses a Secret whose `logweir-binding` is
-# not the binding of the location it dials, `CredentialBindingMismatch`, before
-# any request. The walk's Backups (the controller's AWS_* route, which the
-# chart renders from this same MinIO endpoint and region) and its Restore's
-# plan `source` and `evidence` are one location, bucket and endpoint, so one
-# binding covers all three. `--apply` prints what it binds; the walk states the
+# ---------------------------------------------------------------------------
+# 2/10 THE CREDENTIALS: the chart's logweir-s3 is in workspace default and is
+#      bound to its location; the controller's read-only evidence credential.
+# ---------------------------------------------------------------------------
+step "2/10 logweir-s3 in workspace $WS, bound to $ARCHIVE_URL; logweir-evidence-ro for the controller"
+s3_ws=$(read_field secret logweir-s3 '{.metadata.labels.logweir\.dev/workspace}' 'secret/logweir-s3 label logweir.dev/workspace')
+[ "$s3_ws" = "$WS" ] || die "the chart's logweir-s3 is labelled workspace '${s3_ws:-<absent>}', not $WS; a runner Job of $WS may not mount it"
+
+# BOUND to the location it is used at (FX-20, docs/kubernetes.md "Credential
+# binding"): a runner refuses a Secret whose `logweir-binding` is not the
+# binding of the location it dials, `CredentialBindingMismatch`, before any
+# request. The walk's Backups (the controller's AWS_* route, which the chart
+# renders from this same MinIO endpoint and region) and its Restore's plan
+# `source` and `evidence` are one location, bucket and endpoint, so one binding
+# covers all three. `--apply` prints what it binds; the walk states the
 # endpoint it means, and the tool refuses any other.
 BIND_CONFIRM="$S3_ENDPOINT bucket=$ARCHIVE_BUCKET region=$S3_REGION pathStyle=true allowHttp=true"
 set +e
@@ -440,76 +429,44 @@ echo "    rc=$rc  (scripts/bind-credential.py --location $ARCHIVE_URL --secret l
 cat "$OUT/bind-s3.log"
 [ "$rc" -eq 0 ] || die "could not bind logweir-s3 to $ARCHIVE_URL (rc=$rc); see $OUT/bind-s3.log"
 
-# 4. the CONTROLLER's read-only evidence credential — in the release
-#    namespace. MinIO gives no second identity out of the box, so the demo
-#    uses the same root pair under a different Secret name: WHAT THIS PROVES
-#    IS THE PROJECTION, not the IAM policy. An adopter gives this principal
-#    `s3:GetObject` on the evidence prefix and nothing else.
+# The CONTROLLER's read-only evidence credential. MinIO gives no second
+# identity out of the box, so the demo uses the same root pair under a
+# different Secret name: WHAT THIS PROVES IS THE PROJECTION, not the IAM
+# policy. An adopter gives this principal `s3:GetObject` on the evidence prefix
+# and nothing else. No workspace label: the controller reads it from its env,
+# and no object may name it.
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" create secret generic logweir-evidence-ro --from-literal=access-key-id="$MINIO_USER" --from-literal=secret-access-key="$MINIO_PASSWORD" > "$OUT/secret-evidence.log" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create secret generic logweir-evidence-ro --from-literal=access-key-id="$MINIO_USER" --from-literal=secret-access-key="$MINIO_PASSWORD" > "$OUT/secret-evidence.log" 2>&1
 rc=$?
 set -e
-echo "    rc=$rc  (secret/logweir-evidence-ro, in $SYS)"
+echo "    rc=$rc  (secret/logweir-evidence-ro)"
 [ "$rc" -eq 0 ] || die "could not create logweir-evidence-ro (rc=$rc)"
 # The controller reads it from its OWN ENV, fixed at container start.
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" rollout restart deploy/weirkeeper > "$OUT/restart.log" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" rollout restart deploy/weirkeeper > "$OUT/restart.log" 2>&1
 rc=$?
 set -e
 echo "    rc=$rc  (kubectl rollout restart deploy/weirkeeper — env is fixed at container start)"
 [ "$rc" -eq 0 ] || die "could not restart the controller (rc=$rc)"
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" rollout status deploy/weirkeeper --timeout=300s > "$OUT/rollout2.log" 2>&1
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" rollout status deploy/weirkeeper --timeout=300s > "$OUT/rollout2.log" 2>&1
 rc=$?
 set -e
 echo "    rc=$rc  (kubectl rollout status deploy/weirkeeper, after the evidence Secret)"
 [ "$rc" -eq 0 ] || die "the controller did not come back (rc=$rc)"
 
-# The runner ServiceAccount, in the namespace that runs Jobs (docs/install.md
-# step 4): the walk's namespace is not in identity.authorizedRunnerNamespaces.
-# No NetworkPolicy is applied here; neither cluster this walk runs on enforces
-# one.
-set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" apply -f config/samples/backup-runner-serviceaccount.yaml > "$OUT/runner-sa.log" 2>&1
-rc=$?
-set -e
-echo "    rc=$rc  (kubectl apply -f config/samples/backup-runner-serviceaccount.yaml -n $NS)"
-[ "$rc" -eq 0 ] || die "could not create the runner ServiceAccount (rc=$rc)"
-
-# `just check-secrets` reads the fourth Secret from the literal `logweir-system`
-# (its recipe), which is this walk's default release namespace. Under another
-# release namespace the same four reads are made here instead, and said so.
-if [ "$SYS" = "logweir-system" ]; then
-  set +e
-  just check-secrets "$NS" > "$OUT/check-secrets.log" 2>&1
-  rc=$?
-  set -e
-  echo "    rc=$rc  (just check-secrets $NS)"
-  cat "$OUT/check-secrets.log"
-  [ "$rc" -eq 0 ] || die "\`just check-secrets $NS\` exited $rc; see $OUT/check-secrets.log"
-else
-  echo "    just check-secrets reads logweir-evidence-ro from the literal namespace logweir-system; this"
-  echo "    release is in $SYS, so the four reads are made here:"
-  for pair in "logweir-signing-key:$NS" "kafka-scram:$NS" "logweir-s3:$NS" "logweir-evidence-ro:$SYS"; do
-    set +e
-    kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "${pair##*:}" get secret "${pair%%:*}" -o name > /dev/null 2>&1
-    rc=$?
-    set -e
-    echo "    rc=$rc  (kubectl get secret ${pair%%:*} -n ${pair##*:})"
-    [ "$rc" -eq 0 ] || die "${pair%%:*} is absent from ${pair##*:}"
-  done
-fi
-
 # ---------------------------------------------------------------------------
 # 3/10 TWO KafkaClusters AT THE CHART'S BROKERS, AND `reachable: true` ON BOTH.
 # ---------------------------------------------------------------------------
-step "3/10 KafkaCluster source ($SOURCE_BOOTSTRAP) and target ($TARGET_BOOTSTRAP) -> status.reachable"
+step "3/10 KafkaCluster source ($SOURCE_BOOTSTRAP) and target ($TARGET_BOOTSTRAP) in workspace $WS -> status.reachable"
 cat > "$OUT/kafkaclusters.yaml" <<YAML
 apiVersion: logweir.dev/v1alpha1
 kind: KafkaCluster
 metadata:
   name: source
   namespace: $NS
+  labels:
+    logweir.dev/workspace: $WS
 spec:
   bootstrapServers: ["$SOURCE_BOOTSTRAP"]
   auth:
@@ -522,6 +479,8 @@ kind: KafkaCluster
 metadata:
   name: target
   namespace: $NS
+  labels:
+    logweir.dev/workspace: $WS
 spec:
   bootstrapServers: ["$TARGET_BOOTSTRAP"]
   auth:
@@ -559,7 +518,7 @@ echo "    two clusters, two ids: source $SOURCE_CLUSTER_ID, target $TARGET_CLUST
 #      phase 0 reads (the controller copies it into each Restore's approval
 #      bundle) and must carry the target's OBSERVED id; `spec` is immutable.
 # ---------------------------------------------------------------------------
-step "4/10 TrustRoster default — the approver key id, the signing key MATERIAL, allowedClusterIds [$TARGET_CLUSTER_ID]"
+step "4/10 TrustRoster default — the approver key id, the chart's signing key, allowedClusterIds [$TARGET_CLUSTER_ID]"
 "$PYTHON" - "$OUT/signing.pub.pem" "$SIGNING_KEY_ID" "$OUT/approver.pub.pem" "$APPROVER_KEY_ID" "$TARGET_CLUSTER_ID" "$OUT/trustroster.yaml" <<'PY'
 import sys, textwrap
 sig_pem, sig_id, app_pem, app_id, target_id, out = sys.argv[1:7]
@@ -594,15 +553,19 @@ echo "    rc=$rc  (kubectl apply -f trustroster.yaml — cluster-scoped, name 'd
 # ---------------------------------------------------------------------------
 # 5/10 A BackupSchedule ON */2, AND THE Backup IT FIRES — Succeeded, exitCode 0,
 #      receipt Valid. Then the schedule is suspended so the chosen Backup is
-#      stable for the Restore (the demo's step 8 reasoning).
+#      stable for the Restore (the demo's step 8 reasoning). Then the boundary:
+#      a Backup in workspace `other` naming `default`'s connection is refused
+#      `WorkspaceMismatch` and gets no Job.
 # ---------------------------------------------------------------------------
-step "5/10 BackupSchedule */2 * * * * over orders and payments into $ARCHIVE_URL, and the Backup it fires"
+step "5/10 BackupSchedule */2 * * * * over orders and payments into $ARCHIVE_URL, the Backup it fires, and a Backup in $WS_OTHER refused"
 cat > "$OUT/backupschedule.yaml" <<YAML
 apiVersion: logweir.dev/v1alpha1
 kind: BackupSchedule
 metadata:
   name: helm
   namespace: $NS
+  labels:
+    logweir.dev/workspace: $WS
 spec:
   schedule: "*/2 * * * *"
   sourceRef:
@@ -626,16 +589,16 @@ echo "    waiting for the schedule to fire (bounded: 60 polls of 5 s)..."
 BACKUP_NAME=""
 for _ in $(seq 1 60); do
   set +e
-  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get backups -o name > "$OUT/backups.txt" 2>/dev/null
+  kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get backups -l "logweir.dev/workspace=$WS" -o name > "$OUT/backups.txt" 2>/dev/null
   rc=$?
   set -e
   BACKUP_NAME=$(sed -n 's|^backup.logweir.dev/||p' "$OUT/backups.txt" | head -1)
   [ -n "$BACKUP_NAME" ] && break
   sleep 5
 done
-echo "    rc=$rc  (kubectl get backups -o name)"
-[ -n "$BACKUP_NAME" ] || die "no Backup appeared within five minutes. The BackupSchedule reconciler creates one object per due slot, named <schedule>-<slot>."
-echo "    the schedule fired: Backup/$BACKUP_NAME"
+echo "    rc=$rc  (kubectl get backups -l logweir.dev/workspace=$WS -o name)"
+[ -n "$BACKUP_NAME" ] || die "no Backup labelled workspace $WS appeared within five minutes. The BackupSchedule reconciler creates one object per due slot, named <schedule>-<slot>, with the schedule's workspace label."
+echo "    the schedule fired: Backup/$BACKUP_NAME, in workspace $WS"
 
 backup_phase=""
 for _ in $(seq 1 30); do
@@ -681,10 +644,58 @@ set -e
 echo "    rc=$rc  (kubectl patch backupschedule helm spec.suspend=true — the ONE mutable field)"
 [ "$rc" -eq 0 ] || die "could not suspend the BackupSchedule (rc=$rc)"
 
+# THE BOUNDARY, AT THE CONTROLLER. The same run, labelled `other`: its
+# connection and its credential are `default`'s, so the workspace gate refuses
+# it before any Job (crates/weirkeeper/src/workspace.rs).
+cat > "$OUT/backup-other.yaml" <<YAML
+apiVersion: logweir.dev/v1alpha1
+kind: Backup
+metadata:
+  name: helm-other
+  namespace: $NS
+  labels:
+    logweir.dev/workspace: $WS_OTHER
+spec:
+  sourceRef:
+    name: source
+  topics: ["orders"]
+  archive:
+    url: $ARCHIVE_URL
+    secretRef:
+      name: logweir-s3
+  triggeredBy: manual
+  deadlineSeconds: 600
+YAML
+set +e
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" create -f "$OUT/backup-other.yaml" > "$OUT/backup-other.log" 2>&1
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl create -f backup-other.yaml — Backup/helm-other in $WS_OTHER, naming $WS's KafkaCluster source and logweir-s3)"
+[ "$rc" -eq 0 ] || { cat "$OUT/backup-other.log"; die "could not create Backup/helm-other (rc=$rc)"; }
+set +e
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" wait --for=jsonpath='{.status.conditions[0].reason}'=WorkspaceMismatch backup/helm-other --timeout=120s > "$OUT/backup-other-wait.log" 2>&1
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl wait --for=jsonpath={.status.conditions[0].reason}=WorkspaceMismatch backup/helm-other)"
+if [ "$rc" -ne 0 ]; then
+  dump_run backup helm-other
+  die "Backup/helm-other in $WS_OTHER was not refused WorkspaceMismatch"
+fi
+other_message=$(read_field backup helm-other '{.status.conditions[0].message}' 'status.conditions[0].message')
+[ -n "$other_message" ] || die "the WorkspaceMismatch condition carries no message"
+set +e
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" get jobs -l "logweir.dev/workspace=$WS_OTHER" -o name > "$OUT/jobs-other.txt" 2> "$OUT/jobs-other.err"
+rc=$?
+set -e
+echo "    rc=$rc  (kubectl get jobs -l logweir.dev/workspace=$WS_OTHER -o name) -> $(wc -l < "$OUT/jobs-other.txt" | tr -d ' ') Job(s)"
+[ "$rc" -eq 0 ] || die "could not list $WS_OTHER's Jobs (rc=$rc)"
+[ ! -s "$OUT/jobs-other.txt" ] || { cat "$OUT/jobs-other.txt"; die "a Job was created in $WS_OTHER for a refused Backup"; }
+
 # ---------------------------------------------------------------------------
 # 6/10 THE Restore — from the most recent Backup, its planBytes rendered by the
-#      console's own renderer (console/scripts/emit-restore-body.mjs), a SCRATCH restore
-#      onto the chart's target broker, whose marker topic the seed created.
+#      console's own renderer (console/scripts/emit-restore-body.mjs), a SCRATCH
+#      restore onto the chart's target broker, whose marker topic the seed
+#      created. The emitter labels it with the workspace.
 # ---------------------------------------------------------------------------
 step "6/10 the Restore: the console's own renderer renders the plan bytes; kubectl create -f the body"
 PIT_RFC3339=$("$PYTHON" -c 'import datetime as d
@@ -695,7 +706,7 @@ print((d.datetime.now(d.timezone.utc).replace(microsecond=0) - d.timedelta(hours
 echo "    recovery point: $PIT_RFC3339   sample window from: $SAMPLE_START_RFC3339 (the seed ran at install time)"
 cat > "$OUT/plan-fields.json" <<JSON
 {
-  "ns": "$NS",
+  "workspace": "$WS",
   "archiveUrl": "$ARCHIVE_URL",
   "archiveSecretName": "logweir-s3",
   "targetClusterName": "target",
@@ -762,13 +773,13 @@ set +e
 kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" create -f "$OUT/restore-body.json" > "$OUT/restore-create.log" 2>&1
 rc=$?
 set -e
-echo "    rc=$rc  (kubectl create -f restore-body.json — Restore/$RESTORE_NAME, approvalRef -> $APPROVAL_NAME, which does not exist yet)"
+echo "    rc=$rc  (kubectl create -f restore-body.json — Restore/$RESTORE_NAME in $WS, approvalRef -> $APPROVAL_NAME, which does not exist yet)"
 [ "$rc" -eq 0 ] || { cat "$OUT/restore-create.log"; die "could not create the Restore (rc=$rc)"; }
 
 # ---------------------------------------------------------------------------
 # 7/10 THE APPROVAL, MINTED ON THE HOST WITH THE SHIPPED CLI, AND THE Approval.
 # ---------------------------------------------------------------------------
-step "7/10 logweir drill approve on the HOST, then the Approval object (the controller writes the Restore's bundle from it)"
+step "7/10 logweir drill approve on the HOST, then the Approval object in $WS (the controller writes the Restore's bundle from it)"
 set +e
 logweir drill approve --spec "$OUT/plan.yaml" --key "$OUT/approver.pem" --approver helm-demo --ticket DEMO-HELM --subject-kind Restore --out "$OUT/approval.json" > "$OUT/approve.out" 2>&1
 rc=$?
@@ -782,9 +793,9 @@ echo "    plan_hash from the CLI : $APPROVED_HASH"
 echo "    plan-hash from the page: $PLAN_HASH"
 [ "$APPROVED_HASH" = "$PLAN_HASH" ] || die "the CLI signed $APPROVED_HASH and the page showed $PLAN_HASH — two documents with one name"
 
-"$PYTHON" - "$OUT/approval.json" "$OUT/approval.sig" "$NS" "$APPROVAL_NAME" "$RESTORE_NAME" "$APPROVED_HASH" "$OUT/approval-object.yaml" <<'PY'
+"$PYTHON" - "$OUT/approval.json" "$OUT/approval.sig" "$NS" "$WS" "$APPROVAL_NAME" "$RESTORE_NAME" "$APPROVED_HASH" "$OUT/approval-object.yaml" <<'PY'
 import sys, textwrap
-approval_path, sidecar_path, ns, name, subject, plan_hash, out = sys.argv[1:8]
+approval_path, sidecar_path, ns, ws, name, subject, plan_hash, out = sys.argv[1:9]
 approval = open(approval_path).read()
 sidecar = open(sidecar_path).read()
 doc = f"""apiVersion: logweir.dev/v1alpha1
@@ -792,6 +803,8 @@ kind: Approval
 metadata:
   name: {name}
   namespace: {ns}
+  labels:
+    logweir.dev/workspace: {ws}
 spec:
   subjectRef:
     kind: Restore
@@ -871,7 +884,7 @@ set +e
 logweir drill verify --scorecard "$OUT/scorecard.json" --signature "$OUT/scorecard.sig" --public-key "$OUT/signing.pub.pem" --payload-type scorecard > "$OUT/verify-rust.out" 2>&1
 rust_rc=$?
 set -e
-echo "    rc=$rust_rc  (logweir drill verify --payload-type scorecard)"
+echo "    rc=$rust_rc  (logweir drill verify --payload-type scorecard, against the chart's signing key)"
 cat "$OUT/verify-rust.out"
 set +e
 "$PYTHON" docs/verify_scorecard.py --payload-type scorecard "$OUT/scorecard.json" "$OUT/scorecard.sig" "$OUT/signing.pub.pem" > "$OUT/verify-python.out" 2>&1
@@ -884,14 +897,14 @@ cat "$OUT/verify-python.out"
 
 # ---------------------------------------------------------------------------
 # 9/10 THE CONSOLE, THROUGH A PORT-FORWARD: the page 200 and the tree's own
-#      app.js, the session 200 in localAdmin mode, the release namespace's
-#      Backups through the product API, and a Kubernetes path it does not serve.
-#      (Until PROD-17.1 C4 this step fetched the legacy `kubectl proxy` page.)
+#      app.js, the session 200 in localAdmin mode, both workspaces listed,
+#      `default`'s Backup through the product API and NOT through `other`, and
+#      a Kubernetes path it does not serve.
 # ---------------------------------------------------------------------------
-step "9/10 the console: kubectl port-forward deploy/${REL}-api ${CONSOLE_PORT}:${CONSOLE_PORT}, then five fetches"
+step "9/10 the console: kubectl port-forward deploy/${REL}-api ${CONSOLE_PORT}:${CONSOLE_PORT}, then seven fetches"
 [ -n "$CONSOLE_PORT" ] || die "could not read api.console.port from $CHART/values.yaml"
 set +e
-kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$SYS" port-forward "deploy/${REL}-api" "${CONSOLE_PORT}:${CONSOLE_PORT}" > "$OUT/port-forward.log" 2>&1 &
+kubectl --context "$LOGWEIR_KUBE_CONTEXT" -n "$NS" port-forward "deploy/${REL}-api" "${CONSOLE_PORT}:${CONSOLE_PORT}" > "$OUT/port-forward.log" 2>&1 &
 rc=$?
 set -e
 PF_PID=$!
@@ -909,7 +922,8 @@ echo "    rc=$rc  (curl $CONSOLE_BASE/ui/ — the readiness poll, up to 30 s)"
 [ -n "$up" ] || die "the port-forward never answered on ${CONSOLE_PORT}; see $OUT/port-forward.log"
 echo
 echo "    WHOSE AUTHORITY: the console in localAdmin mode binds loopback in its pod; whoever may"
-echo "    port-forward to deploy/${REL}-api acts as its one administrator. The page holds no credential."
+echo "    port-forward to deploy/${REL}-api acts as its one administrator, in every workspace."
+echo "    The page holds no credential."
 echo
 expect_http "$CONSOLE_BASE/ui/" "200" "the page itself"
 # The page names its one script under assets/; that file is served, cached as
@@ -929,18 +943,26 @@ echo "    ui/$script_path is served immutable"
 expect_http "$CONSOLE_BASE/api/v1/session" "200" "the session"
 grep -q '"authenticationMode": *"localAdmin"' "$OUT/http-body.txt" || die "the session does not say localAdmin"
 echo "    the session is the console's one administrator (localAdmin)"
-expect_http "$CONSOLE_BASE/api/v1/namespaces/$SYS/backups" "200" "the product API, the console's own authority"
-expect_http "$CONSOLE_BASE/api/v1/namespaces/$SYS/secrets" "404" "a Kubernetes core path — not a product route"
+expect_http "$CONSOLE_BASE/api/v1/workspaces" "200" "the workspaces the administrator holds"
+for ws in "$WS" "$WS_OTHER"; do
+  grep -q "\"name\": *\"$ws\"" "$OUT/http-body.txt" || die "GET /api/v1/workspaces does not list $ws"
+done
+echo "    both workspaces are listed: $WS, $WS_OTHER"
+expect_http "$CONSOLE_BASE/api/v1/workspaces/$WS/backups/$BACKUP_NAME" "200" "$WS's Backup, through the product API"
+expect_http "$CONSOLE_BASE/api/v1/workspaces/$WS_OTHER/backups/$BACKUP_NAME" "404" "the same Backup asked for in $WS_OTHER — another workspace's object is not found"
+expect_http "$CONSOLE_BASE/api/v1/workspaces/$WS/secrets" "404" "a Kubernetes core kind — not a product route"
 
 echo
 echo "==> HELM DEMO EXIT CRITERION MET"
-echo "    release $REL in $SYS on $LOGWEIR_KUBE_CONTEXT"
+echo "    release $REL in $NS on $LOGWEIR_KUBE_CONTEXT, workspace $WS"
 echo "    Backup  $BACKUP_NAME: exitCode=$b_exit verification=$b_result backupId=$b_id"
 echo "                          receiptKey=$b_receipt   wall clock $((BACKUP_T1 - BACKUP_T0)) s from the schedule's apply"
+echo "    Backup  helm-other in $WS_OTHER: WorkspaceMismatch, no Job"
 echo "    Restore $RESTORE_NAME: phase=$restore_phase exitCode=$r_exit outcome=$r_outcome integrity=$r_integrity"
 echo "                          scorecardKey=$r_scorecard"
 echo "                          verification=$r_result   wall clock $((RESTORE_T1 - RESTORE_T0)) s from the create"
 echo "    Both readers agreed, each exit code read directly: logweir drill verify -> $rust_rc,"
 echo "    python3 docs/verify_scorecard.py -> $py_rc."
-echo "    The console answered 200 (page, session, the Backup list) and 404 for a core path."
+echo "    The console answered 200 (page, session, workspaces, $WS's Backup), and 404 for that"
+echo "    Backup in $WS_OTHER and for a core kind."
 echo "    NO PRIVATE KEY LEFT THIS HOST; the approver's never reached the cluster at all."

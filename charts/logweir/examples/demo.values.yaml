@@ -1,6 +1,6 @@
 # demo.values.yaml — everything on: the chart's own MinIO, two throwaway Kafka
-# clusters and the console (localAdmin), with the archive pointed at the
-# chart's MinIO. The five-minute path:
+# clusters, the console (localAdmin) and two workspaces, with the archive
+# pointed at the chart's MinIO. The five-minute path:
 #
 #     just image && just image-weirkeeper && just image-console
 #     kubectl create namespace logweir-system
@@ -35,7 +35,12 @@
 # `archive.*` is left empty on purpose: with minio.enabled it defaults to
 # s3://kafka-backups/<release> at http://<release>-minio.<namespace>.svc:9000,
 # us-east-1, allowHttp, path-style — the chart's own backend.
-#
+
+# Everything lives in the release namespace. The walk works in workspace
+# `default` (the first, which labels the chart's logweir-s3) and checks that
+# `other` can neither run with nor read `default`'s objects.
+workspaces: [default, other]
+
 # THE `kubernetes:` BLOCK BELOW IS DELIBERATELY SCHEDULABLE ANYWHERE (Task 38).
 # `kubernetes.io/os: linux` is a label the kubelet sets on every Linux node, so
 # it constrains nothing on kind or docker-desktop, and a toleration for a taint
