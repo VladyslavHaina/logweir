@@ -661,6 +661,7 @@ async fn pass_with_job_reads(
 /// lost, then the pass retried) is used, and `jobRef` recorded.
 #[tokio::test]
 async fn a_job_raced_in_during_admission_is_refused_unless_it_is_this_switchovers() {
+    weirkeeper::testing::install_test_workspaces();
     let not_found = json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",
                            "reason": "NotFound", "code": 404});
     let conflict = json!({"kind": "Status", "apiVersion": "v1", "status": "Failure",

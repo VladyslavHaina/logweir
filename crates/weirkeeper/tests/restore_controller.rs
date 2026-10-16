@@ -12752,6 +12752,7 @@ async fn a_forged_refusal_pair_at_the_end_of_another_exit_codes_log_is_ignored()
 /// reason, and one inside the sentence becomes a replacement character.
 #[tokio::test]
 async fn invalid_utf8_in_the_log_is_decoded_lossily_and_cleaned() {
+    weirkeeper::testing::install_test_workspaces();
     let routes = Arc::new(fx34_routes(3, 200, String::new()));
     let recorder = weirkeeper::testing::recorder();
     let writes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
