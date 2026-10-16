@@ -340,6 +340,12 @@ impl Referrer for KafkaCluster {
                 .as_ref()
                 .and_then(|ca| ca.secret_key_ref.as_ref())
                 .map(|s| s.name.clone()),
+            // PROD-03.1: the registry's basic-auth password.
+            self.spec
+                .schema_registry
+                .as_ref()
+                .and_then(|r| r.secret_ref.as_ref())
+                .map(|s| s.name.clone()),
         ]
         .into_iter()
         .flatten()

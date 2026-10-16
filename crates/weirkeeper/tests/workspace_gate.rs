@@ -582,3 +582,75 @@ async fn a_restore_being_deleted_is_still_held_to_its_workspace() {
     let (client, _, _) = mock_client_recording_bodies(through_restore(Some("dev"), Some("dev")));
     assert!(workspace::gate(&client, &restore).await.unwrap().is_none());
 }
+
+/// **PROD-03.1's registry Secret is held like the Kafka credential.** A
+/// connection whose `schemaRegistry.secretRef` names a Secret of another
+/// workspace, or one with no workspace, is refused at the gate (so no probe
+/// Job), and so is a `dev` Backup through it (so no backup Job), each with the
+/// status as the only write. CONTROL: the same Secret labelled `dev` admits
+/// both.
+#[tokio::test]
+async fn a_registry_secret_of_another_workspace_is_refused() {
+    let cluster_json = |name: &str| {
+        json!({"apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
+               "metadata": meta(name, Some("dev")),
+               "spec": {"bootstrapServers": ["k:9092"], "auth": {"mode": "plaintext"},
+                        "role": "source",
+                        "schemaRegistry": {"url": "https://sr:8081", "username": "u",
+                                           "secretRef": {"name": "sr-cred"}}}})
+    };
+    let cluster_obj: KafkaCluster = object(cluster_json("source"));
+    for ws in [Some("dev"), Some("prd"), None] {
+        let table = |status_path: &'static str, body: Value| {
+            vec![
+                get("/kafkaclusters/source", &cluster_json("source")),
+                get(
+                    "/backupdestinations/primary",
+                    &destination("primary", Some("dev"), "dest-cred"),
+                ),
+                get("/secrets/dest-cred", &secret("dest-cred", Some("dev"))),
+                get("/secrets/sr-cred", &secret("sr-cred", ws)),
+                patch(status_path, &body),
+            ]
+        };
+        let (client, _, bodies) = mock_client_recording_bodies(table(
+            "/kafkaclusters/source/status",
+            cluster_json("source"),
+        ));
+        let refused = workspace::gate(&client, &cluster_obj)
+            .await
+            .unwrap()
+            .is_some();
+        let writes = bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|b| b.method != "GET")
+            .count();
+        let (b_refused, b_status, b_methods) = run(
+            &backup(Some("dev")),
+            table("/backups/b1/status", backup_json(Some("dev"))),
+        )
+        .await;
+        if ws == Some("dev") {
+            assert!(
+                !refused && writes == 0,
+                "control: the connection is admitted"
+            );
+            assert!(
+                !b_refused && b_status.is_none(),
+                "control: the Backup is admitted"
+            );
+        } else {
+            assert!(refused && writes == 1, "{ws:?}: refused, the status only");
+            assert!(b_refused, "{ws:?}: the Backup is refused");
+            assert_eq!(reason(&b_status), REASON_MISMATCH);
+            assert!(
+                message(&b_status).starts_with("Secret `sr-cred` is in "),
+                "{}",
+                message(&b_status)
+            );
+            assert_eq!(b_methods.iter().filter(|m| *m != "GET").count(), 1);
+        }
+    }
+}

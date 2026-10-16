@@ -7,8 +7,9 @@ use weirkeeper::conditions::{
     TERMINAL_STATE_CONNECTION_CONFIG_INVALID, TERMINAL_STATE_CONNECTION_PLAN_MISMATCH,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
 };
-use weirkeeper::connection::{check_secret_workspaces, resolve, ConnectionUse};
+use weirkeeper::connection::{resolve, ConnectionUse};
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
+use weirkeeper::workspace::{Referent, Referrer};
 
 const UID: &str = "7d1f4a52-0000-4000-8000-00000000a003";
 
@@ -91,7 +92,6 @@ fn a_registry_resolves_into_the_plan_the_binding_and_the_job() {
         .env_from_secret
         .iter()
         .any(|e| e.name == "LOGWEIR_TARGET_REGISTRY_PASSWORD"));
-    assert_eq!(resolved.named_secrets(), vec!["src-credential"]);
 }
 
 #[test]
@@ -155,26 +155,18 @@ fn a_restore_plan_names_the_connections_registry_or_none() {
         .is_err());
 }
 
-fn secret(name: &str, workspace: Option<&str>) -> k8s_openapi::api::core::v1::Secret {
-    let mut s = k8s_openapi::api::core::v1::Secret::default();
-    s.metadata.name = Some(name.into());
-    if let Some(w) = workspace {
-        s.metadata.labels = Some([("logweir.dev/workspace".to_string(), w.to_string())].into());
-    }
-    s
-}
-
+/// The registry's Secret is one of the connection's referents, so the
+/// workspace gate holds it to the connection's workspace before any Job
+/// (`tests/workspace_gate.rs::a_registry_secret_of_another_workspace_is_refused`).
 #[test]
-fn a_registry_secret_of_another_workspace_or_unlabelled_is_refused() {
-    let c = basic();
-    let resolved = resolve(&c, ConnectionUse::BackupSource).unwrap();
-    check_secret_workspaces(&c, &resolved, &[secret("src-credential", Some("dev"))]).unwrap();
-    for other in [Some("prd"), None] {
-        let err =
-            check_secret_workspaces(&c, &resolved, &[secret("src-credential", other)]).unwrap_err();
-        assert_eq!(err.reason, "WorkspaceMismatch", "{err}");
-        assert!(err.message.contains("src-credential"), "{err}");
-    }
+fn the_registry_secret_is_a_referent_of_its_connection() {
+    assert!(basic()
+        .referents()
+        .contains(&Referent::Secret("src-credential".into())));
+    assert!(!cluster(Value::Null)
+        .referents()
+        .iter()
+        .any(|r| matches!(r, Referent::Secret(_))));
 }
 
 #[test]

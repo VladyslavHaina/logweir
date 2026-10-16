@@ -761,7 +761,8 @@ pub async fn create(
     )
     .await?;
     if writes_secret {
-        let secret = credential_secret(&created.object, credential, registry_password, &request_id)?;
+        let secret =
+            credential_secret(&created.object, credential, registry_password, &request_id)?;
         match state.kube().create_credential(&ws, &secret).await {
             Ok(reference) => {
                 // THE LOG LINE IS A NAME — the only non-secret fact about a

@@ -1245,32 +1245,6 @@ impl ResolvedConnection {
             .or(self.client_certificate.as_ref().map(|c| c.name.as_str()))
     }
 
-    /// Every Secret this connection names, sorted and distinct: the Kafka
-    /// credential, the `mtls` client certificate, the registry password
-    /// (PROD-03.1) and a Secret-held CA. Each one's `logweir.dev/workspace`
-    /// must equal the connection's ([`check_secret_workspaces`]).
-    #[must_use]
-    pub fn named_secrets(&self) -> Vec<&str> {
-        let mut out: Vec<&str> = [
-            self.password.as_ref().map(|p| p.name.as_str()),
-            self.client_certificate.as_ref().map(|c| c.name.as_str()),
-            self.schema_registry
-                .as_ref()
-                .and_then(|r| r.password.as_ref())
-                .map(|p| p.name.as_str()),
-            self.tls_ca
-                .as_ref()
-                .filter(|ca| ca.kind == CaSourceKind::Secret)
-                .map(|ca| ca.name.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        out.sort_unstable();
-        out.dedup();
-        out
-    }
-
     /// The environment and mounts this connection contributes to its Job.
     /// References only: see this module's header.
     ///
@@ -1610,42 +1584,4 @@ fn describe_auth(auth: &AuthSpec) -> String {
             auth.username().unwrap_or_default()
         ),
     }
-}
-
-/// **PROD-19.1 §4.4.** Every Secret a connection names carries the
-/// connection's `logweir.dev/workspace`: `secrets` are the named Secrets'
-/// objects (metadata is enough), and each must be in the cluster's workspace
-/// ([`crate::workspace::same`]). A Secret of another workspace, or with no
-/// label, refuses the connection before any Job; a named Secret missing from
-/// `secrets` is the kubelet's to report, as before.
-///
-/// # Errors
-///
-/// [`crate::workspace::REASON_MISMATCH`], naming the field and both
-/// workspaces.
-pub fn check_secret_workspaces(
-    cluster: &KafkaCluster,
-    resolved: &ResolvedConnection,
-    secrets: &[k8s_openapi::api::core::v1::Secret],
-) -> Result<(), ConnectionRefusal> {
-    for name in resolved.named_secrets() {
-        let Some(secret) = secrets
-            .iter()
-            .find(|s| s.metadata.name.as_deref() == Some(name))
-        else {
-            continue;
-        };
-        if let Err(why) = crate::workspace::same(cluster, secret) {
-            return Err(refusal(
-                why.reason(),
-                "spec",
-                format!(
-                    "KafkaCluster {}/{}: {why}; a connection names only Secrets of its own \
-                     workspace",
-                    resolved.namespace, resolved.cluster_name
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
