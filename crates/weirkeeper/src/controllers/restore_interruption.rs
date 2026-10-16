@@ -584,6 +584,7 @@ async fn start_reconcile(
     create_owned(jobs, restore, copy).await
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Build and create cleanup attempt `attempt`: a clone cleanup's wiring
 /// (`restore_clone::rewire`), its argv naming the reconcile's run.
 async fn start_cleanup(

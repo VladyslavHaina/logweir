@@ -340,7 +340,7 @@ pub enum Reconciled {
     /// The run's own scorecard, and its keys: the scorecard decides.
     Relayed(Box<Scorecard>, super::EvidenceKeys),
     /// The reconcile's own signed scorecard (or the error that stopped it).
-    Signed(Result<RestoreOutcome, DrillError>),
+    Signed(Box<Result<RestoreOutcome, DrillError>>),
 }
 
 /// A read of `key` through `store`: `Ok(None)` when it is absent.
@@ -455,14 +455,14 @@ pub(super) fn execute(
     let targets: Vec<String> = kept.mapping.values().cloned().collect();
     wait_until_still(reader, &targets, STILL_FOR, STILL_WITHIN)?;
     prepared.ctx.spec.sample.coverage = logweir_core::spec::Coverage::Complete;
-    Ok(Reconciled::Signed(super::execute_reconcile(
+    Ok(Reconciled::Signed(Box::new(super::execute_reconcile(
         args,
         run_id,
         &prepared.ctx,
         &prepared.signer,
         prepared.approved,
         &kept,
-    )))
+    ))))
 }
 
 /// `logweir restore reconcile`: print what [`execute`] found and exit by the
@@ -491,7 +491,7 @@ pub fn run(args: super::RunArgs) -> ExitCode {
                 Err(DrillError::NotPass(sc, Some(keys)))
             }
         }
-        Ok(Reconciled::Signed(outcome)) => outcome,
+        Ok(Reconciled::Signed(outcome)) => *outcome,
         Err(e) => Err(e),
     };
     super::report(&args, &run_id, outcome)

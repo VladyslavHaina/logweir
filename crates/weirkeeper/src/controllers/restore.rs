@@ -7032,17 +7032,17 @@ async fn finish_job(
     // subresource, the only route to a runner's stdout (interface I28), with
     // THE terminal bound (`runner_log::TERMINAL`) at every exit code.
     let pod_name = pod.name_any();
-    let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
     // The Job's own line token, and by which flag (FX-43): whose lines are
     // read at all.
-    let job_token = job::job_token(&job);
+    let job_token = job::job_token(job);
     // A refused run's read failure is an answer (see the `Backup` twin). This
     // `if` is the only gate: every other exit code's failure is still a
     // reconcile error.
     let (raw, mut runner_reason) = if exit_code == 3 {
         let read = crate::refusal::read(
             &pods,
-            &namespace,
+            namespace,
             &pod_name,
             logweir_core::refusal_detail::RefusingRun::Restore,
             &job_token,
@@ -7115,7 +7115,7 @@ async fn finish_job(
     let routed = backup::evidence_source_for(
         restore.spec.evidence_destination_ref.as_ref(),
         client,
-        &namespace,
+        namespace,
         now,
     )
     .await
@@ -7464,7 +7464,7 @@ async fn finish_job(
             &stored,
             &at,
             client,
-            &namespace,
+            namespace,
             &name,
             1,
             &evidence_from,
