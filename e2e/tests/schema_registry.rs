@@ -23,6 +23,7 @@
 //! | SR-8 | a closure already half in the target (one subject) is continued: the rest is imported, the consumer decodes |
 //! | SR-9 | the second restore into the same target, and a restore into the source's own registry, write nothing |
 //! | SR-10 | both verifiers print the `schemas:` line of the scorecards above and the `schema_registry` line of the receipts |
+//! | checks | `registry.reachable` and `target.schemas` answer from the live registries (`the_registry_check_rows_answer_from_the_live_registries`); controls: a wrong password, a conflicting ID |
 //!
 //! SR-2 (a reference to a hard-deleted version) is held by
 //! `crates/logweir-core/tests/schema_registry.rs::unresolved_references_are_listed`:
@@ -1300,4 +1301,200 @@ fn schemas_are_captured_and_imported_keeping_their_ids() {
 
 fn decoded_ok(topic: &str) -> bool {
     consume_decoded(topic, 1).is_ok_and(|v| v.contains('w'))
+}
+
+/// **The two check rows, live** (`registry.reachable`, `target.schemas`; B2's
+/// rows had none). Through the runner's own check kinds (`run_kind`, the code
+/// a check Job runs) over the stack's registries:
+///
+/// | row | pass predicate | control |
+/// |---|---|---|
+/// | `registry.reachable` | the target registry with its password: `ready` `RegistryAnswered` | the wrong password: `notReady` `RegistryUnauthorized` |
+/// | `target.schemas` | a restore check of a point that captured the source registry, into the empty target: `ready` `SchemasImportable`, naming how many will be imported | the same check after a conflicting schema took one of the IDs in the target: `notReady` `SchemaConflict` |
+#[test]
+#[ignore = "needs the `registry` profile: --profiles registry (e2e/README.md)"]
+fn the_registry_check_rows_answer_from_the_live_registries() {
+    use logweir_core::check_contract::*;
+    use logweir_core::destination::*;
+    const PASSWORD_ENV: &str = "LOGWEIR_TARGET_REGISTRY_PASSWORD";
+    let n = nonce();
+    let src = populate_source(&n);
+    let prefix = format!("schema-registry/{n}");
+    let point = backup(
+        &format!("{n}-chk"),
+        &prefix,
+        &src.topics,
+        &registry_yaml(&source_url(), None, "  "),
+        &[],
+    )
+    .unwrap_or_else(|o| panic!("the backup must succeed:\n{}", text(&o)));
+    assert!(
+        point
+            .receipt
+            .schema_registry
+            .as_ref()
+            .is_some_and(|b| b.captured),
+        "the point captured the source registry"
+    );
+    let connection = || ConnectionPlan {
+        bootstrap_servers: vec![harness::bootstrap()],
+        auth_mode: "plaintext".into(),
+        username: None,
+        password_env: None,
+        tls: Some(false),
+        ca_file: None,
+        client_cert_file: None,
+        client_key_file: None,
+        principal: "User:ANONYMOUS".into(),
+        schema_registry: Some(RegistryPlan {
+            url: target_url(),
+            username: Some(TARGET_USER.into()),
+            password_env: Some(PASSWORD_ENV.into()),
+        }),
+    };
+    let answer = |request: CheckRequest, id: CheckId| -> CheckOutcome {
+        let plan = CheckPlan {
+            contract: CHECK_PLAN_CONTRACT.to_string(),
+            contract_version: CHECK_CONTRACT_VERSION,
+            subject_uid: "sr-checks".into(),
+            timeout_seconds: 120,
+            policy_digest: None,
+            request,
+        };
+        let bytes = serde_json::to_vec(&plan).expect("a plan serialises");
+        let loaded = logweir::check::Loaded {
+            plan,
+            plan_sha256: logweir_core::ids::sha256_prefixed(&bytes),
+            subject_uid: "sr-checks".into(),
+        };
+        let emission = logweir::check::kinds::run_kind(&loaded, logweir::check::Deadline::new(120));
+        for c in &emission.result.checks {
+            eprintln!("[sr-checks]   row {:?}: {:?} {:?}", c.id, c.state, c.code);
+        }
+        let row = emission
+            .result
+            .checks
+            .into_iter()
+            .find(|c| c.id == id)
+            .unwrap_or_else(|| panic!("{id:?} is answered"));
+        eprintln!(
+            "[sr-checks] {id:?}: {:?} {:?} {}",
+            row.state, row.code, row.message
+        );
+        row
+    };
+    let reachable = || {
+        answer(
+            CheckRequest::SourceConnection(SourceConnectionRequest {
+                connection: connection(),
+                capability_checks: vec![CheckId::RegistryReachable],
+            }),
+            CheckId::RegistryReachable,
+        )
+    };
+
+    // registry.reachable, and its control.
+    std::env::set_var(PASSWORD_ENV, "not-the-password");
+    let refused = reachable();
+    assert_eq!(
+        (refused.state, refused.code),
+        (CheckState::NotReady, CheckCode::RegistryUnauthorized),
+        "the wrong password: {}",
+        refused.message
+    );
+    std::env::set_var(PASSWORD_ENV, target_password());
+    let ok = reachable();
+    assert_eq!(
+        (ok.state, ok.code),
+        (CheckState::Ready, CheckCode::RegistryAnswered),
+        "{}",
+        ok.message
+    );
+
+    // target.schemas over the bound point.
+    let spec_text = restore_spec(
+        &point,
+        &format!("chk-{n}-"),
+        &registry_yaml(&target_url(), Some(TARGET_USER), "  "),
+    );
+    let plan_file = demo_dir().join(format!("sr-chk-{n}.yaml"));
+    std::fs::write(&plan_file, &spec_text).expect("the plan");
+    std::env::set_var("AWS_ACCESS_KEY_ID", s3_user());
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", s3_user());
+    std::env::set_var("AWS_REGION", "us-east-1");
+    std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+    let location = DestinationLocation {
+        provider: StorageProvider::S3,
+        bucket: harness::ARCHIVE_BUCKET.into(),
+        prefix: prefix.clone(),
+        region: Some("us-east-1".into()),
+        endpoint: Some(harness::s3_endpoint()),
+        addressing: Addressing::PathStyle,
+        transport: TransportSecurity::InsecureHttp,
+    };
+    let schemas = || {
+        answer(
+            CheckRequest::RestorePreflight(Box::new(RestorePreflightRequest {
+                plan_file: plan_file.display().to_string(),
+                plan_sha256: logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
+                target: connection(),
+                source_destination: DestinationPlan {
+                    location_digest: location.location_digest(),
+                    location: location.clone(),
+                    name: "sr-chk".into(),
+                    uid: "sr-chk".into(),
+                    ca_file: None,
+                    credentials: CredentialMode::Static,
+                    grant_bindings: Vec::new(),
+                },
+                evidence_destination: None,
+                backup_id: point.backup_id.clone(),
+                // Relative to the destination's prefix, as the controller renders it.
+                manifest_key: format!("{}/manifest.json", point.backup_id),
+                checks: Vec::new(),
+                skip_checks: Vec::new(),
+                capability_checks: vec![CheckId::TargetSchemas],
+            })),
+            CheckId::TargetSchemas,
+        )
+    };
+    let importable = schemas();
+    assert_eq!(
+        (importable.state, importable.code),
+        (CheckState::Ready, CheckCode::SchemasImportable),
+        "{}",
+        importable.message
+    );
+    assert!(
+        importable
+            .message
+            .contains("will be imported with their source IDs")
+            && !importable.message.contains(" 0 will be imported"),
+        "the preview names what will be imported: {}",
+        importable.message
+    );
+    // The control: one of the point's IDs taken in the target by another
+    // schema, as SR-6 does it.
+    let (_, framed_id) = src
+        .ids
+        .iter()
+        .find(|(subject, _)| subject.ends_with("-audit-value"))
+        .cloned()
+        .expect("the JSON subject, whose ID the audit records carry");
+    target_import(
+        &format!("{n}-squat"),
+        1,
+        framed_id,
+        "AVRO",
+        &json!({"type":"record","name":"Squat","fields":[{"name":"s","type":"string"}]})
+            .to_string(),
+        json!([]),
+    );
+    let conflict = schemas();
+    assert_eq!(
+        (conflict.state, conflict.code),
+        (CheckState::NotReady, CheckCode::SchemaConflict),
+        "{}",
+        conflict.message
+    );
 }

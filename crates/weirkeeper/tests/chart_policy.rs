@@ -95,7 +95,10 @@ fn a_configured_render_parses_and_keeps_its_attestation_and_allowlist() {
     assert_eq!(parsed.discovery.visibility_attestations.len(), 1);
     let att = &parsed.discovery.visibility_attestations[0];
     assert_eq!(att.id, "att-orders-prod");
-    assert_eq!(att.namespace, "logweir-system", "the release namespace: every KafkaCluster is there");
+    assert_eq!(
+        att.namespace, "logweir-system",
+        "the release namespace: every KafkaCluster is there"
+    );
     assert_eq!(att.kafka_cluster, "source");
     assert_eq!(att.principal, "User:backup");
     assert!(
