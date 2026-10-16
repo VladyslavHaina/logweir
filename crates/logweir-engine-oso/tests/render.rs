@@ -33,8 +33,7 @@ fn plan() -> RestorePlan {
         window_floor_source: WindowFloorSource::ArchiveManifest,
         source_partitions: Default::default(),
         default_replication_factor: 1,
-        checkpoint_state: "/var/lib/logweir/01J9X/checkpoint.json".into(),
-        checkpoint_interval_secs: 30,
+        rate_limit_bytes_per_sec: None,
         offset_report: "/var/lib/logweir/01J9X/offsets.json".into(),
     }
 }
@@ -204,12 +203,12 @@ fn forbidden_keys_are_unreachable_across_every_storage_variant_and_plan_shape() 
     for storage in storages {
         for topic_mapping in &topic_mappings {
             for default_replication_factor in [0i16, 1, -1, 5] {
-                for checkpoint_interval_secs in [0u64, 30] {
+                for rate_limit_bytes_per_sec in [None, Some(1_048_576u64)] {
                     let mut p = plan();
                     p.storage = storage.clone();
                     p.topic_mapping = topic_mapping.clone();
                     p.default_replication_factor = default_replication_factor;
-                    p.checkpoint_interval_secs = checkpoint_interval_secs;
+                    p.rate_limit_bytes_per_sec = rate_limit_bytes_per_sec;
 
                     for doc in [
                         render_restore::render(&p)
@@ -237,7 +236,7 @@ fn forbidden_keys_are_unreachable_across_every_storage_variant_and_plan_shape() 
 ///
 /// This test mutates ONE interpolation site at a time — `backup_id`, a
 /// bootstrap server, both sides of `topic_mapping`, every storage field
-/// across all four backends, `checkpoint_state`, `run_id`, and
+/// across all four backends, `offset_report`, `run_id`, and
 /// `triggered_by` — to the adversarial payload `"a\ndry_run: true"` (a raw
 /// newline followed by text that reads as a `dry_run: true` key-line at
 /// column 0), holding every other field at `plan()`'s benign default, and
@@ -282,10 +281,10 @@ fn forbidden_keys_survive_adversarial_string_content() {
         .collect();
     cases.push(("topic_mapping value", p, "run-id", None));
 
-    // checkpoint_state path
+    // offset_report path
     let mut p = plan();
-    p.checkpoint_state = PAYLOAD.into();
-    cases.push(("checkpoint_state", p, "run-id", None));
+    p.offset_report = PAYLOAD.into();
+    cases.push(("offset_report", p, "run-id", None));
 
     // every S3 field. The REGION is not interpolated at all when it is not a
     // region name: such a document is refused before rendering
@@ -397,7 +396,40 @@ fn restore_yaml_sets_both_levers_and_create_topics() {
     assert!(doc.contains("dry_run_check_segments: true"));
     assert!(doc.contains("create_topics: false"));
     assert!(doc.contains("default_replication_factor: 1"));
-    assert!(doc.contains("checkpoint_interval_secs: 30"));
+}
+
+/// **IR-4 (PROD-07.2, 07.1-I4), the render half.** The restore document names
+/// no engine checkpoint at any value: Logweir never resumes, and a checkpoint
+/// at a stable path would let a second execution skip segments it never wrote.
+/// KILLS: a renderer that writes `checkpoint_state` or its interval again.
+#[test]
+fn the_restore_document_names_no_checkpoint() {
+    let doc = render_restore::render(&plan()).unwrap();
+    for key in ["checkpoint_state", "checkpoint_interval_secs"] {
+        assert!(!doc.contains(key), "{key} rendered:\n{doc}");
+    }
+}
+
+/// **PROD-00.3h.** The plan's byte-rate limit is rendered into the restore
+/// block, once, as the plan states it; a plan without one renders no key, so
+/// its document keeps its bytes.
+/// KILLS: the limit dropped (the engine paces nothing), or a key rendered for
+/// a plan that states none.
+#[test]
+fn the_byte_rate_limit_is_rendered_only_when_the_plan_states_one() {
+    let none = render_restore::render(&plan()).unwrap();
+    assert!(!none.contains("rate_limit_bytes_per_sec"), "{none}");
+    let mut p = plan();
+    p.rate_limit_bytes_per_sec = Some(5_000_000);
+    let doc = render_restore::render(&p).unwrap();
+    assert_eq!(
+        doc.matches("\n  rate_limit_bytes_per_sec: 5000000\n")
+            .count(),
+        1,
+        "{doc}"
+    );
+    let restore_block = &doc[doc.find("\nrestore:\n").expect("a restore block")..];
+    assert!(restore_block.contains("rate_limit_bytes_per_sec"), "{doc}");
 }
 
 /// **Guard G-TS**, the render half. The rendered restore document creates NO

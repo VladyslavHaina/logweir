@@ -187,13 +187,15 @@ cargo deny --locked --manifest-path "$engine_src/Cargo.toml" check licenses advi
 # in CI). Patch 0002's: the manifest merge, and the backup loop's save order,
 # keep every topic's replication factor. Patch 0003's (PROD-00.3g): the restore
 # checkpoint's hash leaves out the run's paths and map order, and a due
-# checkpoint is saved. It builds in the debug profile of target/engine-build,
-# beside `scripts/engine-source.sh build`'s optimised one (this script never
-# builds an optimised profile).
+# checkpoint is saved. OD-23's 0004 to 0007: committed-only capture, idempotent
+# produce, header lists, one byte-rate limit. It builds in the debug profile of
+# target/engine-build, beside `scripts/engine-source.sh build`'s optimised one
+# (this script never builds an optimised profile).
 engine_tests="target/engine-patch-oracle.log"
 CARGO_TARGET_DIR="$PWD/target/engine-build" cargo test --locked \
   --manifest-path "$engine_src/Cargo.toml" -p kafka-backup-core --lib \
   -- merge_manifests manifest_persistence restore_config_hash save_checkpoint_if_due \
+     kafka::fetch kafka::produce kafka::header_list byte_rate_limit \
   > "$engine_tests" 2>&1 \
   || { cat "$engine_tests" >&2; echo "ci-check: an engine patch's oracle failed" >&2; exit 1; }
 for oracle in backup::engine::tests::test_merge_manifests_updates_replication_factor \
@@ -201,7 +203,14 @@ for oracle in backup::engine::tests::test_merge_manifests_updates_replication_fa
               backup::engine::tests::test_manifest_persistence_keeps_every_topics_replication_factor \
               restore::engine::tests::restore_config_hash_ignores_the_checkpoint_and_report_paths \
               restore::engine::tests::restore_config_hash_does_not_depend_on_map_iteration_order \
-              restore::helpers::tests::save_checkpoint_if_due_honours_the_interval; do
+              restore::helpers::tests::save_checkpoint_if_due_honours_the_interval \
+              kafka::fetch::tests::an_aborted_transaction_and_its_marker_are_dropped_and_the_offset_advances \
+              kafka::fetch::tests::only_the_aborted_producers_batches_inside_its_transaction_are_dropped \
+              kafka::produce::tests::a_resend_before_the_acknowledgement_is_the_same_batch \
+              kafka::produce::tests::the_sequence_advances_per_partition_only_when_acknowledged \
+              kafka::header_list::tests::repeated_header_keys_survive_an_encode_and_a_decode \
+              kafka::fetch::tests::repeated_header_keys_are_kept_in_order \
+              restore::helpers::tests::the_byte_rate_limit_paces_the_whole_restore; do
   grep -q "^test $oracle \.\.\. ok$" "$engine_tests" \
     || { cat "$engine_tests" >&2; echo "ci-check: the engine patch oracle $oracle did not run and pass" >&2; exit 1; }
 done

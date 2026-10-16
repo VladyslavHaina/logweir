@@ -286,8 +286,18 @@ fn to_rec(m: &BorrowedMessage<'_>) -> Rec {
 /// reports, at `iso`. Ends on the partition-EOF event, never on a quiet poll,
 /// so a slow broker cannot shorten a reading.
 pub fn read_partition(topic: &str, partition: i32, iso: Isolation) -> Result<Vec<Rec>, String> {
+    read_partition_on(&bootstrap(), topic, partition, iso)
+}
+
+/// [`read_partition`] on another cluster's bootstrap.
+pub fn read_partition_on(
+    boot: &str,
+    topic: &str,
+    partition: i32,
+    iso: Isolation,
+) -> Result<Vec<Rec>, String> {
     let c: BaseConsumer = ClientConfig::new()
-        .set("bootstrap.servers", bootstrap())
+        .set("bootstrap.servers", boot)
         .set("group.id", format!("recsem-read-{}", nonce()))
         .set("enable.auto.commit", "false")
         .set("enable.auto.offset.store", "false")
@@ -334,9 +344,19 @@ pub fn read_partition(topic: &str, partition: i32, iso: Isolation) -> Result<Vec
 
 /// [`read_partition`] over partitions `0..partitions`.
 pub fn read_topic(topic: &str, partitions: i32, iso: Isolation) -> Result<Vec<Rec>, String> {
+    read_topic_on(&bootstrap(), topic, partitions, iso)
+}
+
+/// [`read_topic`] on another cluster's bootstrap.
+pub fn read_topic_on(
+    boot: &str,
+    topic: &str,
+    partitions: i32,
+    iso: Isolation,
+) -> Result<Vec<Rec>, String> {
     let mut all = Vec::new();
     for p in 0..partitions {
-        all.extend(read_partition(topic, p, iso)?);
+        all.extend(read_partition_on(boot, topic, p, iso)?);
     }
     Ok(all)
 }

@@ -1,0 +1,221 @@
+Reason: PROD-00.3h (C12), restore.rate_limit_bytes_per_sec is parsed and validated but paces nothing; one byte-rate limit on the whole restore, at both produce sites; oracle: the ByteRateLimiter unit tests in this patch and record_semantics' byte-rate row (EN-4)
+
+diff --git a/crates/kafka-backup-core/src/restore/engine.rs b/crates/kafka-backup-core/src/restore/engine.rs
+index 6a82a14..ccdccd7 100644
+--- a/crates/kafka-backup-core/src/restore/engine.rs
++++ b/crates/kafka-backup-core/src/restore/engine.rs
+@@ -164,6 +164,9 @@ pub struct RestoreEngine {
+     offset_mapping: Arc<Mutex<OffsetMapping>>,
+     progress_tx: broadcast::Sender<RestoreProgress>,
+     target_config: Option<crate::config::KafkaConfig>,
++    /// `restore.rate_limit_bytes_per_sec`, shared by every partition task
++    /// (Logweir patch 0007).
++    byte_limiter: Arc<super::helpers::ByteRateLimiter>,
+ }
+ 
+ #[derive(Debug, Clone, serde::Deserialize)]
+@@ -340,8 +343,16 @@ impl RestoreEngine {
+         let (shutdown_tx, _) = broadcast::channel(1);
+         let (progress_tx, _) = broadcast::channel(100);
+ 
++        let byte_limiter = Arc::new(super::helpers::ByteRateLimiter::new(
++            config
++                .restore
++                .as_ref()
++                .and_then(|r| r.rate_limit_bytes_per_sec),
++        ));
++
+         Ok(Self {
+             config,
++            byte_limiter,
+             router: Arc::new(tokio::sync::RwLock::new(None)), // Router is created during run() since it requires async
+             storage,
+             metrics,
+@@ -1239,6 +1250,7 @@ impl RestoreEngine {
+                 Arc::clone(&self.kafka_circuit_breaker),
+                 Arc::clone(&self.storage_circuit_breaker),
+                 Arc::clone(&self.checkpoint),
++                Arc::clone(&self.byte_limiter),
+             )
+             .await;
+         }
+@@ -1318,6 +1330,7 @@ impl RestoreEngine {
+                 storage_cb: Arc::clone(&self.storage_circuit_breaker),
+                 checkpoint: Arc::clone(&self.checkpoint),
+                 offset_mapping: Arc::clone(&self.offset_mapping),
++                byte_limiter: Arc::clone(&self.byte_limiter),
+             };
+ 
+             handles.push(tokio::spawn(async move {
+@@ -1679,6 +1692,7 @@ struct RestorePartitionContext {
+     storage_cb: Arc<CircuitBreaker>,
+     checkpoint: Arc<Mutex<Option<RestoreCheckpoint>>>,
+     offset_mapping: Arc<Mutex<OffsetMapping>>,
++    byte_limiter: Arc<super::helpers::ByteRateLimiter>,
+ }
+ 
+ impl RestorePartitionContext {
+@@ -1849,6 +1863,9 @@ impl RestorePartitionContext {
+                     let delay = Duration::from_secs_f64(batch.len() as f64 / rate as f64);
+                     tokio::time::sleep(delay).await;
+                 }
++                self.byte_limiter
++                    .reserve(super::helpers::key_value_bytes(batch))
++                    .await;
+ 
+                 // Produce using router (automatically routes to partition leader)
+                 match self
+diff --git a/crates/kafka-backup-core/src/restore/helpers.rs b/crates/kafka-backup-core/src/restore/helpers.rs
+index 334280a..6efc41c 100644
+--- a/crates/kafka-backup-core/src/restore/helpers.rs
++++ b/crates/kafka-backup-core/src/restore/helpers.rs
+@@ -177,9 +177,88 @@ pub async fn save_checkpoint_if_due(
+     Ok(true)
+ }
+ 
++/// `restore.rate_limit_bytes_per_sec` (Logweir patch 0007, PROD-00.3h, C12):
++/// one limit on the WHOLE restore, shared by every partition task. Each batch
++/// reserves its key and value bytes on one next-allowed instant before it is
++/// produced and waits for its turn, so the restore's byte rate stays at the
++/// limit however many partitions write at once. `None` limits nothing.
++#[derive(Debug)]
++pub(crate) struct ByteRateLimiter {
++    bytes_per_sec: Option<u64>,
++    next_allowed: Mutex<Option<tokio::time::Instant>>,
++}
++
++impl ByteRateLimiter {
++    pub(crate) fn new(bytes_per_sec: Option<u64>) -> Self {
++        Self {
++            bytes_per_sec,
++            next_allowed: Mutex::new(None),
++        }
++    }
++
++    /// Wait until `bytes` may be produced.
++    pub(crate) async fn reserve(&self, bytes: u64) {
++        let Some(rate) = self.bytes_per_sec.filter(|r| *r > 0) else {
++            return;
++        };
++        let start = {
++            let mut next = self.next_allowed.lock().await;
++            let now = tokio::time::Instant::now();
++            let start = next.map_or(now, |n| n.max(now));
++            *next = Some(start + std::time::Duration::from_secs_f64(bytes as f64 / rate as f64));
++            start
++        };
++        tokio::time::sleep_until(start).await;
++    }
++}
++
++/// Key and value bytes of `records`, what `rate_limit_bytes_per_sec` counts.
++pub(crate) fn key_value_bytes(records: &[BackupRecord]) -> u64 {
++    records
++        .iter()
++        .map(|r| {
++            r.key.as_ref().map_or(0, |k| k.len()) as u64
++                + r.value.as_ref().map_or(0, |v| v.len()) as u64
++        })
++        .sum()
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    /// Two partition tasks share one limit: 10 batches of 1,000 bytes each at
++    /// 1,000 bytes/s take 9 s in all (the first goes at once), not 4.5 s as
++    /// two per-task limits would allow.
++    #[tokio::test(start_paused = true)]
++    async fn the_byte_rate_limit_paces_the_whole_restore() {
++        let limiter = std::sync::Arc::new(ByteRateLimiter::new(Some(1_000)));
++        let t0 = tokio::time::Instant::now();
++        let tasks: Vec<_> = (0..2)
++            .map(|_| {
++                let l = limiter.clone();
++                tokio::spawn(async move {
++                    for _ in 0..5 {
++                        l.reserve(1_000).await;
++                    }
++                })
++            })
++            .collect();
++        for t in tasks {
++            t.await.unwrap();
++        }
++        assert_eq!(t0.elapsed().as_secs(), 9);
++    }
++
++    #[tokio::test(start_paused = true)]
++    async fn no_byte_rate_limit_waits_for_nothing() {
++        let limiter = ByteRateLimiter::new(None);
++        let t0 = tokio::time::Instant::now();
++        for _ in 0..100 {
++            limiter.reserve(1 << 30).await;
++        }
++        assert_eq!(t0.elapsed(), std::time::Duration::ZERO);
++    }
+     use crate::metrics::PerformanceMetrics;
+     use crate::segment::{SegmentWriter, SegmentWriterConfig};
+     use crate::storage::MemoryBackend;
+diff --git a/crates/kafka-backup-core/src/restore/repartition.rs b/crates/kafka-backup-core/src/restore/repartition.rs
+index 3042d32..3a09bfd 100644
+--- a/crates/kafka-backup-core/src/restore/repartition.rs
++++ b/crates/kafka-backup-core/src/restore/repartition.rs
+@@ -80,7 +80,7 @@ impl Partitioner {
+ /// through bounded channels, with the `Partitioner` routing each record
+ /// to the correct channel based on its key.
+ #[allow(clippy::too_many_arguments)]
+-pub async fn restore_topic_repartitioned(
++pub(crate) async fn restore_topic_repartitioned(
+     topic_backup: &TopicBackup,
+     target_topic: &str,
+     repart_config: &TopicRepartitioning,
+@@ -92,6 +92,7 @@ pub async fn restore_topic_repartitioned(
+     kafka_cb: Arc<CircuitBreaker>,
+     storage_cb: Arc<CircuitBreaker>,
+     checkpoint: Arc<Mutex<Option<RestoreCheckpoint>>>,
++    byte_limiter: Arc<super::helpers::ByteRateLimiter>,
+ ) -> Result<TopicRestoreReport> {
+     let num_target_partitions = repart_config.target_partitions;
+     info!(
+@@ -212,6 +213,7 @@ pub async fn restore_topic_repartitioned(
+         let health = Arc::clone(&health);
+         let metrics = Arc::clone(&metrics);
+         let options = options.clone();
++        let byte_limiter = byte_limiter.clone();
+ 
+         writer_handles.push(tokio::spawn(async move {
+             run_writer(
+@@ -224,6 +226,7 @@ pub async fn restore_topic_repartitioned(
+                 &health,
+                 &metrics,
+                 &options,
++                &byte_limiter,
+             )
+             .await
+         }));
+@@ -392,6 +395,7 @@ async fn run_writer(
+     health: &HealthCheck,
+     metrics: &PerformanceMetrics,
+     options: &RestoreOptions,
++    byte_limiter: &super::helpers::ByteRateLimiter,
+ ) -> Result<PartitionRestoreReport> {
+     let batch_size = options.produce_batch_size;
+     let mut total_records = 0u64;
+@@ -422,13 +426,8 @@ async fn run_writer(
+             tokio::time::sleep(delay).await;
+         }
+ 
+-        let batch_bytes: u64 = batch
+-            .iter()
+-            .map(|r| {
+-                r.key.as_ref().map(|k| k.len()).unwrap_or(0) as u64
+-                    + r.value.as_ref().map(|v| v.len()).unwrap_or(0) as u64
+-            })
+-            .sum();
++        let batch_bytes = super::helpers::key_value_bytes(&batch);
++        byte_limiter.reserve(batch_bytes).await;
+ 
+         match router
+             .produce(

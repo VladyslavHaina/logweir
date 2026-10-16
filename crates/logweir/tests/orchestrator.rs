@@ -1492,14 +1492,13 @@ fn the_receipt_names_the_key_the_scorecard_was_actually_put_at() {
     );
 }
 
-/// `build_plan` puts the restore checkpoint at
-/// `temp_dir()/logweir-<run_id>/checkpoint.json`, and the engine does not
-/// create the parent, so without it `kafka-backup restore` exits 1 with
-/// `IO error: No such file or directory (os error 2)` on every real run while
-/// every double passes. This asserts the directory the plan names exists once
-/// the drill has run.
+/// `build_plan` puts the engine's offset report at
+/// `temp_dir()/logweir-<run_id>/offsets.json`, and the engine does not create
+/// the parent; its report write is only a warning, so without it a real run
+/// signs no `evidence.offset_report_key` while every double passes. This
+/// asserts the directory the plan names exists once the drill has run.
 #[test]
-fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
+fn the_offset_report_directory_exists_after_a_drill_runs() {
     let f = fixtures::orchestrator_args_against_fixture_engine();
     let dir = std::env::temp_dir().join(format!("logweir-{}", f.run_id));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1507,7 +1506,7 @@ fn the_restore_checkpoint_directory_exists_after_a_drill_runs() {
     execute_with(&f.args, &f.run_id, &f.ctx).expect("fixture drill passes");
     assert!(
         dir.is_dir(),
-        "{} was never created, so the engine's `restore.checkpoint_state` has no \
+        "{} was never created, so the engine's `restore.offset_report` has no \
          parent directory to write into",
         dir.display()
     );

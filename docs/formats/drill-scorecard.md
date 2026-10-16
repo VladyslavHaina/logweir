@@ -794,8 +794,9 @@ Since FX-23 a sampled verification makes three checks more:
   it. When they do run backwards, a record older than every segment's first
   record was dropped by every restore of that archive until PROD-01.1b
   ([the limitation](../stability.md#out-of-order-timestamps-inside-a-segment)),
-  and the per-partition bound failed that restore; so does a duplicate from
-  the engine's non-idempotent producer. Failing is the safer verdict.
+  and the per-partition bound failed that restore; so does a duplicate (a
+  second execution into a target, or an engine build before 5, whose producer
+  was not idempotent). Failing is the safer verdict.
 - **Phase 7 reads the engine's offset report** — streaming, keeping only its
   partition entries — and fails a restore whose report has no entry for a
   mapped partition the manifest proves holds records in the window. The report

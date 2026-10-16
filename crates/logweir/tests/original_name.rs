@@ -84,6 +84,7 @@ fn plan(owners: Option<Vec<DeclaredOwner>>, owner_path: bool) -> DrillSpec {
             window_start: None,
             partitions: BTreeMap::new(),
             allow_transaction_markers: false,
+            rate_limit_bytes_per_sec: None,
         },
         objectives: ObjectivesSpec {
             rto_seconds: None,

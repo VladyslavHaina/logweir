@@ -325,10 +325,12 @@ A loss that happened when the archive was written is in both, so the drill
 cannot see it. With engine 0.21.0, and unchanged on 0.23.3 (PROD-01.1 record
 §11):
 
-- **Transactions.** The backup reads uncommitted data, so aborted and open
-  transactions' records and their markers are restored as ordinary records,
-  visible even under `read_committed`; the drill passes. Since PROD-01.1a an
-  archive holding markers is refused unless the plan states
+- **Transactions.** Since engine build 5 a backup captures committed records
+  only, and the restore writes exactly those. An archive an earlier build wrote
+  read uncommitted data, so aborted and open transactions' records and their
+  markers are restored as ordinary records, visible even under
+  `read_committed`; the drill passes. Since PROD-01.1a an archive holding
+  markers is refused unless the plan states
   `restore.allow_transaction_markers: true`, and `sample.coverage_note` says so
   ([details](stability.md#an-archive-holding-transaction-markers-is-refused-unless-the-plan-allows-it));
   a transaction open at backup time leaves no marker.
@@ -336,10 +338,9 @@ cannot see it. With engine 0.21.0, and unchanged on 0.23.3 (PROD-01.1 record
   the restore writes it as `CreateTime`, so restored timestamps differ and the
   drill passes. Selecting by time is refused or labelled
   ([below](#a-point-in-time-restore-of-a-logappendtime-topic-is-refused-or-labelled)).
-- **Repeated header keys.** Only one copy is archived and restored, at the first
-  copy's position with the last copy's value; undetected. A record that already
-  carried `x-original-offset` keeps only the backup's, and a drill sampling it
-  fails.
+- **Repeated header keys.** Since engine build 5 every copy is archived and
+  restored in order. In an archive an earlier build wrote only one copy is
+  kept, at the first copy's position with the last copy's value; undetected.
 - **Out-of-order timestamps.** The engine selects segments by their first and
   last timestamps. Since PROD-01.1b the runner reads each record's own
   timestamp first: the window starts at the oldest record, and a window whose
@@ -349,8 +350,9 @@ cannot see it. With engine 0.21.0, and unchanged on 0.23.3 (PROD-01.1 record
 
 Order within a partition, keys, values, null versus empty, header values,
 tombstones and a compacted source's records at backup time are preserved. A
-broker outage or lost acknowledgement during a restore can leave duplicates and
-a partial target; every measured case exited `1` and signed nothing
+broker outage during a restore can leave a partial target (since engine build
+5 a lost acknowledgement no longer duplicates a batch); every measured case
+exited `1` and signed nothing
 ([stability.md](stability.md#a-broker-outage-during-a-restore-can-leave-a-partial-target-with-duplicates);
 measurements in
 [`to-do/decisions/PROD-01.1-record-semantics.md`](to-do/decisions/PROD-01.1-record-semantics.md)).

@@ -474,13 +474,14 @@ pub struct RestorePlan {
     /// distinct subset (`crate::replay_selection::ReplaySelection::engine_runs`).
     pub source_partitions: BTreeMap<String, Vec<i32>>,
     pub default_replication_factor: i16,
-    pub checkpoint_state: std::path::PathBuf,
-    pub checkpoint_interval_secs: u64,
+    /// `restore.rate_limit_bytes_per_sec` from the spec (PROD-00.3h): one limit
+    /// on the key and value bytes the whole restore produces per second,
+    /// rendered into the engine's restore block. `None` limits nothing.
+    pub rate_limit_bytes_per_sec: Option<u64>,
     /// Where the engine writes its offset-mapping report
     /// [U:crates/kafka-backup-core/src/config.rs:857-858]. A FIELD OF THE PLAN,
-    /// like `checkpoint_state`, so the path is a function of the approved
-    /// bytes; `--offset-report-out` sets it, else `offsets.json` in the per-run
-    /// workdir.
+    /// so the path is a function of the approved bytes; `--offset-report-out`
+    /// sets it, else `offsets.json` in the per-run workdir.
     ///
     /// **Pod-local, so phase 8 uploads it** to
     /// `logweir/drills/<run_id>.offsets.json`, recorded with its digest in the

@@ -60,8 +60,7 @@ fn plan(dir: &Path, topics: &[(&str, Option<&[i32]>)]) -> RestorePlan {
             .filter_map(|(t, ps)| ps.map(|ps| (t.to_string(), ps.to_vec())))
             .collect(),
         default_replication_factor: 1,
-        checkpoint_state: dir.join("checkpoint.json"),
-        checkpoint_interval_secs: 30,
+        rate_limit_bytes_per_sec: None,
         offset_report: dir.join("offsets.json"),
     }
 }

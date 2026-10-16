@@ -597,19 +597,31 @@ fails when that changes.
 
 ### A crashed restore is not resumable in v0.1
 
-The rendered `restore.checkpoint_state` path is **pod-local and is never
-uploaded**, so a restore that dies mid-run re-runs from phase 0. Since engine
-build 3 the engine also saves it inside a topic every
-`checkpoint_interval_secs`; it is still per run and never read.
+Logweir renders no engine checkpoint (`restore.checkpoint_state`), so the
+engine keeps none and a restore that dies mid-run is never resumed: a new run
+starts from phase 0.
 
 ### An archive holding transaction markers is refused unless the plan allows it
 
-The pinned engine captures with `READ_UNCOMMITTED` and restores every archived
-record non-transactionally, so a restored transactional topic holds aborted
-records, records of transactions open at backup time, and one record per commit
-or abort marker, all visible to every consumer
+Since engine build 5 (PROD-00.3a, patch 0004) a backup captures **committed
+records only**: the engine fetches with `READ_COMMITTED`, ends each partition at
+its last stable offset, skips the commit and abort markers and drops the
+records of aborted transactions. A transaction still open at backup time is
+not captured (the broker holds the last stable offset back until it ends, at
+most `transaction.max.timeout.ms`, 15 minutes by default); the next backup
+captures it if it commits. Such an archive holds no marker, and a restore of it
+needs no override; the restore writes the committed records, without
+transactions (`e2e/tests/record_semantics.rs::transactional_topic_committed_input_versus_restored_output`).
+A source whose named partitions hold only aborted records gives an archive
+with no segment, which `logweir backup run` refuses exit 1 (it cannot prove the
+source empty).
+
+An archive written by an earlier engine build captured with
+`READ_UNCOMMITTED`, so a restore of it holds aborted records, records of
+transactions open at backup time, and one record per commit or abort marker,
+all visible to every consumer
 ([decision record §2.1](to-do/decisions/PROD-01.1-record-semantics.md#21-transactions)).
-Logweir does not claim transactional recovery. Since PROD-01.1a a restore, before
+Since PROD-01.1a a restore, before
 it creates anything, counts the records in its window's segments and every
 later segment that are shaped like a marker (key `00 00 00 00` or
 `00 00 00 01`, a 6-byte value starting `00 00`, no header but
@@ -684,25 +696,32 @@ clocks**, not by the broker's append time, which needs an archive that keeps it
 is listed under `source.time_basis.not_recorded`, never read as `CreateTime`
 ([the plan field](formats/drill-spec.md#restoretime_basis-fx-8)).
 
-### A repeated header key keeps one copy
+### Repeated header keys are kept
 
-The pinned engine holds a record's headers as a map, so a header key repeated
-in one record is archived and restored once — at the first copy's position,
-with the last copy's value — and the drill does not detect it. A record that
-already carried `x-original-offset` keeps only the backup's own, and a drill
-that samples such a record fails
-(`e2e/tests/record_semantics.rs::keys_nulls_tombstones_and_duplicate_headers`;
-[decision record §2.4](to-do/decisions/PROD-01.1-record-semantics.md#24-keys-nulls-tombstones-and-headers)).
+Since engine build 5 (PROD-00.3e, patch 0006) every header of a record is
+archived and restored in order, each copy of a repeated key included, and a
+record that already carried `x-original-offset` keeps it beside the backup's
+own; verification keys by the last
+(`e2e/tests/record_semantics.rs::keys_nulls_tombstones_and_duplicate_headers`).
+An archive written by an earlier build holds a repeated key once, at the first
+copy's position with the last copy's value
+([decision record §2.4](to-do/decisions/PROD-01.1-record-semantics.md#24-keys-nulls-tombstones-and-headers)).
 
 ### A broker outage during a restore can leave a partial target with duplicates
 
-The engine resends a produce whose acknowledgement it did not receive, and does
-not produce idempotently, so a lost acknowledgement duplicates that batch. An
+The engine resends a produce whose acknowledgement it did not receive. Since
+engine build 5 (PROD-00.3d, patch 0005) a restore produces as one idempotent
+producer, so the resend carries the batch's sequence number and the broker
+discards the copy instead of appending it again
+(`e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`,
+on the `faultproxy` profile). The target principal needs `Write` on the topic,
+which implies `IdempotentWrite` since Kafka 3.0. A restore's producer is new
+each run, so a second execution into the same target still duplicates; phase 0
+refuses an existing target for that reason. An
 outage long enough for the broker to re-register can end the restore early,
 exit 1 with no scorecard, leaving the partial target; a stall past Logweir's
 20-second client timeout can fail a restore whose target is complete
-(`e2e/tests/record_semantics.rs::a_lost_produce_acknowledgement_during_restore`;
-[decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
+([decision record §5.1](to-do/decisions/PROD-01.1-record-semantics.md#51-a-lost-produce-acknowledgement--run)).
 A duplicated target that reaches phase 7 fails: complete coverage counts each
 repeated `x-original-offset`, and the sampled check fails a duplicate in the
 head it reads.
@@ -938,10 +957,13 @@ and G-PITR's fixture keeps its producers' timestamps. MSK stays
   a CA bundle: `debian:bookworm-slim` with `ca-certificates` and `libssl3`,
   never a musl or distroless base.
 - **Supported engine pin.** The images ship **Logweir's build of OSO 0.23.3**,
-  `kafka-backup 0.23.3+logweir.4` (PROD-00.2, OD-3; build 2 adds FX-21's patch
+  `kafka-backup 0.23.3+logweir.5` (PROD-00.2, OD-3; build 2 adds FX-21's patch
   0002, build 3 PROD-00.3g's patch 0003: the restore checkpoint is saved
   inside a topic when its interval is due, and hashed without the run's
-  paths; build 4 moves patch 0001's rustls to 0.23.46): OSO's 2026-10-07
+  paths; build 4 moves patch 0001's rustls to 0.23.46; build 5 adds OD-23's
+  patches 0004 to 0007: a backup captures committed records only, a restore
+  produces idempotently, repeated header keys survive both, and
+  `restore.rate_limit_bytes_per_sec` limits the whole restore): OSO's 2026-10-07
   release source (tag commit `afb160e7`) plus Logweir's patch folder, for
   linux/amd64 and linux/arm64 (`third_party/kafka-backup-build.env`).
   `doctor` accepts exactly that version, as a whole token, and names OSO's own 0.23.3 binary (image digest

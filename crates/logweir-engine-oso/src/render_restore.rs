@@ -38,8 +38,8 @@ pub struct RestoreRun {
 
 impl RestoreRun {
     /// `path` for this run: unchanged when the plan has one run, else
-    /// `<stem>.run-<index>.<ext>` beside it, so two runs never share an engine
-    /// checkpoint or an offset report.
+    /// `<stem>.run-<index>.<ext>` beside it, so two runs never share an
+    /// offset report.
     #[must_use]
     pub fn path(&self, path: &Path) -> PathBuf {
         if self.count <= 1 {
@@ -265,18 +265,17 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     // oldest per partition. THIS is the lever that yields blocking `errors`
     // (restore/engine.rs:567-568).
     s.push_str("  dry_run_check_segments: true\n");
-    // config.rs:840-846 — Option<PathBuf> plus a u64. Pod-local and never
-    // uploaded: a crashed restore is NOT resumable in v0.1.
-    // The path is a rendered string like any other and goes through
-    // `yaml_scalar` for the same reason.
-    s.push_str(&format!(
-        "  checkpoint_state: {}\n",
-        yaml_scalar_checked(&run.path(&plan.checkpoint_state).display().to_string())?
-    ));
-    s.push_str(&format!(
-        "  checkpoint_interval_secs: {}\n",
-        plan.checkpoint_interval_secs
-    ));
+    // NO `checkpoint_state` (PROD-07.2, 07.1-I4): Logweir never resumes a
+    // restore, and a checkpoint the engine finds at a stable path would make it
+    // skip segments a second execution has not written. Absent, the engine
+    // keeps no checkpoint.
+    //
+    // `rate_limit_bytes_per_sec` (PROD-00.3h): the plan's one byte-rate limit
+    // on the whole restore, an integer, so no `yaml_scalar`. Rendered only
+    // when the plan states one, so every other document keeps its bytes.
+    if let Some(rate) = plan.rate_limit_bytes_per_sec {
+        s.push_str(&format!("  rate_limit_bytes_per_sec: {rate}\n"));
+    }
     // config.rs:751-758 — "Time window start (epoch milliseconds) for PITR",
     // `pub time_window_start: Option<i64>`. An RFC3339 STRING is a serde TYPE
     // error, not an unknown key, so `Config::from_yaml_with_warnings` fails
@@ -353,8 +352,7 @@ pub fn render_run(plan: &RestorePlan, run: &RestoreRun) -> Result<String, Render
     s.push_str("  reset_consumer_offsets: false\n");
     s.push_str("  auto_consumer_groups: false\n");
     // The report itself: written, never applied (Global Constraint 35). It is
-    // a path like `checkpoint_state` above and goes through `yaml_scalar` for
-    // the same reason.
+    // a rendered path, so it goes through `yaml_scalar` like every string.
     s.push_str(&format!(
         "  offset_report: {}\n",
         yaml_scalar_checked(&run.path(&plan.offset_report).display().to_string())?

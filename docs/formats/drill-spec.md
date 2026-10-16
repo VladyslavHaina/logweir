@@ -1,7 +1,8 @@
-# The drill spec: `name`, `source.point`, `restore.time_basis`, `sample.coverage`, the replay selection, `target.topic_naming.original_name`, `target.teardown` and `notifications`
+# The drill spec: `name`, `source.point`, `restore.time_basis`, `restore.rate_limit_bytes_per_sec`, `sample.coverage`, the replay selection, `target.topic_naming.original_name`, `target.teardown` and `notifications`
 
 **This is not a complete drill-spec reference.** It documents the keys Task 14,
-decision D3, FX-8, PROD-08.1, PROD-11.1 and PROD-15.1 created or changed.
+decision D3, FX-8, PROD-00.3h, PROD-08.1, PROD-11.1 and PROD-15.1 created or
+changed.
 Every other key of a drill spec is described by the commented example at
 [`examples/drill.yaml`](../../examples/drill.yaml) and by
 [`crates/logweir-core/src/spec.rs`](../../crates/logweir-core/src/spec.rs).
@@ -222,6 +223,23 @@ the plan without refusing or labelling, which is the behaviour this field
 exists to end; the signed scorecard of such a run carries no
 `source.time_basis` block, and both readers print that the time basis was not
 recorded.
+
+---
+
+## `restore.rate_limit_bytes_per_sec` (PROD-00.3h)
+
+```yaml
+restore:
+  rate_limit_bytes_per_sec: 10485760   # 10 MiB/s
+```
+
+Optional: an integer of at least 1 (0 does not parse; leave the key out for no
+limit). It limits the key and value bytes the **whole restore** produces per
+second, every partition together, so a restore cannot saturate the target
+cluster. Rendered into the engine's restore block; it needs engine build
+`0.23.3+logweir.5` or later (an earlier build reads the key and paces nothing).
+A limit makes the restore take at least the archive's key and value bytes over
+the limit; mind the plan's `objectives.rto_seconds`.
 
 ---
 
