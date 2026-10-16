@@ -189,6 +189,12 @@ fn todays_gate_ids_are_each_mapped() {
 fn every_e2e_binary_is_in_an_e2e_gate() {
     let map = map();
     let mut in_gates = BTreeSet::new();
+    // A test another shard runs as a row: each row is left out (`except`) of
+    // the one shard that runs its binary whole, and each except is some
+    // shard's row, exactly once.
+    let mut rows: Vec<String> = Vec::new();
+    let mut excepted: Vec<String> = Vec::new();
+    let mut whole: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, gate) in gates(&map) {
         let tests = strings(&gate["tests"]);
         assert_eq!(
@@ -196,7 +202,31 @@ fn every_e2e_binary_is_in_an_e2e_gate() {
             !tests.is_empty(),
             "gate {name}: only e2e shards name e2e binaries, and every shard names some"
         );
+        for t in &tests {
+            whole.entry(t.clone()).or_default().push(name.clone());
+        }
+        for x in strings(&gate["except"]) {
+            let binary = x.split("::").next().unwrap().to_string();
+            assert!(
+                tests.contains(&binary),
+                "gate {name} excepts {x}, but does not run {binary}"
+            );
+            excepted.push(x);
+        }
+        rows.extend(strings(&gate["rows"]));
         in_gates.extend(tests);
+    }
+    rows.sort();
+    excepted.sort();
+    assert_eq!(
+        rows, excepted,
+        "every row is excepted where its binary runs whole"
+    );
+    let mut unique = rows.clone();
+    unique.dedup();
+    assert_eq!(unique, rows, "a row runs in one shard");
+    for (binary, shards) in &whole {
+        assert_eq!(shards.len(), 1, "{binary} runs whole in {shards:?}");
     }
     let mut binaries = BTreeSet::new();
     for entry in std::fs::read_dir(root().join("e2e/tests")).unwrap() {
@@ -293,11 +323,11 @@ const HIDDEN_READERS: &[(&str, &[&str])] = &[
     // the #[path] stack.rs and its include_str!
     (
         "e2e/tests/harness/stack.rs",
-        &["unit-core", "unit-logweir", "e2e-4"],
+        &["unit-core", "unit-logweir", "e2e-3"],
     ),
     (
         "e2e/compose/stack-lib.sh",
-        &["unit-core", "unit-logweir", "e2e-4"],
+        &["unit-core", "unit-logweir", "e2e-3"],
     ),
     ("examples/**", &["unit-logweir", "unit-weirkeeper"]),
     (
@@ -352,7 +382,10 @@ const HIDDEN_READERS: &[(&str, &[&str])] = &[
 
 /// Readers by e2e binary: a shard that runs the binary declares the file.
 const E2E_READERS: &[(&str, &str)] = &[
-    ("record_semantics", "console/src/pages/restores/plan.ts"),
+    (
+        "record_semantics::a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack",
+        "console/src/pages/restores/plan.ts",
+    ),
     (
         "schema_dependency",
         "console/scripts/emit-schema-dependency.mjs",
@@ -396,14 +429,29 @@ fn the_hidden_readers_are_each_declared_by_their_gates() {
     }
     for (name, gate) in gates(&map) {
         let tests = strings(&gate["tests"]);
-        if tests.is_empty() {
+        let rows = strings(&gate["rows"]);
+        let except = strings(&gate["except"]);
+        if tests.is_empty() && rows.is_empty() {
             continue;
         }
         // Every shard runs the harness, over the examples (harness/mod.rs).
         check(name, "e2e/tests/harness/**");
         check(name, "examples/**");
-        for (binary, pattern) in E2E_READERS {
-            if tests.iter().any(|t| t == binary) {
+        // A reader keyed by `<binary>` applies to a shard that runs any of the
+        // binary; one keyed by `<binary>::<test>` to the shard that runs that
+        // test: as a row, or within its binary unless it is excepted.
+        for (unit, pattern) in E2E_READERS {
+            let runs = match unit.split_once("::") {
+                None => {
+                    tests.iter().any(|t| t == unit)
+                        || rows.iter().any(|r| r.split("::").next() == Some(*unit))
+                }
+                Some((binary, _)) => {
+                    rows.iter().any(|r| r == unit)
+                        || (tests.iter().any(|t| t == binary) && !except.iter().any(|x| x == unit))
+                }
+            };
+            if runs {
                 check(name, pattern);
             }
         }
@@ -688,4 +736,47 @@ fn every_ci_job_is_a_gate_and_every_gate_a_job() {
         plumbing, not_gates,
         "[not_gates] must be exactly ci.yml's other jobs"
     );
+}
+
+/// FX-53: ci.yml's shard lists are the map's. A shard runs the filter its
+/// gate gives (`ci-gate.sh filter`), and stack_params' partition guard reads
+/// ci.yml's `tests`, so the two lists must be one: each matrix row's `tests`,
+/// `rows` and `except` equal its gate's.
+#[test]
+fn the_shard_lists_in_ci_yml_are_the_maps() {
+    let map = map();
+    let text = std::fs::read_to_string(root().join(".github/workflows/ci.yml")).unwrap();
+    let ci: serde_yaml::Value = serde_yaml::from_str(&text).unwrap();
+    let rows = ci["jobs"]["e2e"]["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("the e2e matrix");
+    let list = |v: &serde_yaml::Value| -> Vec<String> {
+        v.as_sequence()
+            .map(|s| s.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    };
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let n = serde_yaml::to_string(&row["shard"]).unwrap();
+        let gate = format!("e2e-{}", n.trim());
+        let declared = &map["gates"][&gate];
+        assert!(
+            declared.is_object(),
+            "ci.yml shard {gate} is no gate of the map"
+        );
+        for key in ["tests", "rows", "except"] {
+            assert_eq!(
+                list(&row[key]),
+                strings(&declared[key]),
+                "ci.yml shard {gate}'s `{key}` differs from ci/gates.toml's"
+            );
+        }
+        seen.insert(gate);
+    }
+    let shards: BTreeSet<String> = gates(&map)
+        .keys()
+        .filter(|g| g.starts_with("e2e-"))
+        .cloned()
+        .collect();
+    assert_eq!(seen, shards, "every e2e gate is a ci.yml shard");
 }

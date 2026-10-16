@@ -139,9 +139,7 @@ jobs:
           sudo systemctl restart docker
           docker info --format '{{json .RegistryConfig.Mirrors}}'
       - if: steps.work.outputs.any == 'true'
-        uses: dtolnay/rust-toolchain@1.89.0
-        with:
-          components: rustfmt, clippy
+        uses: ./.github/actions/rust-toolchain
       # ONE CACHE PER JOB KIND, SAVED BY main ONLY (FX-53). A pull request's
       # cache lives under refs/pull/<n>/merge, which no other run can read, so
       # saving it only filled the 10 GB limit; every run still restores main's.
@@ -292,7 +290,7 @@ jobs:
           path: .engine/kafka-backup
           key: ${{ steps.inputs.outputs.key }}
       - if: steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true'
-        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+        uses: ./.github/actions/rust-toolchain
       - if: steps.need.outputs.need == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: |
           read -ra packages <<< "$ENGINE_APT"
@@ -366,7 +364,7 @@ jobs:
           done
           echo "need=$need" | tee -a "$GITHUB_OUTPUT"
       - if: steps.need.outputs.need == 'true'
-        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+        uses: ./.github/actions/rust-toolchain
       - if: steps.need.outputs.need == 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -393,13 +391,21 @@ jobs:
           retention-days: 3
   # FX-41: the e2e suite in shards BY TEST BINARY, each on its own runner with
   # its own stack. Every file under e2e/tests/ is in exactly one shard's
-  # `tests`: e2e/tests/stack_params.rs fails otherwise, in `unit-small`. FX-53:
-  # seven shards, balanced longest-first on the per-binary nextest times of run
-  # 38810896223 (seconds of tests in each comment; `position_evidence`, alone,
-  # is the floor, and an eighth shard would not lower it but would take one
-  # more of GitHub Free's 20 concurrent jobs). A shard installs the `engine`
-  # job's engine and `build-e2e`'s CLI and archive, and compiles nothing; setup
-  # takes about 1.5 minutes before the first test. `publish` needs every shard.
+  # `tests`: e2e/tests/stack_params.rs fails otherwise, in `unit-small`. A
+  # shard runs the nextest filter ci/gates.toml gives its gate
+  # (`ci-gate.sh filter`): its `tests` less their `except`, plus its `rows`;
+  # gate_map_lint holds these lists equal to the map's.
+  #
+  # FX-53: seven shards. Every binary that reads files beyond the shards'
+  # common inputs (console code, crates/, scripts/, the workflows, the
+  # Dockerfiles, e2e/tests) runs in shard 7, about 100 s of tests, so such a
+  # change re-runs only it: the probes of PRs #67 (console) and #68 (one
+  # crate) re-ran two 12-minute shards and one. It takes record_semantics'
+  # console row, which shard 4 leaves out. Shards 1 to 6 are balanced
+  # longest-first on run 38810896223's nextest times (seconds in each
+  # comment). A shard installs the `engine` job's engine and `build-e2e`'s CLI
+  # and archive, and compiles nothing; setup takes about 1.5 minutes before
+  # the first test. `publish` needs every shard.
   e2e:
     needs: [changes, engine, build-e2e]
     if: needs.changes.outputs.code == 'true'
@@ -409,33 +415,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # 745
+          # 780
           - shard: 1
-            tests: [position_evidence]
-          # 670
+            tests: [position_evidence, pitr_boundary]
+          # 776
           - shard: 2
-            tests: [topic_identity, scram, consumer_group_snapshot, topic_configuration_apply,
-                    created_topics, fixture_retention, replication_factor_parity]
-          # 668
-          - shard: 3
-            tests: [auth_modes, clone_ttl, consumer_positions, compat_contract, stack_params,
-                    credential_binding_store, check_image, resume_semantics]
-          # 668, counting about 315 for the `--features e2e` rows under crates/
+            tests: [topic_identity, group_admin, mvp_demo, empty_capture, compat_contract,
+                    credential_binding_store, original_name, record_semantics_oracle]
+          # 774, counting about 315 for the `--features e2e` rows under crates/
           # and the compile they need (292 s cold in run 38810896223).
-          - shard: 4
+          - shard: 3
             crates: true
-            tests: [full_drill, topic_ids, backup_argv, pitr_boundary, fault_proxy, config_coverage]
-          # 667
+            tests: [switchover, scram, topic_ids, offset_side, replication_factor_parity, topic_budget]
+          # 711: record_semantics without its console row
+          - shard: 4
+            tests: [record_semantics, clone_ttl, consumer_positions, resume_semantics, fault_proxy]
+            except: [record_semantics::a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack]
+          # 773
           - shard: 5
-            tests: [switchover, group_admin, guards, offset_side, schema_dependency, stopped_restore,
-                    new_topic_parity]
-          # 665
+            tests: [replay_selection, guards, point_set_binding, backup_argv, config_coverage, stopped_restore]
+          # 773
           - shard: 6
-            tests: [replay_selection, point_set_binding, mvp_demo, empty_capture, smoke,
-                    topic_configuration, record_semantics_oracle]
-          # 663
+            tests: [auth_modes, full_drill, consumer_group_snapshot, topic_configuration_apply, smoke,
+                    new_topic_parity, topic_configuration]
+          # about 100: the binaries that read beyond the common inputs
           - shard: 7
-            tests: [record_semantics, original_name, topic_budget]
+            tests: [schema_dependency, stack_params, check_image, created_topics, fixture_retention]
+            rows: [record_semantics::a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack]
     env:
       AWS_EC2_METADATA_DISABLED: "true"
       # PROD-01.3's `auth_modes` rows need the `auth` profile's `kafka-auth`
@@ -444,7 +450,7 @@ jobs:
       # The broker is the default line `.env` pins, Kafka 4.3.1 (PROD-01.5a);
       # the legacy 3.7.1 line runs in engine-matrix.yml's weekly rows.
       COMPOSE_PROFILES: auth
-      # The crate rows' compile only (shard 4); the same as `build-e2e`'s, so
+      # The crate rows' compile only (shard 3); the same as `build-e2e`'s, so
       # it restores that cache.
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
@@ -494,9 +500,9 @@ jobs:
           else
             echo "${avail} GB free, at least ${FREE_DISK_NEED_GB} GB: nothing removed"
           fi
-      # The crate rows (shard 4) compile, so that shard alone sets up Rust.
+      # The crate rows (shard 3) compile, so that shard alone sets up Rust.
       - if: matrix.crates && steps.gate.outputs.hit != 'true'
-        uses: dtolnay/rust-toolchain@d77020bf130f2e8c39c025bf9c4c3a445fe2b9fa # 1.89.0
+        uses: ./.github/actions/rust-toolchain
       - if: matrix.crates && steps.gate.outputs.hit != 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -562,10 +568,12 @@ jobs:
       # as before. nextest fails a run that selects no test.
       - name: The shard's e2e test binaries
         if: steps.gate.outputs.hit != 'true'
-        run: >-
-          cargo-nextest nextest run --archive-file "$RUNNER_TEMP/e2e-build/e2e.tar.zst"
-          --workspace-remap "$GITHUB_WORKSPACE" --profile e2e
-          -E '(binary(=${{ join(matrix.tests, ') | binary(=') }})) & not test(a_pod_really_reaches_the_k8s_listener)'
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          filter="$(bash scripts/ci-gate.sh filter "e2e-${{ matrix.shard }}")"
+          echo "$filter"
+          cargo-nextest nextest run --archive-file "$RUNNER_TEMP/e2e-build/e2e.tar.zst" --workspace-remap "$GITHUB_WORKSPACE" --profile e2e -E "($filter) & not test(a_pod_really_reaches_the_k8s_listener)"
       # THE `--features e2e` ROWS UNDER crates/, after the suite: they rebuild
       # `target/debug/logweir` with the crate's `e2e` feature, which the suite
       # must not drive. Each crate's own test targets, so they compile here.

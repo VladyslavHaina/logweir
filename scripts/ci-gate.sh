@@ -15,6 +15,7 @@
 #   ci-gate.sh decide <gate> [force]            hash, then lookup unless forced;
 #                                               writes hit, proof-run and hash to
 #                                               $GITHUB_OUTPUT. Always exits 0.
+#   ci-gate.sh filter <e2e gate>                the nextest filterset the shard runs
 #   ci-gate.sh gates | unclaimed | describe     the map, the unclassified files,
 #                                               and the whole map as JSON (lint)
 #   ci-gate.sh match <pattern>…                 the tracked files each pattern names (JSON)
@@ -129,7 +130,12 @@ except ModuleNotFoundError:  # Python < 3.11: no TOML reader, so no hash
 
 SCHEME = "ci-gate/3"
 MAP = "ci/gates.toml"
-GATE_KEYS = {"covers", "job", "definition", "crates", "paths", "readers", "walks", "tests", "exists", "always"}
+GATE_KEYS = {"covers", "job", "definition", "crates", "paths", "readers", "walks", "tests", "rows", "except", "exists", "always"}
+# An e2e shard runs whole binaries (`tests`), single tests of another binary
+# (`rows`, `<binary>::<test>`), and leaves out of its own binaries the tests
+# another shard runs as rows (`except`, the same spelling). FX-53: the
+# console-reading row of record_semantics runs in a shard of its own.
+ROW = re.compile(r"^[a-z0-9_]+::[A-Za-z0-9_:]+$")
 # Pattern kinds that CLASSIFY a path. `walks` and `global` are inputs but say
 # nothing about who owns a file.
 CLASSIFYING = ("definition", "crates", "paths", "readers", "tests")
@@ -189,6 +195,10 @@ def load_map():
                 raise MapError(f"{MAP}: gate {name}: {key} must be a list of strings")
         if not isinstance(gate.get("always", False), bool):
             raise MapError(f"{MAP}: gate {name}: always must be true or false")
+        for key in ("rows", "except"):
+            for row in gate.get(key, []):
+                if not ROW.match(row):
+                    raise MapError(f"{MAP}: gate {name}: {key} entry {row!r} is not <binary>::<test>")
     if not isinstance(gmap.get("global", {}).get("paths"), list):
         raise MapError(f"{MAP}: [global].paths is missing")
     present = gmap["global"].get("exists", [])
@@ -326,7 +336,8 @@ def patterns(gmap, ws, name):
         "paths": list(gate.get("paths", [])),
         "readers": list(gate.get("readers", [])),
         "walks": list(gate.get("walks", [])),
-        "tests": [f"e2e/tests/{t}.rs" for t in gate.get("tests", [])],
+        "tests": [f"e2e/tests/{t}.rs" for t in gate.get("tests", [])]
+        + [f"e2e/tests/{r.split('::', 1)[0]}.rs" for r in gate.get("rows", [])],
         # PRESENCE only: the gate's commands look whether these exist (cargo's
         # target discovery, a walker's is_dir), not what they hold. The hash
         # covers their paths, not their contents.
@@ -702,6 +713,8 @@ def describe(gmap, ws, tree):
             "always": gate.get("always", False),
             "crates": gate.get("crates", []),
             "tests": gate.get("tests", []),
+            "rows": gate.get("rows", []),
+            "except": gate.get("except", []),
             "patterns": patterns(gmap, ws, name),
             "empty": empty,
             "files": sorted(files),
@@ -709,6 +722,29 @@ def describe(gmap, ws, tree):
         }
     out["unclaimed"] = sorted(unclaimed(gmap, ws, tree))
     return out
+
+
+def shard_filter(gmap, name):
+    """The nextest filterset an e2e shard runs: its whole binaries less their
+    `except` tests, and its `rows` (FX-53). ci.yml's shards and the traced run
+    both take it from here, so the map's lists are what runs."""
+    if name not in gmap["gates"]:
+        raise MapError(f"unknown gate {name!r}")
+    gate = gmap["gates"][name]
+    if not gate.get("tests") and not gate.get("rows"):
+        raise MapError(f"gate {name} names no e2e binary or row")
+    def row(r):
+        binary, test = r.split("::", 1)
+        return f"(binary(={binary}) & test(={test}))"
+    parts = []
+    if gate.get("tests"):
+        whole = " | ".join(f"binary(={t})" for t in gate["tests"])
+        excepted = gate.get("except", [])
+        if excepted:
+            whole = f"({whole}) & not ({' | '.join(row(x) for x in excepted)})"
+        parts.append(f"({whole})")
+    parts.extend(row(r) for r in gate.get("rows", []))
+    return " | ".join(parts)
 
 
 def main():
@@ -719,6 +755,9 @@ def main():
         gmap = load_map()
         if command == "gates":
             print("\n".join(gmap["gates"]))
+            return EXIT_OK
+        if command == "filter" and len(rest) == 1:
+            print(shard_filter(gmap, rest[0]))
             return EXIT_OK
         if command == "record" and len(rest) == 3:
             return record(gmap, rest[0], rest[1], rest[2])

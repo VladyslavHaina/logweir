@@ -1366,6 +1366,65 @@ fn every_nextest_override_names_a_test_that_exists() {
     assert!(seen >= 1, "the override list was not read");
 }
 
+/// FX-53: `just lint` is the local lint; CI runs it as two gates, `lint`
+/// (scripts/ci-check.sh `lint_code`) and the whole-tree scans in `docs`.
+/// Every line of the recipe runs in exactly one of them, so splitting it
+/// dropped nothing, and the whole-tree text scans are the `docs` ones.
+#[test]
+fn every_just_lint_line_runs_in_exactly_one_ci_gate() {
+    let justfile = std::fs::read_to_string(root().join("justfile")).unwrap();
+    let recipe: Vec<String> = justfile
+        .lines()
+        .skip_while(|l| l.trim_end() != "lint:")
+        .skip(1)
+        .take_while(|l| l.starts_with(' ') || l.starts_with('\t'))
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .collect();
+    assert!(
+        recipe.len() >= 10,
+        "the lint recipe was not read: {recipe:?}"
+    );
+    let script = std::fs::read_to_string(root().join("scripts/ci-check.sh")).unwrap();
+    let body = |name: &str| -> Vec<String> {
+        script
+            .split(&format!("\n{name}() {{\n"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("ci-check.sh has no {name}()"))
+            .split("\n}\n")
+            .next()
+            .unwrap()
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect()
+    };
+    let (code, docs) = (body("lint_code"), body("docs"));
+    for line in &recipe {
+        let n =
+            code.iter().filter(|l| *l == line).count() + docs.iter().filter(|l| *l == line).count();
+        assert_eq!(
+            n, 1,
+            "`just lint`'s `{line}` must run in exactly one CI gate (lint_code or docs)"
+        );
+    }
+    for scan in [
+        "./scripts/check-unverified-labels.sh",
+        "./scripts/check-unsafe-scope.sh",
+    ] {
+        assert!(
+            docs.iter().any(|l| l == scan),
+            "{scan} reads every document: it is the docs gate's"
+        );
+    }
+    for line in &code {
+        assert!(
+            recipe.contains(line),
+            "lint_code runs `{line}`, which `just lint` does not"
+        );
+    }
+}
+
 fn git(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")
         .args(args)

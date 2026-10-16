@@ -326,6 +326,63 @@ class Hash(unittest.TestCase):
         self.assertEqual(self.repo.hashes(), self.before)
 
 
+SHARDS = GATES + """
+[gates.shard-a]
+definition = ["scripts/shard.sh"]
+tests = ["one", "two"]
+except = ["one::slow_row"]
+
+[gates.shard-b]
+definition = ["scripts/shard.sh"]
+tests = ["three"]
+rows = ["one::slow_row"]
+"""
+
+
+class Shards(unittest.TestCase):
+    """FX-53: an e2e shard's nextest filter is the map's (`filter`), a row
+    moves one test of a binary into another shard, and the row's binary is
+    an input of the shard that runs it."""
+
+    def setUp(self):
+        self.repo = Repo()
+        for rel in ("e2e/tests/one.rs", "e2e/tests/two.rs", "e2e/tests/three.rs"):
+            self.repo.write(rel, "#[test] fn t() {}\n")
+        self.repo.write("scripts/shard.sh", "true\n")
+        self.repo.write("ci/gates.toml", SHARDS)
+        self.repo.commit("shards")
+
+    def tearDown(self):
+        self.repo.cleanup()
+
+    def test_the_filter_is_the_whole_binaries_less_their_excepts_plus_the_rows(self):
+        a = self.repo.run("filter", "shard-a")
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertEqual(
+            a.stdout.strip(),
+            "((binary(=one) | binary(=two)) & not ((binary(=one) & test(=slow_row))))")
+        b = self.repo.run("filter", "shard-b")
+        self.assertEqual(
+            b.stdout.strip(), "(binary(=three)) | (binary(=one) & test(=slow_row))")
+
+    def test_a_row_s_binary_is_an_input_of_the_shard_that_runs_it(self):
+        before = {g: self.repo.hash(g) for g in ("shard-a", "shard-b")}
+        self.repo.write("e2e/tests/one.rs", "#[test] fn t() { }\n")
+        self.repo.commit("one")
+        after = {g: self.repo.hash(g) for g in ("shard-a", "shard-b")}
+        self.assertNotEqual(before["shard-a"], after["shard-a"])
+        self.assertNotEqual(before["shard-b"], after["shard-b"])
+
+    def test_a_malformed_row_or_a_gate_without_binaries_is_refused(self):
+        self.repo.write("ci/gates.toml", SHARDS.replace('rows = ["one::slow_row"]', 'rows = ["one:slow_row"]'))
+        self.repo.commit("malformed")
+        self.assertNotEqual(self.repo.run("hash", "shard-b").returncode, 0)
+        self.assertNotEqual(self.repo.run("filter", "shard-b").returncode, 0)
+        self.repo.write("ci/gates.toml", SHARDS)
+        self.repo.commit("back")
+        self.assertNotEqual(self.repo.run("filter", "alpha").returncode, 0)
+
+
 class FailSafe(unittest.TestCase):
     def setUp(self):
         self.repo = Repo()
