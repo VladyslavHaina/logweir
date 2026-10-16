@@ -38,7 +38,6 @@ import { PageHeader } from "../../components/PageHeader";
 import { ErrorState, LoadingRows } from "../../components/States";
 import { Ident } from "../../components/Ident";
 import { Discovery } from "./Discovery";
-import { connectionRegistryOf } from "../../api/od23";
 import { CheckResult, ConnectionUsability, Instant, LastTestLine, NotRecorded, ProbeLabels, ProbeReason, RegistryLine, Term, WriteOutcome } from "./parts";
 
 export const CONNECTION_CHECK_SENTENCE =
@@ -84,7 +83,7 @@ function Probe({ c, onReRead, reading }: { c: Connection; onReRead: () => void; 
 
 function Settings({ c }: { c: Connection }) {
   const a = c.auth;
-  const registry = connectionRegistryOf(c);
+  const registry = (c.schemaRegistry ?? null);
   return (
     <Card>
       <CardHeader>

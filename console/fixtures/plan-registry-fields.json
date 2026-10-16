@@ -1,0 +1,58 @@
+{
+  "_comment": [
+    "The wizard state plan-registry.golden.yaml is rendered from: a target connection",
+    "with a Schema Registry (PROD-03.2) and a byte-rate limit (PROD-00.3h). plan.test.ts",
+    "byte-compares the console's rendering with the golden; crates/logweir/tests/console_plan.rs",
+    "deserialises it and asserts target.schema_registry and restore.rate_limit_bytes_per_sec."
+  ],
+  "name": "orders-pitr-4471",
+  "backupSetRef": "01JB7Z0000000000000000000B",
+  "topics": [
+    "orders",
+    "payments"
+  ],
+  "pointInTime": "2026-09-07T14:05:00Z",
+  "source": {
+    "bucket": "kafka-backups",
+    "prefix": "drill-demo",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "target": {
+    "bootstrapServers": [
+      "localhost:9092"
+    ],
+    "mode": "newTopic",
+    "topicPrefix": "restore-20260907T140500Z-",
+    "topicMappingPrefix": "restore-20260907T140500Z-",
+    "markerTopic": "logweir.scratch",
+    "replicationFactor": 1,
+    "teardown": "delete",
+    "schemaRegistry": {
+      "url": "https://schema-registry.orders-dr.svc:8081",
+      "username": "logweir"
+    }
+  },
+  "sample": {
+    "windowStart": "2026-09-07T12:00:00Z",
+    "windowEnd": "2026-09-07T15:00:00Z",
+    "recordsPerPartition": 25,
+    "anchor": "head"
+  },
+  "objectives": {
+    "rtoSeconds": 900,
+    "rpoSeconds": 300,
+    "passRate": 1.0
+  },
+  "evidence": {
+    "bucket": "logweir-evidence",
+    "prefix": "logweir/",
+    "region": "us-east-1",
+    "endpoint": "http://localhost:9000",
+    "pathStyle": true,
+    "allowHttp": true
+  },
+  "rateLimitBytesPerSec": 2500000
+}

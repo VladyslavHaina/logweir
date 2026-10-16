@@ -147,6 +147,8 @@ export interface PlanFields {
     topicConfiguration?: { transition: "afterVerification" | "none"; owners?: DeclaredOwner[] } | null;
     originalName?: boolean;
     originalNameNoOwner?: boolean;
+    /** PROD-03.2: the target connection's Schema Registry; the controller refuses a plan that names another. */
+    schemaRegistry?: { url: string; username?: string } | null;
   };
   sample: {
     windowStart: string;
@@ -305,6 +307,13 @@ export function renderPlanBytes(fields: PlanFields): string {
         out.push(`        reference: ${quote(o.reference)}`);
       }
     }
+  }
+
+  const registry = target.schemaRegistry;
+  if (registry) {
+    out.push("  schema_registry:");
+    out.push(`    url: ${quote(needed(registry.url, "target.schemaRegistry.url"))}`);
+    if (registry.username) out.push(`    username: ${quote(registry.username)}`);
   }
 
   // The recovery point: the window's END only. Its start is the archive's own floor.

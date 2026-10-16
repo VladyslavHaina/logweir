@@ -17,6 +17,7 @@ import pointFields from "../../../fixtures/plan-point-fields.json";
 import timeBasisFields from "../../../fixtures/plan-time-basis-fields.json";
 import cloneFields from "../../../fixtures/plan-clone-fields.json";
 import ownersFields from "../../../fixtures/plan-owners-fields.json";
+import registryFields from "../../../fixtures/plan-registry-fields.json";
 import plainGolden from "../../../fixtures/plan.golden.yaml?raw";
 import completeGolden from "../../../fixtures/plan-complete.golden.yaml?raw";
 import originalGolden from "../../../fixtures/plan-original-name.golden.yaml?raw";
@@ -24,6 +25,7 @@ import pointGolden from "../../../fixtures/plan-point.golden.yaml?raw";
 import timeBasisGolden from "../../../fixtures/plan-time-basis.golden.yaml?raw";
 import cloneGolden from "../../../fixtures/plan-clone.golden.yaml?raw";
 import ownersGolden from "../../../fixtures/plan-owners.golden.yaml?raw";
+import registryGolden from "../../../fixtures/plan-registry.golden.yaml?raw";
 import {
   INSECURE_CONTEXT_SENTENCE,
   defaultTopicPrefix,
@@ -45,6 +47,7 @@ const GOLDENS: [string, unknown, string][] = [
   ["plan-time-basis.golden.yaml", timeBasisFields, timeBasisGolden],
   ["plan-clone.golden.yaml", cloneFields, cloneGolden],
   ["plan-owners.golden.yaml", ownersFields, ownersGolden],
+  ["plan-registry.golden.yaml", registryFields, registryGolden],
 ];
 
 const bytes = (s: string) => new TextEncoder().encode(s);
@@ -76,7 +79,8 @@ describe("the plan goldens", () => {
     expect(renderPlanBytes(fields(pointFields))).toContain('  point:\n    point_id: "lwp1-0123456789abcdef0123456789abcdef"\n');
     // The plain plan carries none of the opt-ins (the Rust arm asserts the same absence).
     const plain = renderPlanBytes(fields(plainFields));
-    for (const key of ["time_basis", "coverage:", "original_name", "  point:", "ttl_seconds", "topic_configuration"]) expect(plain).not.toContain(key);
+    for (const key of ["time_basis", "coverage:", "original_name", "  point:", "ttl_seconds", "topic_configuration", "schema_registry", "rate_limit_bytes_per_sec"]) expect(plain).not.toContain(key);
+    expect(renderPlanBytes(fields(registryFields))).toContain('  schema_registry:\n    url: "https://schema-registry.orders-dr.svc:8081"\n    username: "logweir"\nrestore:');
   });
 
   it("theme A: a clone's lifetime is the teardown map in scratch mode only, inside its bounds", () => {

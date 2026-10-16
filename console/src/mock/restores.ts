@@ -11,7 +11,6 @@ import { backups, connections, hex, pointOf, requestId, restores as baseRestores
 import { renderPlanBytes, type PlanFields } from "../pages/restores/plan";
 import { planBlockValue } from "../pages/restores/words";
 import { cloneOf, themeAPlanOf, topicConfigurationOf } from "./themeA";
-import { connectionRegistryOf, interruptionOf, type RestoreInterruption, type RestoreSchemas } from "../api/od23";
 
 type S = components["schemas"];
 type Restore = S["Restore"];
@@ -253,7 +252,7 @@ function stoppedNow(k: Kept): Restore | null {
   if (t < STOP_MS) return { ...k.item, operation: { state: "running", stateReason: "Stopping", terminal: false, verificationState: "pending", verifiedSuccess: false } };
   const verification = t < STOP_MS + RECONCILE_MS ? "Running" : "Done";
   const cleanup = k.cleanupMs === undefined ? null : Date.now() - k.cleanupMs < CLEANUP_MS ? "Removing" : "Removed";
-  const interruption: RestoreInterruption = {
+  const interruption: S["RestoreInterruptionView"] = {
     cause: k.cause ?? "Cancelled",
     ...(k.requestedBy ? { requestedBy: k.requestedBy } : {}),
     verification,
@@ -262,14 +261,14 @@ function stoppedNow(k: Kept): Restore | null {
   };
   return {
     ...k.item,
-    operation: { state: "interrupted" as Restore["operation"]["state"], stateReason: k.cause ?? "Cancelled", terminal: false, verificationState: "pending", verifiedSuccess: false },
-    ...({ interruption } as object),
+    operation: { state: "interrupted", stateReason: k.cause ?? "Cancelled", terminal: false, verificationState: "pending", verifiedSuccess: false },
+    interruption,
   };
 }
 
 /** The operation view of a stopped run: the reconcile's signed counts once it is done. */
 function stoppedOperation(k: Kept, r: Restore): OperationView {
-  const intr = interruptionOf(r);
+  const intr = r.interruption ?? null;
   const done = intr?.verification === "Done";
   const at = k.stoppedMs!;
   const conditions: S["ConditionView"][] = [
@@ -322,16 +321,11 @@ function stoppedOperation(k: Kept, r: Restore): OperationView {
 }
 
 /** PROD-03.2: what the scorecard says about schemas, for a restore into a connection with a registry or without one. */
-function schemasFor(r: Restore): RestoreSchemas {
+function schemasFor(r: Restore): S["RestoreSchemasView"] {
   const target = connections.find((c) => c.namespace === r.namespace && c.name === r.target.clusterRef.name);
-  if (!target || !connectionRegistryOf(target)) return { notImported: "noTargetRegistry" };
+  if (!target?.schemaRegistry) return { imported: 0, alreadyPresent: 0, notImported: "noTargetRegistry" };
   return {
-    imported: [
-      { subject: "orders-value", version: 1, id: 4 },
-      { subject: "orders-value", version: 2, id: 7 },
-      { subject: "com.ex.Order", version: 1, id: 6 },
-      { subject: "payments-value", version: 1, id: 5 },
-    ],
+    imported: 4,
     alreadyPresent: 0,
   };
 }
@@ -350,7 +344,7 @@ const ready: Promise<void> = (async () => {
         planHash: await sha256(planBytes),
         sourceDestinationRef: { name: "primary" },
         evidenceDestinationRef: { name: "primary" },
-        ...((passed && r !== interrupted ? { schemas: schemasFor(r) } : {}) as object),
+        ...(passed && r !== interrupted ? { coverage: { ...r.coverage, schemas: schemasFor(r) } } : {}),
       },
       topics,
       createdMs: Date.parse(String(r.createdAt)),
@@ -378,9 +372,8 @@ function live(k: Kept): Restore {
   if (stage) return { ...k.item, operation: { state: stage.state, terminal: false, verificationState: "pending", verifiedSuccess: false } };
   return {
     ...k.item,
-    coverage: { ...k.item.coverage, recorded: k.item.coverage.requested, ...(k.item.coverage.requested === "complete" ? { covered: true } : {}) },
+    coverage: { ...k.item.coverage, recorded: k.item.coverage.requested, ...(k.item.coverage.requested === "complete" ? { covered: true } : {}), schemas: schemasFor(k.item) },
     operation: { state: "succeeded", stateReason: "Ok", terminal: true, verificationState: "valid", verifiedSuccess: true, exitCode: 0, outcome: "pass" },
-    ...({ schemas: schemasFor(k.item) } as object),
   };
 }
 
@@ -679,7 +672,7 @@ function restoreChecks(ws: string, body: S["RestorePreflightRequest"]): { checks
       : row("target.topicCreate", "TopicCreateAllowed", "ready"),
     row("approval.state", "SubjectNotCreated", "skipped", { message: "No Restore exists for this plan yet, so no approval can be checked." }),
     // PROD-03.2: the target connection names a registry, so the check previews the import.
-    ...(connections.some((c) => c.namespace === ws && c.name === target && connectionRegistryOf(c))
+    ...(connections.some((c) => c.namespace === ws && c.name === target && c.schemaRegistry)
       ? [row("target.schemas", "SchemasImportable", "ready", { message: "will import 3 subjects (4 versions) with the source's IDs; none conflict. The run recomputes the set from every record." })]
       : []),
   ];
@@ -781,10 +774,10 @@ export async function restoresMock(request: Request): Promise<Response | null> {
     if (!k) return problem(404, "not_found", `No Restore named ${m[2]} in ${m[1]}.`);
     const now = live(k);
     if (m[3] === "cancel") {
-      if (now.operation.terminal || interruptionOf(now)) return problem(409, "state_conflict", `Restore ${k.item.name} has ended; there is nothing to cancel.`);
+      if (now.operation.terminal || now.interruption) return problem(409, "state_conflict", `Restore ${k.item.name} has ended; there is nothing to cancel.`);
       if (k.stoppedMs === undefined) Object.assign(k, { stoppedMs: Date.now(), cause: "Cancelled", requestedBy: "https://dex.logweir.localtest.me#alice" });
     } else {
-      if (k.cleanupMs === undefined && !interruptionOf(now)?.cleanupOffered) {
+      if (k.cleanupMs === undefined && !now.interruption?.cleanupOffered) {
         return problem(409, "state_conflict", "Clean up is offered only on an Interrupted restore whose partial topics were verified and signed.");
       }
       k.cleanupMs ??= Date.now();

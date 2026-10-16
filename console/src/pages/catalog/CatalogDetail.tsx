@@ -34,7 +34,6 @@ import { RESTORE_NEEDS_ROLE } from "../backups/verdict";
 import "../backups/evidence.css";
 import { ReadyStatus, whereFrom } from "./CatalogList";
 import { Prose } from "../../components/Prose";
-import { registryCaptureOf } from "../../api/od23";
 import {
   BACKUP_VERDICTS_INCOMPLETE_SENTENCE,
   CATALOG_WINDOW_SENTENCE,
@@ -199,7 +198,7 @@ function PointsCard({ ws, name }: { ws: string; name: string }) {
   const pageFacts = { viewExpired: pages.some((p) => p.viewExpired), backupVerdictsIncomplete: pages.find((p) => p.backupVerdictsIncomplete)?.backupVerdictsIncomplete };
   const rows = pages.flatMap((p) => p.items);
   const redacted = rows.some((p) => isRedacted(p.receiptKey) || isRedacted(p.backupId));
-  const schema = rows.map((p) => ({ id: p.pointId, topics: schemaDependentTopics(p), captured: registryCaptureOf(p)?.captured === true })).filter((r) => r.topics.length > 0);
+  const schema = rows.map((p) => ({ id: p.pointId, topics: schemaDependentTopics(p), captured: p.schemaRegistry?.captured === true })).filter((r) => r.topics.length > 0);
 
   return (
     <Card>
@@ -329,7 +328,7 @@ function PointsCard({ ws, name }: { ws: string; name: string }) {
                                   <Ident value={p.receiptSha256} label="receipt sha256" />
                                 </div>
                               </Term>
-                              <Term term="Schema Registry">{registryCaptureWords(registryCaptureOf(p))}</Term>
+                              <Term term="Schema Registry">{registryCaptureWords(p.schemaRegistry ?? null)}</Term>
                               <Term term="Format">
                                 <Value value={p.formatVersion} />
                               </Term>

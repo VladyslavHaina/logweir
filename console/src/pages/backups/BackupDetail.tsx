@@ -50,8 +50,6 @@ import { CompactList, useNarrow } from "../../components/CompactList";
 import { BackupStatus, Commands, MessageValue, Term, Value, VerdictLabel, useFlags } from "./parts";
 import { Prose } from "../../components/Prose";
 import { Trigger } from "./BackupList";
-import { registryCaptureOf } from "../../api/od23";
-import { registryCaptureWords } from "../catalog/model";
 import "./evidence.css";
 import {
   BASIS_WORDS,
@@ -727,7 +725,6 @@ export function BackupDetail() {
                   </Term>
                   <Term term="Records">{b.operation.terminal ? count(b.records) : "Counting while it runs"}</Term>
                   <Term term="Covers">{windowWords(b)}</Term>
-                  <Term term="Schema Registry">{b.operation.terminal ? registryCaptureWords(registryCaptureOf(b)) : "Captured, if the source names one, after the records"}</Term>
                   <Term term="Destination">
                     {b.destinationRef ? (
                       <>

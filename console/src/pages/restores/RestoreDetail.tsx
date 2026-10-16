@@ -35,7 +35,6 @@ import {
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import ExchangeAltIcon from "@patternfly/react-icons/dist/esm/icons/exchange-alt-icon";
 import RedoIcon from "@patternfly/react-icons/dist/esm/icons/redo-icon";
-import { interruptionOf, isInterrupted, restoreSchemasOf } from "../../api/od23";
 import {
   useApprovalPolicy,
   useApprovalRequest,
@@ -366,15 +365,15 @@ function Detail({ ws, name }: { ws: string; name: string }) {
   const evidenceKeys = op?.evidence.payloadKey && op.evidence.sidecarKey;
   const selection = scope?.selection ?? r.selection ?? null;
   // PROD-07.2: Cancel while it has not ended; Interrupted with its partial targets, Retry and Clean up.
-  const interruption = interruptionOf(r);
-  const interrupted = isInterrupted(r.operation);
+  const interruption = r.interruption ?? null;
+  const interrupted = r.operation.state === "interrupted";
   const stopping = !r.operation.terminal && !interrupted && r.operation.stateReason === "Stopping";
   const mayCreate = caps?.restoreCreate !== false;
   const cancellable = mayCreate && !r.operation.terminal && !interrupted && !stopping;
   // The targets it created (the partition table names the SOURCE topics they were restored from).
   const partialTopics = r.newTopics;
   const cleanupLine = cleanupWords(interruption?.cleanup, interruption?.cleanupReason);
-  const schemasLine = restoreSchemasWords(restoreSchemasOf(r));
+  const schemasLine = restoreSchemasWords(r.coverage.schemas ?? null);
   const retry = () => void navigate({ to: "/$ws/restores/new", params: { ws }, search: { retryOf: r.name } });
   const run = (action: "cancel" | "cleanup") => act.mutate(action, { onSettled: () => setConfirm(null) });
 

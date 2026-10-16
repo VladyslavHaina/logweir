@@ -12,8 +12,7 @@ import type { components, operations } from "./schema";
 
 type S = components["schemas"];
 export type Connection = S["Connection"];
-export type { CreateConnectionRequest } from "./od23";
-import type { CreateConnectionRequest } from "./od23";
+export type CreateConnectionRequest = S["CreateConnectionRequest"];
 export type ConnectionAuthMode = S["ConnectionAuthMode"];
 export type Reachability = S["ReachabilityView"];
 export type LastTest = S["LastTestView"];

@@ -5,7 +5,6 @@
 import type { components } from "../api/schema";
 import { connections, hex, requestId } from "./data";
 import { DAY, HOUR, MINUTE, NOW, iso } from "./clock";
-import { connectionRegistryOf, type CreateConnectionRequest } from "../api/od23";
 
 type S = components["schemas"];
 type Connection = S["Connection"];
@@ -200,7 +199,7 @@ const registryRefused = new Set<string>();
 
 /** OD-23 (PROD-03.1): `registry.reachable`, advisory, on a connection that names a registry. */
 function registryRows(c: Connection, at: number, scope: CheckEntry["scope"]): CheckEntry[] {
-  const registry = connectionRegistryOf(c);
+  const registry = (c.schemaRegistry ?? null);
   if (!registry) return [];
   const advisory = { gating: "advisory" as const, scope };
   return registryRefused.has(c.name)
@@ -372,7 +371,7 @@ const HOST_PORT = /^[^\s:/@]+:\d{1,5}$/;
 const SASL = ["scramSha512", "scramSha256", "plain"];
 const connectionKeys = new Map<string, { name: string; digest: string }>();
 
-function createConnection(ws: string, key: string, body: CreateConnectionRequest): Response {
+function createConnection(ws: string, key: string, body: S["CreateConnectionRequest"]): Response {
   // Write-only fields hash as <write-only>: a value is not part of the request's identity.
   const sr = body.schemaRegistry;
   const digest = JSON.stringify({
@@ -459,7 +458,7 @@ export async function connectionsMock(request: Request, method: string, path: st
   }
   if (method === "POST" && /^\/workspaces\/[^/]+\/connections$/.test(path)) {
     if (key.length < 8) return problem(400, "idempotency_key_required", "This route requires an Idempotency-Key header.");
-    return createConnection(ws, key, (await request.json()) as CreateConnectionRequest);
+    return createConnection(ws, key, (await request.json()) as S["CreateConnectionRequest"]);
   }
   if (method === "GET" && (p = path.match(/^\/workspaces\/[^/]+\/connections\/([^/]+)$/))) {
     const c = find(p[1]!);

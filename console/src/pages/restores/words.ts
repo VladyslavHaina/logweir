@@ -483,16 +483,12 @@ export function cleanupWords(cleanup: string | null | undefined, reason: string 
 }
 
 /** What the restore did with the archive's schemas (the scorecard's `schemas`), or null when it says nothing. */
-export function restoreSchemasWords(s: { imported?: { subject: string; version: number; id: number }[] | null; alreadyPresent?: number | null; notImported?: string | null } | null): string | null {
+export function restoreSchemasWords(s: { imported: number; alreadyPresent: number; notImported?: string | null } | null): string | null {
   if (!s) return null;
   if (s.notImported === "noTargetRegistry") return "Not imported: the target connection names no Schema Registry.";
   if (s.notImported === "noSnapshot") return "Not imported: the backup captured no registry snapshot.";
   if (s.notImported) return `Not imported (${s.notImported}).`;
-  const imported = s.imported ?? [];
-  const present = typeof s.alreadyPresent === "number" ? s.alreadyPresent : 0;
-  const shown = imported.slice(0, 20).map((i) => `${i.subject} v${i.version} (id ${i.id})`);
-  const head = `Imported ${imported.length} with the source's IDs; ${present} already present`;
-  return shown.length ? `${head}: ${shown.join(", ")}${imported.length > shown.length ? ` and ${imported.length - shown.length} more` : ""}.` : `${head}.`;
+  return `Imported ${s.imported} with the source's IDs; ${s.alreadyPresent} already present.`;
 }
 
 /** The byte-rate limit, typed in MB/s, as the plan's integer bytes per second; "" is no limit. */

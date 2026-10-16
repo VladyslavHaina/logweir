@@ -416,6 +416,10 @@ export function planFields(ctx: WizardContext, v: WizardValues): PlanFields {
     target: {
       bootstrapServers: ctx.connection?.bootstrapServers.slice() ?? [],
       auth: targetAuth(ctx.connection),
+      // PROD-03.2: the target connection's registry, which the controller holds the plan to.
+      ...(ctx.connection?.schemaRegistry
+        ? { schemaRegistry: { url: ctx.connection.schemaRegistry.url, ...(ctx.connection.schemaRegistry.username ? { username: ctx.connection.schemaRegistry.username } : {}) } }
+        : {}),
       mode: v.scratch ? "scratch" : "newTopic",
       // Both keys the same string unless restoring under the original names, where the
       // naming prefix is "" and the scratch prefix keeps a real value.

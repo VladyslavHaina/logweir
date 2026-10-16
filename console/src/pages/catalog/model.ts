@@ -311,6 +311,8 @@ const REGISTRY_REASONS: Record<string, string> = {
   registryUnauthorized: "the registry refused the credential",
   snapshotTooLarge: "the registry is larger than a snapshot holds (32 MiB, 100 000 versions)",
   snapshotIncomplete: "some referenced schemas or ids are missing from the snapshot",
+  unresolvedReferences: "some schema references are not in the registry",
+  idsNotInSnapshot: "some schema ids the records carry are not in the snapshot",
 };
 
 /** OD-23 (PROD-03.1): a backup's or point's Schema Registry capture in one line. Absent is "not captured". */

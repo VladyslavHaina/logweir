@@ -117,7 +117,7 @@ describe("PROD-03.1: the registry's test line and capture line", () => {
   });
   it("a capture says its counts, a failed capture says why, and an older receipt with no block says not captured", () => {
     expect(registryCaptureWords({ captured: true, subjects: 4, versions: 7 })).toBe("Captured: 4 subjects, 7 versions");
-    expect(registryCaptureWords({ captured: false, incompleteReason: "registryUnreachable" })).toBe("Not captured: the registry did not answer");
+    expect(registryCaptureWords({ captured: false, subjects: 0, versions: 0, incompleteReason: "registryUnreachable" })).toBe("Not captured: the registry did not answer");
     expect(registryCaptureWords({ captured: true, subjects: 1, versions: 1, incompleteReason: "snapshotIncomplete" })).toMatch(/^Captured: 1 subject, 1 version; incomplete:/);
     expect(registryCaptureWords(null)).toBe("Not captured");
   });
@@ -158,8 +158,8 @@ describe("PROD-00.3h and PROD-03.2: the restore's rate limit, schema preview and
   });
 
   it("the schemas line names what was imported, or why nothing was", () => {
-    expect(restoreSchemasWords({ imported: [{ subject: "orders-value", version: 1, id: 4 }], alreadyPresent: 2 })).toBe("Imported 1 with the source's IDs; 2 already present: orders-value v1 (id 4).");
-    expect(restoreSchemasWords({ notImported: "noTargetRegistry" })).toMatch(/names no Schema Registry/);
+    expect(restoreSchemasWords({ imported: 1, alreadyPresent: 2 })).toBe("Imported 1 with the source's IDs; 2 already present.");
+    expect(restoreSchemasWords({ imported: 0, alreadyPresent: 0, notImported: "noTargetRegistry" })).toMatch(/names no Schema Registry/);
     expect(restoreSchemasWords(null)).toBeNull();
   });
 });

@@ -298,6 +298,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/workspaces/{ws}/restores/{name}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** PROD-07.2: stop a restore. Sets `logweir.dev/cancel-requested-by` (metadata; the sealed spec is untouched). Before the run's Job exists the restore fails `Cancelled` and nothing ran; while it runs the controller suspends the Job, the runner stops its engine (SIGTERM, SIGKILL after ten seconds) and signs nothing, and a run that created its target topics becomes `Interrupted`. A run that already signed keeps its outcome. A repeated request writes nothing. Requires the role that may create restores in the workspace. 409 once the restore has ended. Idempotency-Key is refused. */
+        post: operations["cancelRestore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/workspaces/{ws}/restores/{name}/cleanup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** PROD-07.2: remove the topics an interrupted restore created and left. Sets `logweir.dev/cleanup-requested-by`; the controller runs `logweir restore cleanup` over the reconcile's signed scorecard, which deletes only the topics it lists, each only while its topic ID is the one recorded at creation, and lists what it left. The recovery point is released once it succeeded. A repeated request writes nothing. Requires the role that may create restores in the workspace; no second approval. 409 unless the restore is `Interrupted` with a signed reconcile. Idempotency-Key is refused. */
+        post: operations["cleanupRestore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/workspaces/{ws}/restores/{name}/approval": {
         parameters: {
             query?: never;
@@ -2190,6 +2224,8 @@ export interface components {
             resourceVersion: string;
             /** @description The role label. */
             role: string;
+            /** @description The connection's Schema Registry (PROD-03.1), when it names one. */
+            schemaRegistry?: components["schemas"]["SchemaRegistryView"];
             /** @description The Kubernetes UID. */
             uid: string;
         };
@@ -2316,6 +2352,8 @@ export interface components {
             markerTopic?: string | null;
             /** @description `source` or `target`. */
             role: components["schemas"]["ConnectionRole"];
+            /** @description **PROD-03.1.** The cluster's Schema Registry: captured by a backup of this connection, written by a restore into it. The password, when given, goes into the connection's own Secret under `registry-password`. */
+            schemaRegistry?: components["schemas"]["SchemaRegistryRequest"];
         };
         /** @description `POST /api/v1/workspaces/{ws}/destinations`. */
         CreateDestinationRequest: {
@@ -3327,7 +3365,7 @@ export interface components {
         /** @description D3 §2.5's stage vocabulary, exactly six values. */
         OperationStage: "admission" | "queued" | "preparing" | "running" | "verifying" | "finished";
         /** @description The product lifecycle state. */
-        OperationState: "pending" | "queued" | "preparing" | "running" | "verifying" | "succeeded" | "failed" | "refused" | "cancelled" | "unknown";
+        OperationState: "pending" | "queued" | "preparing" | "running" | "verifying" | "succeeded" | "failed" | "refused" | "cancelled" | "interrupted" | "unknown";
         /** @description The status summary carried by list items. */
         OperationSummary: {
             /**
@@ -3618,6 +3656,23 @@ export interface components {
             /** @description `schemaDependent` (a key or value side is framed: registry not captured), `notDetected` (neither side over the records judged), or `notAssessed` (nothing could be judged; `reason` says why). */
             verdict: string;
         };
+        /** @description A point's Schema Registry capture (PROD-03.1). */
+        PointSchemaRegistryView: {
+            /** @description Whether the snapshot was taken. */
+            captured: boolean;
+            /** @description Why the capture is incomplete (`registryUnreachable`, `registryUnauthorized`, `snapshotTooLarge`, `snapshotIncomplete`, `unresolvedReferences`, `idsNotInSnapshot`); absent when complete. */
+            incompleteReason?: string | null;
+            /**
+             * Format: uint64
+             * @description Distinct subjects captured.
+             */
+            subjects: number;
+            /**
+             * Format: uint64
+             * @description Subject-versions captured.
+             */
+            versions: number;
+        };
         /** @description **PROD-05.1.** One topic of a recovery point, as the catalog's view lists it: what the archive records of its layout and how its configuration is held. Never a configuration value — the settings themselves are in the signed receipt and the point record, not in a listing. */
         PointTopicView: {
             /** @description How the topic's configuration reaches a target (`logweir_core::topic_configuration::apply_route`): `desiredStateExport` for a topic a declarative owner manages — a restore exports its desired state for the owner to apply instead of changing it through Kafka's admin API, which the owner would revert; `adminApi` for a topic with no owner where the backup run looked for one (the point's `ownerDetection` is not empty); and `unknown` where it did not look, or the view does not say where it looked. An owner nobody checked for is never published as the admin-API route. */
@@ -3694,6 +3749,8 @@ export interface components {
             remedy?: string | null;
             /** @description The run that produced it. */
             runId: string;
+            /** @description **PROD-03.1.** Whether the backup captured its source Schema Registry, its counts, and why the capture is incomplete. ABSENT: the source connection names no registry, the point predates it, or not published. */
+            schemaRegistry?: components["schemas"]["PointSchemaRegistryView"];
             /** @description The conjunction of the two, materialised by the controller so no surface writes D3 §5.4's selection rule a second time — and `false` whenever `backupVerdict` is present, because a verdict the controller reached outranks a view row that may predate it. */
             selectable: boolean;
             /** @description The key that signed it, when one was identified. */
@@ -4145,6 +4202,8 @@ export interface components {
             integrityPartialReason?: string | null;
             /** @description The signed scorecard's `integrity.result` (`pass`, `partial` or `fail`) as the controller copied it onto `status.integrity`. A CLAIM until the evidence verifies. ABSENT means not recorded. */
             integrityResult?: string | null;
+            /** @description PROD-07.2: a run that ended without a signed scorecard after it created its target topics. ABSENT on every other run. */
+            interruption?: components["schemas"]["RestoreInterruptionView"];
             /** @description The object name. */
             name: string;
             /** @description The namespace: the install's, for `kubectl`. */
@@ -4211,6 +4270,25 @@ export interface components {
             recorded?: components["schemas"]["RestoreCoverage"];
             /** @description What the Restore asks for: `spec.coverage`, absent read as `sampled`. The controller has held it to the plan's own `sample.coverage`. */
             requested: components["schemas"]["RestoreCoverage"];
+            /** @description **PROD-03.2.** The schemas the run imported into the target registry keeping their IDs, how many were there already, or why none were: copied from `status.integrity.schemas`. ABSENT: no registry on either side, or not recorded. */
+            schemas?: components["schemas"]["RestoreSchemasView"];
+        };
+        /** @description `Restore.interruption` (PROD-07.2), from `status.interruption`. */
+        RestoreInterruptionView: {
+            /** @description `Cancelled`, `RunnerStopped` or `RunFailed`. */
+            cause?: string | null;
+            /** @description The cleanup: `Removing`, `Removed` or `RemovalFailed`. */
+            cleanup?: string | null;
+            /** @description Whether `cleanup` may be requested now. */
+            cleanupOffered: boolean;
+            /** @description Why the cleanup failed, when it did. */
+            cleanupReason?: string | null;
+            /** @description Who asked for the cancel. */
+            requestedBy?: string | null;
+            /** @description `Running`, `Done` or `Failed`: the reconcile of the partial targets. Its signed scorecard's counts are this restore's `integrity` and `coverage`. */
+            verification?: string | null;
+            /** @description Why the reconcile failed, or what it found when nothing was left. */
+            verificationReason?: string | null;
         };
         /** @description A page of `Restore` items. */
         RestoreList: {
@@ -4311,6 +4389,21 @@ export interface components {
             requester?: string | null;
             /** @description Where the submission goes next. */
             state: components["schemas"]["AuthorizationState"];
+        };
+        /** @description `Restore.coverage.schemas` (PROD-03.2). */
+        RestoreSchemasView: {
+            /**
+             * Format: uint64
+             * @description Subject-versions the target already held.
+             */
+            alreadyPresent: number;
+            /**
+             * Format: uint64
+             * @description Subject-versions imported with their source IDs.
+             */
+            imported: number;
+            /** @description `noTargetRegistry` or `noSnapshot` when nothing was imported. */
+            notImported?: string | null;
         };
         /** @description **PROD-11.1b.** `Restore.selection` and `verificationScope.selection`: the signed replay selection, copied from `status.integrity.selection` (itself copied from the scorecard's `source.selection`) and never recomputed. Present exactly when the scorecard states a selection; every field may be absent when the controller could not read the signed block, which is still a selection (never read as a restore of everything). */
         RestoreSelectionView: {
@@ -4825,6 +4918,30 @@ export interface components {
             policy?: components["schemas"]["SchedulePolicyView"];
             /** @description The `Ready` condition. */
             ready?: components["schemas"]["ConditionView"];
+        };
+        /** @description A new connection's Schema Registry. `Debug` and `Serialize` never carry the password. */
+        SchemaRegistryRequest: {
+            /**
+             * @description The basic-auth password, entered once.
+             * @default null
+             */
+            password?: string | null;
+            /** @description `http://` or `https://`, no userinfo, query or fragment. */
+            url: string;
+            /**
+             * @description The basic-auth username; given exactly when `password` is.
+             * @default null
+             */
+            username?: string | null;
+        };
+        /** @description A stored connection's Schema Registry: the URL, the username and the Secret's NAME. Never the password. */
+        SchemaRegistryView: {
+            /** @description The Secret holding the password, by name. */
+            credentialRef?: components["schemas"]["NameRef"];
+            /** @description The registry URL. */
+            url: string;
+            /** @description The basic-auth username. */
+            username?: string | null;
         };
         /** @description PROD-16.2 (review S-1): the requester's owner statement for an original-name restore, as the plan signs it. */
         ScopeOwnerStatementView: {
@@ -6787,6 +6904,80 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description The object. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestoreResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cancelRestore: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Must equal the configured public origin exactly. */
+                Origin: string;
+            };
+            path: {
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The cancel is recorded (or already was). */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RestoreResponse"];
+                };
+            };
+            /** @description An application/problem+json error; the possible codes are listed in x-logweir-problem-codes. */
+            default: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/problem+json": components["schemas"]["Problem"];
+                };
+            };
+        };
+    };
+    cleanupRestore: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Must equal the configured public origin exactly. */
+                Origin: string;
+            };
+            path: {
+                /** @description A workspace of this install the actor holds a role in. Any other workspace is workspace_forbidden whether or not it exists. */
+                ws: string;
+                /** @description The object name. */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The cleanup is recorded (or already was). */
             200: {
                 headers: {
                     [name: string]: unknown;
