@@ -1232,6 +1232,10 @@ pub enum ReferentProblem {
         /// The UID now returned by the API server.
         current_uid: String,
     },
+    /// The Approval's workspace label is absent or unlisted, or its subject
+    /// is in another workspace (PROD-19.1): an approval made in `dev` never
+    /// authorises a `prd` run.
+    Workspace(crate::workspace::Refusal),
 }
 
 impl ReferentProblem {
@@ -1242,6 +1246,7 @@ impl ReferentProblem {
             Self::ReferentNotFound { .. } => "ReferentNotFound",
             Self::ReferentHasNoPlanBytes { .. } => "ReferentHasNoPlanBytes",
             Self::ReferentUidChanged { .. } => "ReferentUidChanged",
+            Self::Workspace(refusal) => refusal.reason(),
         }
     }
 }
@@ -1270,6 +1275,7 @@ impl fmt::Display for ReferentProblem {
                  {verified_uid} and that name now has UID {current_uid}; create a new Approval \
                  for the recreated object"
             ),
+            Self::Workspace(refusal) => write!(f, "{refusal}"),
         }
     }
 }
@@ -1760,9 +1766,15 @@ async fn judge(
     let namespace = approval
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
-    // The binding and the signed subject are the Approval's workspace, which
-    // its referent shares (`workspace::same`, checked where it is read).
-    let workspace = crate::workspace::label_of(approval).unwrap_or_default();
+    // PROD-19.1: the Approval's own workspace is one of the install's, or
+    // nothing is judged. The binding and the signed subject are the
+    // REFERENT's workspace, which `workspace::same` holds equal to this one
+    // where the referent is read, before any evaluation.
+    if let Err(refusal) = crate::workspace::installed().of(approval) {
+        return Ok(ApprovalOutcome::Referent(ReferentProblem::Workspace(
+            refusal,
+        )));
+    }
 
     // A standing authorization is withdrawn: refused by name first, before a
     // stored record, the trust or the referent is read, and never recorded
@@ -1903,6 +1915,9 @@ async fn judge(
     // the verdict is asked at the admission instant, the only one an admitted
     // run's authorization was ever about.
     let mut consumed_at: Option<DateTime<Utc>> = None;
+    // The workspace of the object this approval authorises, set where it is
+    // read; the binding and the expected subject are resolved from it.
+    let referent_workspace: String;
     let (plan_bytes, verified_subject_ref) = match subject.kind {
         SubjectKind::Restore => {
             let restore = match prefetched {
@@ -1911,6 +1926,14 @@ async fn judge(
             };
             match restore {
                 Some(restore) => {
+                    if let Err(refusal) = crate::workspace::same(approval, &restore) {
+                        return Ok(ApprovalOutcome::Referent(ReferentProblem::Workspace(
+                            refusal,
+                        )));
+                    }
+                    referent_workspace = crate::workspace::label_of(&restore)
+                        .unwrap_or_default()
+                        .to_string();
                     let current = restore_subject(&restore, &subject.name, &namespace)?;
                     if let Some(previous) = approval
                         .status
@@ -1977,6 +2000,14 @@ async fn judge(
             let api: Api<Switchover> = Api::namespaced(client.clone(), &namespace);
             match api.get_opt(&subject.name).await? {
                 Some(sw) => {
+                    if let Err(refusal) = crate::workspace::same(approval, &sw) {
+                        return Ok(ApprovalOutcome::Referent(ReferentProblem::Workspace(
+                            refusal,
+                        )));
+                    }
+                    referent_workspace = crate::workspace::label_of(&sw)
+                        .unwrap_or_default()
+                        .to_string();
                     let current = switchover_subject(&sw, &subject.name, &namespace)?;
                     if let Some(previous) = approval
                         .status
@@ -2018,7 +2049,8 @@ async fn judge(
     let want = sha256_prefixed(plan_bytes.as_bytes());
     let evaluated = if matches!(subject.kind, SubjectKind::Restore | SubjectKind::Switchover) {
         // The two kinds an approval policy governs; a `Backup` referent was
-        // refused before this point.
+        // refused before this point. Both arms above set the workspace.
+        let workspace = referent_workspace.as_str();
         evaluate_planned_referent(
             approval,
             &trust,
@@ -2806,6 +2838,11 @@ async fn reconcile(
     ctx: Arc<Context>,
     policies: crate::approval_policy::PolicySource,
 ) -> Result<Action, ReconcileError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, approval.as_ref()).await? {
+        return Ok(action);
+    }
     // The document with the fresh-install marker as last read.
     let policies = policies.effective();
     let outcome = reconcile_approval_with_policy(&approval, &ctx.client, &policies).await?;
@@ -2880,24 +2917,16 @@ pub fn controller(
     client: kube::Client,
     policies: crate::approval_policy::PolicySource,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // One watch per watched namespace: `crate::scope` is the whole cluster
-    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
-    // then this reconciler runs once per namespace with an `Api::namespaced`
-    // watch, the only shape the scoped chart's RoleBindings permit. Every copy
     // shares the one policy set.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(client.clone(), namespace, policies.clone())
-    })
+    controller_in(client, policies)
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
-    namespace: Option<String>,
     policies: crate::approval_policy::PolicySource,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<Approval> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<Approval> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client.clone());
     // One memory of what each policy bound last, owned by the mapper.
     let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());

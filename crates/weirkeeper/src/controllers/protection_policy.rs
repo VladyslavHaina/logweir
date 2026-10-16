@@ -1037,6 +1037,11 @@ async fn reconcile(
     policy: Arc<ProtectionPolicy>,
     ctx: Arc<ProtectionContext>,
 ) -> Result<Action, ReconcileError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, policy.as_ref()).await? {
+        return Ok(action);
+    }
     let outcome = reconcile_policy(&policy, &ctx, chrono::Utc::now()).await?;
     Ok(policy_action(&outcome))
 }
@@ -1074,19 +1079,14 @@ fn error_policy(
 
 /// Run the `ProtectionPolicy` controller until the process ends.
 ///
-/// One watch per watched namespace (`crate::scope`), like every other
-/// controller in this directory.
+/// One watch, in the install's namespace.
 pub fn controller(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
-    crate::scope::run_everywhere(move |namespace| controller_in(client.clone(), namespace))
+    controller_in(client)
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster, the behaviour before D0 stage 5).
-fn controller_in(
-    client: kube::Client,
-    namespace: Option<String>,
-) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<ProtectionPolicy> = crate::scope::api(&client, namespace.as_deref());
+/// The one watch of [`controller`], in the install's namespace.
+fn controller_in(client: kube::Client) -> impl std::future::Future<Output = ()> + Send {
+    let api: Api<ProtectionPolicy> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let ctx = Arc::new(ProtectionContext { client });
     async move {
         Controller::new(api, watcher::Config::default())

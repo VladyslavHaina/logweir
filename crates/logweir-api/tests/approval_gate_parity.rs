@@ -946,6 +946,7 @@ async fn a_second_person_approves_a_switchover_in_the_console() {
     let expected = |kind: &str| ExpectedSubject {
         kind: kind.to_string(),
         namespace: NS_A.to_string(),
+        workspace: NS_A.to_string(),
         name: name.clone(),
         uid: uid.clone(),
         plan_hash: logweir_core::ids::sha256_prefixed(p.as_bytes()),

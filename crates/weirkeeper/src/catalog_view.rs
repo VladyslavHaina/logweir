@@ -3098,7 +3098,10 @@ pub fn build_sync_job(spec: &SyncJobSpec) -> Job {
             spec.owner.uid.clone(),
         ),
     ]);
-    job.metadata.labels = Some(labels.clone());
+    job.metadata
+        .labels
+        .get_or_insert_with(Default::default)
+        .extend(labels.clone());
     if let Some(job_spec) = job.spec.as_mut() {
         job_spec.ttl_seconds_after_finished = Some(spec.ttl_seconds);
         let mut meta = job_spec.template.metadata.take().unwrap_or_default();

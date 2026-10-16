@@ -377,6 +377,7 @@ impl Pass<'_> {
             kind: RecoveryCatalog::kind(&()).to_string(),
             name: self.name.clone(),
             uid: self.uid.clone(),
+            workspace: crate::workspace::label_of(self.catalog).map(str::to_string),
         }
     }
 
@@ -720,6 +721,7 @@ impl Pass<'_> {
             kind: "Job".to_string(),
             name: stem.to_string(),
             uid: job.uid().unwrap_or_default(),
+            workspace: None,
         };
 
         // `blockOwnerDeletion: false`, never `true`: blocking deletion asks the
@@ -1030,6 +1032,7 @@ impl Pass<'_> {
             kind: "Job".to_string(),
             name: job_name.clone(),
             uid: job.uid().unwrap_or_default(),
+            workspace: None,
         };
         let mut page_names = Vec::with_capacity(materialised.pages.len());
         for (index, draft) in materialised.pages.iter().enumerate() {
@@ -1918,6 +1921,11 @@ async fn reconcile(
     shared: crate::trust::SharedPolicies,
     objects: reflector::Store<RecoveryCatalog>,
 ) -> Result<Action, ReconcileError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, catalog.as_ref()).await? {
+        return Ok(action);
+    }
     let policy = installation_policy(&ctx.client).await;
     // THE SHARED STORE, ONCE IT HAS SYNCED — no `LIST trustpolicies` per pass.
     let snapshot: Option<Vec<crate::crds::trust_policy::TrustPolicy>> = shared
@@ -1994,34 +2002,21 @@ fn policy_targets(
 /// ([`crate::trust::spawn_policy_reflector`]) once it has synced, and with one
 /// `LIST` until then.
 pub async fn controller(client: kube::Client, runner_image: crate::job::RunnerImage) {
-    // One watch per watched namespace: the whole cluster unless
-    // `LOGWEIR_WATCH_NAMESPACES` names namespaces, and then an `Api::namespaced`
-    // watch each, the only shape the scoped chart's RoleBindings permit. The
     // cluster-scoped `TrustPolicy` store is built once here and shared, not one
     // identical cluster-wide watch per namespace; this is an `async fn` so the
     // reflector is spawned inside the runtime (`tokio::spawn`).
     let policies = crate::trust::spawn_policy_reflector(&client);
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(
-            client.clone(),
-            runner_image.clone(),
-            policies.clone(),
-            namespace,
-        )
-    })
-    .await;
+    controller_in(client.clone(), runner_image.clone(), policies.clone()).await;
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
     shared: crate::trust::SharedPolicies,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<RecoveryCatalog> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<RecoveryCatalog> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let ctx = Arc::new(Context {
         client,
         // NO ARCHIVE HANDLE. The controller reads no archive: the sync Job

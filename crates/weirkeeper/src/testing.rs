@@ -31,6 +31,22 @@ use http_body_util::BodyExt as _;
 use kube::client::Body;
 use tower::util::service_fn;
 
+/// The workspaces every test process runs under: the four of the PoC
+/// (`dev`, `tst`, `stg`, `prd`). [`crate::workspace::install`] is a
+/// process-wide `OnceLock`, as in the controller, so every mock client
+/// constructor sets the same list and a row labels its objects with one of
+/// them.
+pub const TEST_WORKSPACES: &str = "dev,tst,stg,prd";
+
+/// Install [`TEST_WORKSPACES`] for this process (idempotent).
+pub fn install_test_workspaces() {
+    if let Ok(workspaces) =
+        crate::workspace::Workspaces::configured(Ok(TEST_WORKSPACES.to_string()))
+    {
+        crate::workspace::install(String::new(), workspaces);
+    }
+}
+
 /// One recorded answer.
 ///
 /// `path_suffix` is matched with `str::ends_with` against the request path,
@@ -317,6 +333,7 @@ pub fn body_recorder() -> BodyRecorder {
 /// this from inside a tokio runtime (`#[tokio::test]`).
 #[must_use]
 pub fn mock_client_recording(routes: Vec<Route>) -> (kube::Client, Recorder) {
+    install_test_workspaces();
     let recorder = recorder();
     let table = Arc::new(routes);
     let ledger = RvLedger::default();
@@ -354,6 +371,7 @@ pub fn mock_client_recording(routes: Vec<Route>) -> (kube::Client, Recorder) {
 /// be called from inside a tokio runtime.
 #[must_use]
 pub fn mock_client_recording_bodies(routes: Vec<Route>) -> (kube::Client, Recorder, BodyRecorder) {
+    install_test_workspaces();
     let recorder = recorder();
     let bodies = body_recorder();
     let table = Arc::new(routes);
@@ -413,6 +431,7 @@ pub fn mock_client_failing_after(
     status: u16,
     body: String,
 ) -> (kube::Client, Recorder, BodyRecorder) {
+    install_test_workspaces();
     let recorder = recorder();
     let bodies = body_recorder();
     let table = Arc::new(routes);
@@ -783,6 +802,7 @@ pub fn mock_client_with_store(
     routes: Vec<Route>,
     store: SharedStore,
 ) -> (kube::Client, Recorder, BodyRecorder) {
+    install_test_workspaces();
     let recorder = recorder();
     let bodies = body_recorder();
     let table = Arc::new(routes);

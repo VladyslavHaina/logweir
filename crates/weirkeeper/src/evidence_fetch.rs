@@ -529,7 +529,7 @@ pub fn read_relay(relay: &CheckRelay, request: &Request) -> (Presence, Relayed) 
 /// What one pass of [`advance`] found.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// No slot under `checks.maxEvidenceFetchActivePerNamespace`; no Job was
+    /// No slot under `checks.maxEvidenceFetchActivePerWorkspace`; no Job was
     /// created. `Pending`, and the next pass tries again.
     Queued {
         /// The stable sentence the `Pending` verdict carries.
@@ -580,6 +580,8 @@ pub struct Inputs<'a> {
     pub client: &'a kube::Client,
     /// The subject's namespace — the Job's.
     pub namespace: &'a str,
+    /// The subject's workspace label, the pool its fetch counts in.
+    pub workspace: &'a str,
     /// The subject (`Backup` or `Restore`) that owns the Job and its plan.
     pub owner: &'a RunnerOwner,
     /// Which attempt, from 1.
@@ -679,18 +681,22 @@ pub async fn advance(inputs: &Inputs<'_>) -> Result<Step, kube::Error> {
         });
     };
 
-    // THE SLOT, BEFORE ANYTHING IS WRITTEN. A separate per-namespace pool, so
+    // THE SLOT, BEFORE ANYTHING IS WRITTEN. A separate per-workspace pool, so
     // verification cannot be starved by interactive checks (D2 §4.3).
-    let counts = limits::count(&limits::check_jobs(inputs.client).await?, namespace, None);
+    let counts = limits::count(
+        &limits::check_jobs(inputs.client, inputs.namespace).await?,
+        inputs.workspace,
+        None,
+    );
     if let limits::Admission::Queued(code) =
         limits::admit(&counts, inputs.checks, CheckPlanKind::EvidenceFetch)
     {
         return Ok(Step::Queued {
             detail: format!(
-                "waiting for an evidence-fetch slot ({code}): this namespace already runs \
-                 checks.maxEvidenceFetchActivePerNamespace = {} evidence-fetch Jobs; attempt {} \
+                "waiting for an evidence-fetch slot ({code}): this workspace already runs \
+                 checks.maxEvidenceFetchActivePerWorkspace = {} evidence-fetch Jobs; attempt {} \
                  starts when one finishes",
-                inputs.checks.max_evidence_fetch_active_per_namespace, inputs.attempt
+                inputs.checks.max_evidence_fetch_active_per_workspace, inputs.attempt
             ),
         });
     }

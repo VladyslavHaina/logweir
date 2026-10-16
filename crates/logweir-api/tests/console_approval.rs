@@ -569,6 +569,7 @@ async fn a_second_person_approves_with_one_click_and_the_console_signs_who_and_w
     let expected = ExpectedSubject {
         kind: logweir_core::approval_policy::SUBJECT_KIND_RESTORE.to_string(),
         namespace: NS_A.into(),
+        workspace: NS_A.into(),
         name: r.restore.clone(),
         uid: restore["metadata"]["uid"].as_str().expect("uid").into(),
         plan_hash: logweir_core::ids::sha256_prefixed(

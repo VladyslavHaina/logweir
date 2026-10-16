@@ -13,6 +13,8 @@ use weirkeeper::controllers::restore::{
 use weirkeeper::crds::restore::Restore;
 
 const NS: &str = "logweir-plat14-3b";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 const SCHEDULE: &str = "weekly-orders";
 const SCHEDULE_UID: &str = "3f2a91c7-1111-4222-8333-444444444444";
 const APPROVAL: &str = "weekly-orders-standing";
@@ -88,7 +90,7 @@ fn approval_over(envelope: &str) -> weirkeeper::crds::approval::Approval {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Approval",
-        "metadata": {"name": APPROVAL, "namespace": NS, "uid": APPROVAL_UID},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": APPROVAL, "namespace": NS, "uid": APPROVAL_UID},
         "spec": {
             "subjectRef": {"kind": "RehearsalSchedule", "name": SCHEDULE},
             "planHash": "sha256:aa",
@@ -120,7 +122,7 @@ fn standing_restore() -> Restore {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Restore",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, 
             "name": "logweir-rehearsal-weekly-orders-20260920-030000",
             "namespace": NS,
             "uid": "restore-uid-1",
@@ -168,7 +170,7 @@ fn cluster(reachable: bool) -> weirkeeper::crds::kafka_cluster::KafkaCluster {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "KafkaCluster",
-        "metadata": {"name": TARGET, "namespace": NS, "uid": "cluster-uid"},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": TARGET, "namespace": NS, "uid": "cluster-uid"},
         "spec": {"bootstrapServers": ["kafka-target:9092"], "auth": {"mode": "plaintext"}, "role": "scratch"},
         "status": {"reachable": reachable, "clusterId": TARGET_CLUSTER_ID},
     }))

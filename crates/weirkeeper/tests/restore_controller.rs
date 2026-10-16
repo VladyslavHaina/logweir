@@ -68,6 +68,8 @@ use weirkeeper::verification::{unverified_evidence, VerificationResult, Verifica
 
 /// The test namespace.
 const NS: &str = "logweir-t20";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 
 /// The `Restore`'s name. The Job is named after this object VERBATIM, so it is
 /// inside the 63-character `batch.kubernetes.io/job-name` cap (see
@@ -233,7 +235,7 @@ fn restore_json(plan_bytes: &str, approval_ref: &str, name: &str) -> String {
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "Restore",
-  "metadata": {{ "name": "{name}", "namespace": "{NS}", "uid": "{UID}", "generation": 2,
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}}, "name": "{name}", "namespace": "{NS}", "uid": "{UID}", "generation": 2,
                   "resourceVersion": "{FIXTURE_RESOURCE_VERSION}" }},
   "spec": {{
     "planBytes": {plan},
@@ -296,7 +298,7 @@ fn approval_json(verified: bool, doc_hash: &str, cached_hash: &str) -> String {
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "Approval",
-  "metadata": {{ "name": "{APPROVAL}", "namespace": "{NS}", "uid": "aaaaaaaa-0000-4000-8000-00000000000a" }},
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}}, "name": "{APPROVAL}", "namespace": "{NS}", "uid": "aaaaaaaa-0000-4000-8000-00000000000a" }},
   "spec": {{
     "subjectRef": {{ "kind": "Restore", "name": "{NAME}" }},
     "planHash": "{cached_hash}",
@@ -329,7 +331,7 @@ fn cluster_json(reachable: bool, auth: &str) -> String {
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "KafkaCluster",
-  "metadata": {{ "name": "scratch", "namespace": "{NS}", "uid": "{CLUSTER_UID}" }},
+  "metadata": {{"labels":{{"logweir.dev/workspace":"dev"}}, "name": "scratch", "namespace": "{NS}", "uid": "{CLUSTER_UID}" }},
   "spec": {{
     "bootstrapServers": ["scratch-0.logweir-t20:9092"],
     "auth": {auth},
@@ -2058,6 +2060,8 @@ async fn upgrade_after_legacy_plan_creation_safely_creates_a_pinned_job() {
 
 #[tokio::test]
 async fn a_concurrent_job_create_is_accepted_only_after_owner_uid_revalidation() {
+    // A hand-built client: install the test workspaces the mock clients do.
+    weirkeeper::testing::install_test_workspaces();
     let job_gets = Arc::new(Mutex::new(0usize));
     let job_gets_for_service = Arc::clone(&job_gets);
     let service = service_fn(move |request: Request<Body>| {
@@ -6628,7 +6632,7 @@ const EVIDENCE_UID: &str = "d0000000-0000-4000-8000-0000000000b1";
 fn source_destination_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": WS},
             "name": "src", "namespace": NS, "uid": SOURCE_UID,
             "generation": 1, "resourceVersion": "11"
         },
@@ -6665,7 +6669,7 @@ fn source_destination_value() -> Value {
 fn evidence_destination_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {
+        "metadata": {"labels": {"logweir.dev/workspace": WS},
             "name": "ev", "namespace": NS, "uid": EVIDENCE_UID,
             "generation": 1, "resourceVersion": "22"
         },
@@ -9099,7 +9103,7 @@ fn pool_routes(restore: &Restore) -> Vec<Route> {
 }
 
 /// One pooled pass of `candidate`, over the snapshot `peers`, with the
-/// installation policy's ceiling (`runs.maxManualRestoresActivePerNamespace`,
+/// installation policy's ceiling (`runs.maxManualRestoresActivePerWorkspace`,
 /// default 2) and the reservation registry `reservations`.
 async fn pooled_restore_pass(
     candidate: &Restore,
@@ -9141,7 +9145,7 @@ fn running_peer(name: &str, uid: &str, minute: u32) -> Restore {
 }
 
 /// **N+1 admitted manual restores make N Jobs and one queued run** (N = 2,
-/// the default `runs.maxManualRestoresActivePerNamespace`, read from the
+/// the default `runs.maxManualRestoresActivePerWorkspace`, read from the
 /// installation policy because the row names no ceiling).
 ///
 /// Two older manual restores hold both slots: the third — approved, admitted,

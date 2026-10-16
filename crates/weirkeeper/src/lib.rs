@@ -11,8 +11,9 @@
 //!   instead of writing a second, partial archive. [`cadence`] is the one
 //!   cadence evaluator: the scheduler and the API's
 //!   `GET /api/v1/cadence-previews` both read it.
-//! * **The controller never dials a broker and never reads a Secret** (spec
-//!   §9). Every execution, probe and check is a short-lived runner Job
+//! * **The controller never dials a broker and never reads a Secret's data**
+//!   (spec §9); it reads a named Secret's metadata only, for its workspace
+//!   label ([`workspace::gate`]). Every execution, probe and check is a short-lived runner Job
 //!   ([`job::build`]) whose credentials the kubelet projects from references
 //!   [`connection`] and [`destination`] resolve; the controller reads the
 //!   result off the pod log.
@@ -74,7 +75,6 @@ pub mod runner_log;
 /// before they reach the runner container, and the ceilings they are refused
 /// above.
 pub mod runner_resources;
-pub mod scope;
 pub mod slot;
 /// PROD-05.1a: the read of a Strimzi cluster's `KafkaTopic` resources.
 pub mod strimzi_topics;

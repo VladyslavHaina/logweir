@@ -745,6 +745,7 @@ impl Pass<'_> {
             kind: RetentionPolicy::kind(&()).to_string(),
             name: self.name.clone(),
             uid: self.uid.clone(),
+            workspace: crate::workspace::label_of(self.policy).map(str::to_string),
         }
     }
 
@@ -1854,13 +1855,13 @@ impl Pass<'_> {
         location_id: &str,
     ) -> Result<BTreeSet<String>, ReconcileError> {
         // A consistent list: `ListParams` with no `resource_version` is a
-        // quorum read from etcd, not the watch cache, over every namespace this
-        // controller acts in (`crate::scope`). A restore in a namespace the
-        // controller cannot see cannot be running a Job this controller
-        // created.
+        // quorum read from etcd, not the watch cache, of the install's one
+        // namespace, so every workspace's restores protect a shared set.
         let restores: Vec<Restore> =
-            crate::scope::list_everywhere::<Restore>(self.ctx.client, &ListParams::default())
-                .await?;
+            Api::<Restore>::namespaced(self.ctx.client.clone(), &self.namespace)
+                .list(&ListParams::default())
+                .await?
+                .items;
         let mut active_sets: BTreeSet<String> = BTreeSet::new();
         for restore in &restores {
             if is_terminal_restore(restore) {
@@ -2474,7 +2475,10 @@ impl Pass<'_> {
             ),
             (LABEL_POLICY_UID.to_string(), self.uid.clone()),
         ]);
-        job.metadata.labels = Some(labels.clone());
+        job.metadata
+            .labels
+            .get_or_insert_with(Default::default)
+            .extend(labels.clone());
         if let Some(spec) = job.spec.as_mut() {
             let mut meta = spec.template.metadata.take().unwrap_or_default();
             meta.labels = Some(labels);
@@ -4243,6 +4247,11 @@ async fn reconcile(
     policy: Arc<RetentionPolicy>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
+    // PROD-19.1: the object's workspace, and every object and Secret it
+    // names, before anything else; a refusal is terminal and creates nothing.
+    if let Some(action) = crate::workspace::gate(&ctx.client, policy.as_ref()).await? {
+        return Ok(action);
+    }
     let installation = installation_policy(&ctx.client).await;
     let outcome = reconcile_policy(
         &policy,
@@ -4297,24 +4306,16 @@ pub fn controller(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
 ) -> impl std::future::Future<Output = ()> + Send {
-    // One watch per watched namespace: `crate::scope` is the whole cluster
-    // unless `LOGWEIR_WATCH_NAMESPACES` names the execution namespaces, and
-    // then this reconciler runs once per namespace with an `Api::namespaced`
-    // watch, the only shape the scoped chart's RoleBindings permit.
-    crate::scope::run_everywhere(move |namespace| {
-        controller_in(client.clone(), runner_image.clone(), namespace)
-    })
+    controller_in(client.clone(), runner_image.clone())
 }
 
-/// One watch of [`controller`], over `namespace` (`None` is the whole
-/// cluster).
+/// The one watch of [`controller`], in the install's namespace.
 fn controller_in(
     client: kube::Client,
     runner_image: crate::job::RunnerImage,
-    namespace: Option<String>,
 ) -> impl std::future::Future<Output = ()> + Send {
-    let api: Api<RetentionPolicy> = crate::scope::api(&client, namespace.as_deref());
-    let jobs: Api<Job> = crate::scope::api(&client, namespace.as_deref());
+    let api: Api<RetentionPolicy> = Api::namespaced(client.clone(), crate::workspace::namespace());
+    let jobs: Api<Job> = Api::namespaced(client.clone(), crate::workspace::namespace());
     let ctx = Arc::new(Context {
         client,
         archive: None,

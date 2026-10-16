@@ -13,10 +13,40 @@
 //!   in the list ([`Workspaces::of`]);
 //! * [`REASON_MISMATCH`]: a spec reference names an object of another
 //!   workspace ([`same`]).
+//!
+//! [`gate`] applies both at the top of every namespaced reconcile, to the
+//! object and to every object and **Secret** it names (directly, or through
+//! its `KafkaCluster`s and `BackupDestination`s). The Secret rule is what keeps
+//! the install's keys out of runner Jobs now that they share the namespace:
+//! the signing key, the console's keys and the OIDC client secret carry no
+//! workspace label, so no object can name them, and a credential Secret must
+//! carry its referrer's label (the API writes it on every credential it
+//! creates; a `kubectl` writer must set it).
 
 use std::fmt;
+use std::sync::OnceLock;
 
-use kube::Resource;
+use chrono::Utc;
+use k8s_openapi::api::core::v1::Secret;
+use k8s_openapi::NamespaceResourceScope;
+use kube::api::{Patch, PatchParams};
+use kube::runtime::controller::Action;
+use kube::{Api, Client, Resource, ResourceExt};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use serde_json::json;
+
+use crate::crds::approval::{Approval, SubjectKind};
+use crate::crds::backup::Backup;
+use crate::crds::backup_destination::{BackupDestination, S3SecretKeysRef};
+use crate::crds::backup_schedule::BackupSchedule;
+use crate::crds::kafka_cluster::KafkaCluster;
+use crate::crds::protection_policy::ProtectionPolicy;
+use crate::crds::recovery_catalog::RecoveryCatalog;
+use crate::crds::restore::Restore;
+use crate::crds::retention_policy::RetentionPolicy;
+use crate::crds::switchover::Switchover;
+use crate::crds::{ArchiveRef, LocalRef};
 
 /// The label every Logweir object carries.
 pub const LABEL: &str = "logweir.dev/workspace";
@@ -219,6 +249,402 @@ where
         referrer_kind: A::kind(&()).into_owned(),
         referrer_workspace: mine.map(str::to_string),
     })
+}
+
+static INSTALL: OnceLock<(String, Workspaces)> = OnceLock::new();
+
+/// Fix this process's install: the one namespace every watch runs in, and
+/// the workspaces. `main` calls it once, before any reconciler starts; a
+/// second call is ignored and returns `false`.
+pub fn install(namespace: String, workspaces: Workspaces) -> bool {
+    INSTALL.set((namespace, workspaces)).is_ok()
+}
+
+/// The install's workspaces. Before [`install`] the list is empty, so every
+/// object is refused [`REASON_UNKNOWN`]: the closed side.
+#[must_use]
+pub fn installed() -> &'static Workspaces {
+    static NONE: Workspaces = Workspaces(Vec::new());
+    INSTALL.get().map_or(&NONE, |(_, workspaces)| workspaces)
+}
+
+/// The install's namespace (`LOGWEIR_INSTALLATION_NAMESPACE`), where every
+/// namespaced watch runs.
+#[must_use]
+pub fn namespace() -> &'static str {
+    INSTALL
+        .get()
+        .map_or("", |(namespace, _)| namespace.as_str())
+}
+
+/// One object a Logweir object names, whose workspace label must be the
+/// referrer's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Referent {
+    /// A `KafkaCluster`; its own Secrets are checked against the referrer too.
+    Cluster(String),
+    /// A `BackupDestination`; its own Secrets are checked too.
+    Destination(String),
+    /// A `RecoveryCatalog`.
+    Catalog(String),
+    /// A `BackupSchedule`.
+    Schedule(String),
+    /// A `Backup`.
+    Backup(String),
+    /// A `Restore`.
+    Restore(String),
+    /// A `Switchover`.
+    Switchover(String),
+    /// An `Approval`.
+    Approval(String),
+    /// A Secret the object names: a runner Job would mount it, so a Secret
+    /// without the referrer's label (the signing key, the console's keys, the
+    /// OIDC client secret, another workspace's credential) is refused.
+    Secret(String),
+}
+
+/// A Logweir kind the workspace gate admits.
+pub trait Referrer:
+    Resource<DynamicType = (), Scope = NamespaceResourceScope>
+    + Clone
+    + DeserializeOwned
+    + Serialize
+    + fmt::Debug
+{
+    /// Every object its spec names (PROD-19.1 §4.1).
+    fn referents(&self) -> Vec<Referent>;
+}
+
+/// A reference's name.
+#[must_use]
+pub fn local(r: &LocalRef) -> String {
+    r.name.clone()
+}
+
+/// The Secret an archive reference names, as a referent.
+#[must_use]
+pub fn archive_secret(archive: Option<&ArchiveRef>) -> Option<Referent> {
+    archive
+        .and_then(|a| a.secret_ref.as_ref())
+        .map(|s| Referent::Secret(s.name.clone()))
+}
+
+impl Referrer for KafkaCluster {
+    fn referents(&self) -> Vec<Referent> {
+        let auth = &self.spec.auth;
+        [
+            auth.secret_ref.as_ref().map(|s| s.name.clone()),
+            auth.client_certificate.as_ref().map(|s| s.name.clone()),
+            auth.tls_ca
+                .as_ref()
+                .and_then(|ca| ca.secret_key_ref.as_ref())
+                .map(|s| s.name.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        .map(Referent::Secret)
+        .collect()
+    }
+}
+
+impl Referrer for BackupDestination {
+    fn referents(&self) -> Vec<Referent> {
+        let access = &self.spec.access;
+        let named = |s: Option<&S3SecretKeysRef>| s.map(|s| Referent::Secret(s.name.clone()));
+        [
+            named(access.archive_write.secret.as_ref()),
+            named(access.archive_read.as_ref().and_then(|g| g.secret.as_ref())),
+            named(
+                access
+                    .evidence_write
+                    .as_ref()
+                    .and_then(|g| g.secret.as_ref()),
+            ),
+            named(
+                access
+                    .evidence_read
+                    .as_ref()
+                    .and_then(|g| g.secret.as_ref()),
+            ),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+impl Referrer for Backup {
+    fn referents(&self) -> Vec<Referent> {
+        let spec = &self.spec;
+        let mut out = vec![Referent::Cluster(local(&spec.source_ref))];
+        out.extend(
+            spec.destination_ref
+                .as_ref()
+                .map(|r| Referent::Destination(local(r))),
+        );
+        out.extend(
+            spec.trigger
+                .as_ref()
+                .and_then(|t| t.retry_of.as_ref())
+                .map(|r| Referent::Backup(local(r))),
+        );
+        out.extend(archive_secret(Some(&spec.archive)));
+        out
+    }
+}
+
+impl Referrer for BackupSchedule {
+    fn referents(&self) -> Vec<Referent> {
+        let spec = &self.spec;
+        let mut out = vec![Referent::Cluster(local(&spec.source_ref))];
+        out.extend(
+            spec.destination_ref
+                .as_ref()
+                .map(|r| Referent::Destination(local(r))),
+        );
+        out.extend(archive_secret(Some(&spec.archive)));
+        out
+    }
+}
+
+impl Referrer for Restore {
+    fn referents(&self) -> Vec<Referent> {
+        let spec = &self.spec;
+        let mut out = vec![Referent::Cluster(local(&spec.target.cluster_ref))];
+        out.extend(
+            spec.approval_ref
+                .as_ref()
+                .map(|r| Referent::Approval(local(r))),
+        );
+        out.extend(
+            [&spec.source_destination_ref, &spec.evidence_destination_ref]
+                .into_iter()
+                .flatten()
+                .map(|r| Referent::Destination(local(r))),
+        );
+        out.extend(archive_secret(Some(&spec.source_archive)));
+        out
+    }
+}
+
+impl Referrer for Approval {
+    fn referents(&self) -> Vec<Referent> {
+        let name = self.spec.subject_ref.name.clone();
+        match self.spec.subject_ref.kind {
+            SubjectKind::Restore => vec![Referent::Restore(name)],
+            SubjectKind::Switchover => vec![Referent::Switchover(name)],
+            SubjectKind::Backup => vec![Referent::Backup(name)],
+            SubjectKind::RehearsalSchedule => Vec::new(),
+        }
+    }
+}
+
+impl Referrer for Switchover {
+    fn referents(&self) -> Vec<Referent> {
+        vec![
+            Referent::Approval(local(&self.spec.approval_ref)),
+            Referent::Restore(self.spec.restore_ref.name.clone()),
+        ]
+    }
+}
+
+impl Referrer for RecoveryCatalog {
+    fn referents(&self) -> Vec<Referent> {
+        let spec = &self.spec;
+        let mut out: Vec<Referent> = spec
+            .destination_ref
+            .as_ref()
+            .map(|r| Referent::Destination(local(r)))
+            .into_iter()
+            .collect();
+        out.extend(archive_secret(spec.legacy_archive.as_ref()));
+        out
+    }
+}
+
+impl Referrer for RetentionPolicy {
+    fn referents(&self) -> Vec<Referent> {
+        let spec = &self.spec;
+        let mut out = vec![
+            Referent::Destination(local(&spec.destination_ref)),
+            Referent::Catalog(local(&spec.catalog_ref)),
+        ];
+        out.extend(
+            spec.enforcement
+                .as_ref()
+                .map(|e| Referent::Secret(local(&e.credential_secret_ref))),
+        );
+        out
+    }
+}
+
+impl Referrer for ProtectionPolicy {
+    fn referents(&self) -> Vec<Referent> {
+        let p = &self.spec.protects;
+        let mut out = vec![Referent::Cluster(local(&p.source_ref))];
+        out.extend(
+            p.schedule_refs
+                .iter()
+                .flatten()
+                .map(|r| Referent::Schedule(local(r))),
+        );
+        out.extend(
+            p.destination_ref
+                .as_ref()
+                .map(|r| Referent::Destination(local(r))),
+        );
+        out.extend(p.catalog_ref.as_ref().map(|r| Referent::Catalog(local(r))));
+        out.extend(archive_secret(p.legacy_archive.as_ref()));
+        out
+    }
+}
+
+/// **The workspace gate**, at the top of every namespaced reconcile: the
+/// object's own label must be one of the install's workspaces
+/// ([`REASON_UNKNOWN`]), and every object and Secret it names, and every
+/// Secret its `KafkaCluster`s and `BackupDestination`s name, must carry the
+/// same label ([`REASON_MISMATCH`]). A referent that does not exist is left to
+/// the reconcile, which already says so. An object being deleted is let
+/// through, so its clean-up still runs.
+///
+/// # Errors
+///
+/// A [`kube::Error`] reading a referent: a requeue, never an admission.
+pub async fn admit<K: Referrer>(
+    client: &Client,
+    object: &K,
+) -> Result<Option<Refusal>, kube::Error> {
+    if object.meta().deletion_timestamp.is_some() {
+        return Ok(None);
+    }
+    if let Err(refusal) = installed().of(object) {
+        return Ok(Some(refusal));
+    }
+    let namespace = object.namespace().unwrap_or_default();
+    let mut pending = object.referents();
+    while let Some(referent) = pending.pop() {
+        let verdict = match referent {
+            Referent::Cluster(name) => {
+                let api: Api<KafkaCluster> = Api::namespaced(client.clone(), &namespace);
+                match api.get_opt(&name).await? {
+                    Some(cluster) => {
+                        pending.extend(cluster.referents());
+                        same(object, &cluster)
+                    }
+                    None => Ok(()),
+                }
+            }
+            Referent::Destination(name) => {
+                let api: Api<BackupDestination> = Api::namespaced(client.clone(), &namespace);
+                match api.get_opt(&name).await? {
+                    Some(destination) => {
+                        pending.extend(destination.referents());
+                        same(object, &destination)
+                    }
+                    None => Ok(()),
+                }
+            }
+            Referent::Catalog(name) => {
+                let api: Api<RecoveryCatalog> = Api::namespaced(client.clone(), &namespace);
+                labelled_like(object, api.get_metadata_opt(&name).await?)
+            }
+            Referent::Schedule(name) => {
+                let api: Api<BackupSchedule> = Api::namespaced(client.clone(), &namespace);
+                labelled_like(object, api.get_metadata_opt(&name).await?)
+            }
+            Referent::Backup(name) => {
+                let api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
+                labelled_like(object, api.get_metadata_opt(&name).await?)
+            }
+            Referent::Restore(name) => {
+                let api: Api<Restore> = Api::namespaced(client.clone(), &namespace);
+                labelled_like(object, api.get_metadata_opt(&name).await?)
+            }
+            Referent::Switchover(name) => {
+                let api: Api<Switchover> = Api::namespaced(client.clone(), &namespace);
+                labelled_like(object, api.get_metadata_opt(&name).await?)
+            }
+            Referent::Approval(name) => {
+                let api: Api<Approval> = Api::namespaced(client.clone(), &namespace);
+                labelled_like(object, api.get_metadata_opt(&name).await?)
+            }
+            Referent::Secret(name) => {
+                let api: Api<Secret> = Api::namespaced(client.clone(), &namespace);
+                labelled_like(object, api.get_metadata_opt(&name).await?)
+            }
+        };
+        if let Err(refusal) = verdict {
+            return Ok(Some(refusal));
+        }
+    }
+    Ok(None)
+}
+
+fn labelled_like<A, B>(referrer: &A, referent: Option<B>) -> Result<(), Refusal>
+where
+    A: Resource<DynamicType = ()>,
+    B: Resource<DynamicType = ()>,
+{
+    referent.map_or(Ok(()), |referent| same(referrer, &referent))
+}
+
+/// [`admit`], and on a refusal the terminal status: `phase: Failed` (a kind
+/// with no phase prunes it) and one `Failed=True` condition with the reason
+/// and the sentence, written once. `Some(action)` when the object was refused
+/// and the reconcile must stop with it; nothing else is created for it.
+///
+/// # Errors
+///
+/// A [`kube::Error`] reading a referent or writing the status.
+pub async fn gate<K: Referrer>(client: &Client, object: &K) -> Result<Option<Action>, kube::Error> {
+    let Some(refusal) = admit(client, object).await? else {
+        return Ok(None);
+    };
+    let reason = refusal.reason();
+    let message = refusal.to_string();
+    let written = serde_json::to_value(object)
+        .ok()
+        .and_then(|v| v.pointer("/status/conditions").cloned())
+        .and_then(|c| c.as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .any(|c| c["reason"] == reason && c["message"] == message.as_str());
+    if !written {
+        let api: Api<K> = Api::namespaced(client.clone(), &object.namespace().unwrap_or_default());
+        let patch = json!({
+            "status": {
+                "phase": "Failed",
+                "conditions": [{
+                    "type": "Failed",
+                    "status": "True",
+                    "reason": reason,
+                    "message": message,
+                    "observedGeneration": object.meta().generation,
+                    "lastTransitionTime": Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                }],
+            }
+        });
+        api.patch_status(
+            &object.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+    }
+    Ok(Some(Action::await_change()))
+}
+
+/// Copy `parent`'s workspace label onto an object the controller creates for
+/// it (a Backup from a schedule, a runner Job), so lists, caps and
+/// per-workspace views see it.
+pub fn copy_label<P: Resource, C: Resource>(parent: &P, child: &mut C) {
+    if let Some(workspace) = label_of(parent) {
+        child
+            .meta_mut()
+            .labels
+            .get_or_insert_with(Default::default)
+            .insert(LABEL.to_string(), workspace.to_string());
+    }
 }
 
 /// The object's workspace label, as written.

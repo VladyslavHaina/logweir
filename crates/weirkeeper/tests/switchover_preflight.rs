@@ -20,6 +20,8 @@ use weirkeeper::crds::preflight::{
 use weirkeeper::crds::restore::Restore;
 
 const NS: &str = "team-a";
+/// The workspace every fixture below is in (PROD-19.1).
+const WS: &str = "dev";
 
 fn now() -> chrono::DateTime<chrono::Utc> {
     "2026-10-13T12:00:00Z".parse().expect("an instant")
@@ -88,7 +90,7 @@ fn restore_object(mode: &str, phase: &str, verdict: &str, evidence_ref: bool) ->
     }
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
-        "metadata": {"name": "incident", "namespace": NS, "uid": "r-uid", "generation": 1},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "incident", "namespace": NS, "uid": "r-uid", "generation": 1},
         "spec": spec,
         "status": {"phase": phase,
                    "evidence": {"scorecardKey": "logweir/drills/run-1.json",
@@ -265,7 +267,7 @@ fn the_facts_are_read_off_the_restore_and_the_request() {
 fn target_cluster() -> weirkeeper::crds::kafka_cluster::KafkaCluster {
     serde_json::from_value(json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
-        "metadata": {"name": "target", "namespace": NS, "uid": "c-uid", "generation": 1},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "target", "namespace": NS, "uid": "c-uid", "generation": 1},
         "spec": {
             "bootstrapServers": ["target-kafka:9092"],
             "role": "target",
@@ -285,7 +287,7 @@ fn evidence_destination() -> Value {
     };
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {"name": "evidence", "namespace": NS, "uid": "d-uid", "generation": 1},
+        "metadata": {"labels": {"logweir.dev/workspace": WS}, "name": "evidence", "namespace": NS, "uid": "d-uid", "generation": 1},
         "spec": {
             "storage": {"provider": "S3", "bucket": "evidence", "addressing": "PathStyle"},
             "transport": {"security": "TLS"},
@@ -345,6 +347,7 @@ fn a_review_renders_its_plan_and_projects_the_target_and_the_evidence_read_grant
         kind: "Preflight".into(),
         name: "pf-1".into(),
         uid: "pf-uid".into(),
+        workspace: None,
     };
     let shape = pf::build_job_shape(&inputs, &owner, &weirkeeper::job::RunnerImage::default())
         .expect("the shape renders");
