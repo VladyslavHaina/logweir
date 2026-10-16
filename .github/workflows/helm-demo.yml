@@ -72,8 +72,8 @@ jobs:
           head -c 32 /dev/urandom > "$key"
           kubectl --context kind-logweir -n logweir-system create secret generic logweir-console-keys --from-file=cursor.key="$key"
           rm -f "$key"
-      # demo.values.yaml turns on MinIO, both brokers and the console
-      # (localAdmin). The walk administers trust itself (its TrustRoster at
+      # demo.values.yaml turns on MinIO, both brokers, the console (localAdmin)
+      # and two workspaces, default and other, all in logweir-system. The walk administers trust itself (its TrustRoster at
       # step 3, its approver key at step 7), so the fresh install's default
       # TrustPolicy, which would supersede that roster, is turned off.
       - name: helm install (author-only images; NOT evidence for §16 clause 1)
@@ -100,22 +100,21 @@ jobs:
           echo "rc=$? (kubectl get events -A)"
           helm --kube-context kind-logweir -n logweir-system status logweir > diagnostics/helm-status.txt 2>&1
           echo "rc=$? (helm status logweir)"
-          for ns in logweir-system logweir-helm; do
-            for pod in $(kubectl --context kind-logweir -n "$ns" get pods -o name 2>/dev/null); do
-              name="${pod#pod/}"
-              kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --tail=2000 \
-                > "diagnostics/$ns-$name.log" 2>&1
-              echo "rc=$? (logs $ns/$name)"
-              kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --previous --tail=2000 \
-                > "diagnostics/$ns-$name.previous.log" 2>&1
-              echo "rc=$? (logs $ns/$name --previous)"
-              kubectl --context kind-logweir -n "$ns" describe "$pod" \
-                > "diagnostics/$ns-$name.describe.txt" 2>&1
-              echo "rc=$? (describe $ns/$name)"
-              echo "--- $ns/$name (last 40 lines, current then previous) ---"
-              tail -40 "diagnostics/$ns-$name.log"
-              tail -40 "diagnostics/$ns-$name.previous.log"
-            done
+          ns=logweir-system
+          for pod in $(kubectl --context kind-logweir -n "$ns" get pods -o name 2>/dev/null); do
+            name="${pod#pod/}"
+            kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --tail=2000 \
+              > "diagnostics/$ns-$name.log" 2>&1
+            echo "rc=$? (logs $ns/$name)"
+            kubectl --context kind-logweir -n "$ns" logs "$pod" --all-containers --previous --tail=2000 \
+              > "diagnostics/$ns-$name.previous.log" 2>&1
+            echo "rc=$? (logs $ns/$name --previous)"
+            kubectl --context kind-logweir -n "$ns" describe "$pod" \
+              > "diagnostics/$ns-$name.describe.txt" 2>&1
+            echo "rc=$? (describe $ns/$name)"
+            echo "--- $ns/$name (last 40 lines, current then previous) ---"
+            tail -40 "diagnostics/$ns-$name.log"
+            tail -40 "diagnostics/$ns-$name.previous.log"
           done
           cp -r .demo/helm diagnostics/walk 2>/dev/null
           rm -f diagnostics/walk/*.pem

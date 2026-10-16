@@ -251,7 +251,7 @@ data:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: logweir-api-config-219f61b403
+  name: logweir-api-config-d2d443be99
   namespace: logweir-system
   labels:
     app.kubernetes.io/name: logweir
@@ -271,6 +271,7 @@ data:
     namespace: logweir-system
     workspaces:
       - default
+      - other
     kubernetes:
       source: inCluster
       principal: "system:serviceaccount:logweir-system:logweir-api"
@@ -511,6 +512,8 @@ rules:
   # PROD-19.1: the workspace gate's metadata read of every Secret an object
   # names, so a runner Job never mounts one of another workspace or one with
   # no workspace (the signing key, the console's keys). No `list`, no `watch`.
+  # RBAC has no metadata-only `get`: the grant can read data, the code reads
+  # only labels, and the controller could already mount any Secret in a Job.
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get"]
@@ -978,7 +981,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
             - name: LOGWEIR_WORKSPACES
-              value: "default"
+              value: "default,other"
             - name: LOGWEIR_IDENTITY_PUBLIC_CONFIGMAP
               value: "logweir-signing-trust"
             - name: AWS_ENDPOINT_URL
@@ -1116,7 +1119,7 @@ spec:
   template:
     metadata:
       annotations:
-        checksum/logweir-api-config: 219f61b403e922c62bc15c259dcfe5517e9a18d6ad801dd31db94bd41b1739c5
+        checksum/logweir-api-config: d2d443be99a628cb835685b66b0c8b1c34f12774bd0168aaeece78e2986f5b5a
       labels:
         app.kubernetes.io/name: logweir
         app.kubernetes.io/instance: logweir
@@ -1172,7 +1175,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: logweir-api-config-219f61b403
+            name: logweir-api-config-d2d443be99
             items:
               - key: config.yaml
                 path: config.yaml
