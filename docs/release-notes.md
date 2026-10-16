@@ -37,7 +37,7 @@ landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
 landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
 is below. Items 102 to 129 landed after the `v0.3.0` tag and are in the
 `v0.4.0` release, whose record is below. Items 130 to 136 landed after the
-`v0.4.0` tag and are in no release yet.
+`v0.4.0` tag and are in the `v0.4.1` release, whose record is below.
 
 ### Candidate record
 
@@ -63,6 +63,65 @@ pass.
 | `ui/` bundle, file by file | the output of the next entry's command, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate | PROD-14.1 on docker-desktop (arm64, Kubernetes 1.34, Helm 4.0.1), shared mode with Traefik, Dex and cert-manager, MinIO storage: the disconnected recovery from the kit (5 min 37 s, at `22dc6147`); a fresh install to the first verified restore in 4 min 22 s (at `22dc6147`); the upgrade to this publication (`96e601f0`, Helm revision 6) with every fix re-checked live, including FX-15's retention refusal and the console's visual-pass fixes |
 | Checks deliberately deferred, each with its reason | item 76's bundle-to-chart walk (`v0.2.0-rc.1` ships no `logweir.yaml` to walk from; it stays `[UNVERIFIED]`); cosmetic console findings of the visual pass and its re-check (catalog rows at 1024 px, a large integer's display, four wording slips), recorded for v1.1 |
+
+### `v0.4.1`: the release after `v0.4.0`
+
+The deep UI validation's follow-ups and the Dependabot clean-up (FX-52,
+OD-21), proven once on the PoC by the upgrade to this publication. It is
+`v0.4.0` (the next record) plus items 130 to 136:
+
+- **`kubectl get` names why a run ended (item 130):** a `REASON` column, after
+  AGE, on Backups and on every kind whose status holds its reason, and
+  `FAILED` on Backups with `-o wide`. Apply the CRDs first (items 130 and
+  131); until then `kubectl get` prints the old columns.
+- **A clean drill records what its teardown removed (item 131):**
+  `Restore.status.teardown` gains `attestationKey`, `deleted` and
+  `deletedCount` beside `failed`, from the runner's sealed lines. Roll the
+  runner with the controller (one `helm upgrade`); an older runner leaves
+  `deleted` absent.
+- **Fewer false causes (items 132 to 134):** `RunnerOlderThanController` only
+  when the runner's log shows it refusing `--runner-line-token`, so a run with
+  no sealed end is said as observed and a schedule retries it; an expired
+  approval keeps its reason and `lastTransitionTime` while an upgrade lifts
+  its binding; a legal topic name in a message's topic position is shown
+  whole, after the secret-shape rules. Upgrade the runner and the controller
+  together (item 134).
+- **The chart sets the console's OIDC scopes and display-name claim
+  (item 135):** `api.console.oidc.scopes` and
+  `api.console.oidc.displayNameClaim`, empty by default, so a render that sets
+  neither is unchanged. A provider that refuses a default scope, such as
+  item 112's `email`, sets the scopes without it ([install.md](install.md)).
+- **Console dependencies (item 136):** Dependabot #50, #52, #53 and #55;
+  TypeScript stays 5.9.3. Anyone building the console needs Node ≥ 22.22.2 or
+  ≥ 24.15 (jsdom 30); the image's builder runs 22.23.3.
+- **Before a rollback below this release:** remove `api.console.oidc.scopes`
+  and `api.console.oidc.displayNameClaim` from the values first, because an
+  older chart's schema refuses them (item 135). The controller and the runner
+  roll back in either order (item 131). No item of this release adds a
+  numbered rollback step: item 130 changes printer columns only, and item 131
+  writes status fields the `Restore` CRD already carries.
+
+### Candidate record, `v0.4.1`
+
+Filled as the next record is: before the tag from the release dry run; the
+release run, chart and archive rows after the tag.
+
+| What | Value |
+|---|---|
+| Candidate commit (the tagged commit) | `de862863`, the commit that added this record, on `claude/rel-v041` (merged into `main` afterwards); it differs from the publication commit only under `docs/` |
+| Version tag | `v0.4.1`, pushed 2026-10-16, approved by the owner on 2026-10-15 (OD-21: "i approve 4.1"); a full GitHub Release |
+| Publication commit (`release.json` `.images.publication`) | `4bb185d5b006b5337328697b4775d1b0bf49be32` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [38816809633](https://github.com/VladyslavHaina/logweir/actions/runs/38816809633): every job green, including `check`, `console`, the five `e2e` shards and `publish` (build amd64, build arm64, promote, sign) |
+| Release dry run (`release.yml` dispatched on `claude/rel-v041` at the publication commit) | [38823153011](https://github.com/VladyslavHaina/logweir/actions/runs/38823153011), every job green, including `validate`, `images`, `plan`, the three CLI builds, `drill / drill-from-artifact`, `assemble` and the full `ci.yml` (`tests`); `release.sh verify` on its `release-assets` from a checkout of the publication commit: 13 assets verified; the chart 0.4.1 package (sha256 `2407e3200410cf8f7a3348e6b3d5bb348d137327f17cde6529f8081ae60762c3`) pins the four digests of `images.json` in its `values.yaml`; the release drill's signed scorecard verifies with the release's `verify_scorecard.py` 1.34.0, outcome `pass` (the release drill runs OSO's 0.23.3, the one-release rollback engine, by design) |
+| Release run (`release.yml` on the tag) and release drill | [38826142726](https://github.com/VladyslavHaina/logweir/actions/runs/38826142726): every job green on attempt 1, including the full `ci.yml`, three builds, `drill / drill-from-artifact`, `publish-images` and `github-release`; the version tags name the dry run's three digests (read back with `docker buildx imagetools inspect`); a fresh `gh release download` passes `SHA256SUMS` and `release.sh verify` (13 assets) |
+| Runner image digest (`logweir`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir@sha256:233325b8d0c2e005ec1ab473377e571ac3a47dfa7e432fe841435329524194c0` |
+| Controller image digest (`weirkeeper`; amd64 and arm64) | `docker.io/vladyslavhaina/weirkeeper@sha256:8ef43ff4b12b4eb9476dfb61917e30db3843c4232f4913d3232c261dfe3faa47` |
+| Console image digest (`logweir-console`; amd64 and arm64) | `docker.io/vladyslavhaina/logweir-console@sha256:9742206e36559667b8a586d9263b412ab8ea329e890aaa78b2244c649ea58d83` |
+| Identity bootstrap image (`identity.bootstrapImage`; `release.json` `.images.bootstrap`) | `docker.io/vladyslavhaina/logweir@sha256:8c5a76556236b3ff22d8618c1e2f141816eb60f6b1a476519b3b618efde348f6` (amd64 and arm64), built from `d4e32956` (unchanged since `v0.2.0`) |
+| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | `oci://registry-1.docker.io/vladyslavhaina/logweir-chart` `0.4.1`, package sha256 `2750e20158e3d551b510f83f31ce12b6c7ce427eefaaa70a3c5042b9bf07994e`, OCI digest `sha256:c9eae97cf039b1fa727062d9685eafaa557cf89fedd784964fc4d151167ec0cf`; an anonymous `helm pull` is byte-identical to the release asset |
+| CLI archives (three, from the tag run's `release.json` `.archives`) | `logweir-x86_64-unknown-linux-gnu.tar.xz` `00f657eef926d6fdce892eb7c7f9066e642b7367fe8a90987c0e21d0913b7115` (glibc 2.34+); `logweir-aarch64-unknown-linux-gnu.tar.xz` `8c4bcd726bca620d7715e3565ae55b8caf9bb5a704fad2cfc4f2f6a2ae40496a` (glibc 2.34+); `logweir-aarch64-apple-darwin.tar.xz` `9264cfd299569640436844d9982e10393270a9aec5bc187240f7f828d382e8b7` (macOS 11+, Homebrew `openssl@3`); `SHA256SUMS` checks every asset after a fresh `gh release download` |
+| Kubernetes exercises run on this candidate | the PoC (as in `v0.3.0`'s record), one pass: `poc-v041` on this publication (`sha-4bb185d5`, 2026-10-15), from the `v0.4.0` release (Helm revision 35): the render diff was only the `helm.sh/chart` label and the three image references, `:v0.4.0@sha256:…` to `:sha-4bb185d5…`; the CRDs applied server-side first, nine of them gaining item 130's printer columns (each generation +1, the `restores` CRD unchanged) and the diff after the apply empty; the two-step upgrade (revision 36 with the bindings lifted, then 37); every running digest equals `images.json`'s, and `cosign verify` passes for all four images (`images.yml` on `main`); the identity keys, the TrustPolicy, the catalogs (431/431 and 5/5) and the four connections unchanged; with one throwaway user, `v-op41` (Helm revision 38, Dex revision 10), F1 to F7 passed once each: item 130's columns, item 131's scratch drill by clicks, item 132's probes on the new runner, item 133's two expired approvals across the upgrade, item 134 on the refused run's page, item 135 by render only, and item 136's served console byte for byte (`scripts/check-image-api.sh`); the pass's objects deleted by name, and the objects then equal those before the pass by name, UID and creationTimestamp; `v-op41` removed, bindings first (Helm revision 39), then Dex (revision 11), and Dex refused it before its password file was deleted; the Helm values at revisions 35, 37 and 39 are equal, and Dex revision 11's values and manifest equal revision 9's; after the tag, `poc-v041r` upgraded the PoC to the release chart `0.4.1` (Helm revisions 40 and 41, Dex untouched at 11): the render diff was only the chart label and the image references, `:sha-4bb185d5…` to `:v0.4.1@sha256:…` with the same digests; no CRD changed; every running digest equals `release.json`'s and `cosign verify` passes for all four images by the release's references |
+| Checks deliberately deferred, each with its reason | as `v0.4.0`'s, except `poc-dui2`'s O2, which item 133 fixed and `poc-v041` ran (F4), and the long topic name in a message, which item 134 shows whole in the topic position only; plus: item 131's compose row (none ran; the PoC drill is the live evidence); item 132's failing arms (a probe that fails under load and a real older runner were not staged on the PoC; the controller rows hold both); item 134's Preflight half (`connection.topicsReadable` was not read on the PoC; the Backup's refusal was, on its page) and F5's *Needs attention* half (it does not apply: that list never shows a run's message, `console/src/app/attention.ts`); item 135 on a live install (rendered, not applied; a client-side `helm template` stops first at the chart's offline-render guard, so a preview needs `--set identity.renderedOffline=false` or `--dry-run=server`, `poc-v041`'s O2); the fix round's remaining gaps: a runner its Job's deadline killed with an exit code of 0 to 4 reads "no sealed end" without naming `DeadlineExceeded`; a Preflight with several missing topics still counts them in its message, their names in the row's sample; `docs/kubernetes.md` has no chart OIDC section (`docs/install.md` and the chart's README carry it); the chart's whitespace check on a scope is ASCII only, so a scope holding U+00A0 renders and the API refuses its configuration at start (review L6); the review's L1 (a token whose characters are all legal in a topic name is kept in the topic position, an accepted residual held by a row; the property rests on the templates, and the source-scan lint that every `` topic `{…}` `` interpolation takes a topic name was not added: it needs a format-string parser), L3 (only `--runner-line-token`'s refusal counts as an older runner's evidence, so a later flag a `v0.4` runner does not know would read "no sealed end"; `v0.4.1`'s flag set is `v0.3.0`'s, so this release is not affected) and L5 (while a binding is lifted, a live approval still goes `Verified`, `ApprovalPolicyMismatch`, `Verified` with a new `lastTransitionTime`, and a Restore admitted in that window is refused; a false expiry written while the controller's clock ran ahead stays after the clock is fixed, failing closed, and the remedy is a new Approval); `poc-v041`'s cosmetic findings, recorded and not fixed: a `type: date` printer column prints `<invalid>` for a future time (BackupSchedule `NEXT`, Preflight `EXPIRES`; before this release), and *Test connection* on a target connection creates a Preflight whose `operation` is `SourceConnection` |
 
 ### `v0.4.0`: the release after `v0.3.0`
 
@@ -3381,7 +3440,7 @@ Part 5 (`deep-ui-recheck-5`, the same build) passed the full regression, 36 of 3
 - `backup_controller.rs::the_reason_columns_name_a_guard_refusal_and_a_controller_refusal` (a guard state, a controller refusal and a pass) and `the_printer_columns_are_the_contract`;
 - `restore_controller.rs::every_status_write_sets_the_scalar_reason`, its Backup arm updated.
 
-[UNVERIFIED — not yet run on a cluster; after the CRDs are applied, the PoC check's `kubectl get backups` shows a run refused as item 110 refuses it as `Failed`, `3` and `REASON` `GuardRefused`, `-o wide` adds `FAILED`, and `kubectl get kafkaclusters,preflights,approvals` show `REASON`.]
+**Scope (PoC):** `poc-v041` (build `sha-4bb185d5`, 2026-10-15), after the CRDs were applied server-side: `kubectl get backups` ends `AGE REASON`, the refused run reads `Failed`, `3`, `GuardRefused` and the others `ok`; `REASON` reads `Reachable` on the four kafkaclusters, `Valid` on the backupdestinations and `Verified` on the approvals, `AuthorizationExpired` on the two expired ones; the preflights' live columns end in `REASON`, which later read `Valid` and `BlockedByPrerequisite`. With `-o wide`, backups add `FAILED` (`GuardRefused` on the refused run, empty elsewhere), and the schedule, the trust policy and the catalogs add `REASON` (`Scheduled`, `Loaded`, `Succeeded`). Every value equals its field in `-o json`.
 **Rollback:** an older chart's CRDs print the old columns; no object changes.
 
 #### 131. A clean drill records what its teardown removed (FX-52 F2)
@@ -3398,7 +3457,7 @@ Part 5 (`deep-ui-recheck-5`, the same build) passed the full regression, 36 of 3
 - `f2_an_absent_or_unsealed_teardown_line_records_nothing`, with controls: no key, forged plain lines, and an FX-34 Job.
 
 No compose row ran; the live row is a drill on a cluster.
-[UNVERIFIED — not yet run on a cluster; the PoC check's clean scratch drill, on this build's runner and controller, records `status.teardown` as `{attestationKey: logweir/drills/<run>.teardown.json, deleted: [<both drill topics>], deletedCount: 2}`.]
+**Scope (PoC):** `poc-v041` (build `sha-4bb185d5`, 2026-10-15), by clicks through *Restore a point*: a scratch drill of `orders` and `payments`, sampled, ended `Succeeded`, `pass`, and recorded `status.teardown` as `{attestationKey: logweir/drills/<run>.teardown.json, deleted: [both drill topics], deletedCount: 2}`; the console's restore page lists the same under its Teardown heading, with "Not deleted" reading none.
 **Rollback:** an older controller ignores the two lines and leaves `deleted` absent; an older runner prints neither. Roll back in either order.
 
 #### 132. `RunnerOlderThanController` only when the runner's log shows it (FX-52 F3)
@@ -3419,7 +3478,7 @@ No compose row ran; the live row is a drill on a cluster.
 - `restore_controller.rs::fx43_a_refusal_is_read_only_off_the_sealed_pair`, updated, with its control.
 
 Every existing fixture row is unchanged.
-[UNVERIFIED — not yet run on a cluster; in the PoC check, a probe that fails under load reads `Reachable=Unknown`, `ProbeOutputUnreadable … (pod exit 1)`, never `RunnerOlderThanController`, and a real older runner still reads `RunnerOlderThanController`.]
+**Scope (PoC):** `poc-v041` (build `sha-4bb185d5`, 2026-10-15): the controller probed all four connections twice on the new runner, each reading `Reachable` "… (pod exit 0)", and the console's *Test connection* checks read ready; `RunnerOlderThanController` and `ProbeOutputUnreadable` appear nowhere across kafkaclusters, preflights, backups and restores. A probe that fails under load and a real older runner were not staged there; the rows above hold both.
 **Rollback:** an older controller names every run with no sealed end `RunnerOlderThanController` again; nothing stored changes.
 
 #### 133. An expired approval is not rewritten during an upgrade (FX-52 F4)
@@ -3432,7 +3491,7 @@ Every existing fixture row is unchanged.
 
 **Do:** nothing.
 **Scope:** `approval_policy.rs::f4_an_expired_record_keeps_its_reason_and_time_across_a_lifted_binding`: across a lifted and a restored binding, the record keeps its reason and time with no write; the control, a live record, is judged `ApprovalPolicyMismatch`. The repair row `a_verdict_withdrawn_after_admission_is_re_established_at_the_admission_instant` still passes.
-[UNVERIFIED — not yet run on a cluster; across the PoC's next two-step upgrade, the expired `…-confirmation` Approvals keep `AuthorizationExpired` and their `lastTransitionTime`, with no status write at either step.]
+**Scope (PoC):** `poc-v041` (build `sha-4bb185d5`, 2026-10-15): across the two-step upgrade (Helm revision 36 with the binding lifted, then 37), the two expired `…-confirmation` Approvals kept `AuthorizationExpired`, their `lastTransitionTime` and their resourceVersion, so nothing wrote them. The control: the same upgrade to `v0.4.0` (`poc-v040`) re-stamped them.
 **Rollback:** an older controller rewrites an expired approval while a binding is lifted again; it authorises nothing either way.
 
 #### 134. A long topic name in a message's topic position is shown whole (FX-52 F5)
@@ -3446,7 +3505,7 @@ Every existing fixture row is unchanged.
 
 **Do:** upgrade the runner and the controller (one `helm upgrade`). A message already written keeps its `[redacted]`.
 **Scope:** `check_contract.rs::f5_a_long_topic_name_in_the_template_position_survives_and_tokens_do_not` (the redaction and `clean_message`), with controls: a bare token, ``key `tok` ``, `subtopic`, a list break, an AWS secret in a list, an access key id in a name, and a bare name. Three mutants are killed (the position ignored, every backtick span kept, the legal-name check dropped), and `backup_run.rs` passes its 40 rows.
-[UNVERIFIED — not yet run on a cluster; the PoC check's Preflight for a missing 43-character topic reads "topic `<whole name>` does not exist on the source" in `connection.topicsReadable`, and so does the Backup's `Failed` condition.]
+**Scope (PoC):** `poc-v041` (build `sha-4bb185d5`, 2026-10-15), by clicks: *Back up now* on a schedule naming a missing 51-character topic was refused, and the run's page, at 1440 px light and 390 px dark, reads "GuardRefused: topic `poc-v041-missing-topic-name-longer-than-forty-chars` does not exist on the source …", the name whole and wrapped at its hyphens. A Preflight's `connection.topicsReadable` was not read there.
 **Rollback:** an older image redacts long names in messages again; nothing stored changes.
 
 #### 135. The chart sets the console's OIDC scopes and display-name claim (FX-52 F6)
@@ -3458,7 +3517,7 @@ Every existing fixture row is unchanged.
 Empty renders nothing: the API keeps its defaults, `[openid, profile, email, groups]` and no name, as before, and a render that sets neither is unchanged. The chart refuses a list without `openid`, a scope holding whitespace and a claim that is not a plain name, in its schema and its templates. This is the Helm path item 112's `email` remedy named.
 **Do:** nothing until set. A provider that refuses a default scope, such as item 112's `email`, sets `api.console.oidc.scopes` without it ([install.md](install.md)).
 **Scope:** `just chart-check`: the refusals (no `openid`; a claim that is not plain, in the schema and the template; a scope holding whitespace, in the template), the render row (both values reach the API's configuration), and the per-leaf rows for both values.
-[UNVERIFIED — not yet rendered for the PoC; the PoC check's `helm template … --set-json 'api.console.oidc.scopes=["openid","profile","groups"]' --set-string api.console.oidc.displayNameClaim=name` shows the API ConfigMap's `oidc:` carrying `scopes:` and `displayNameClaim: "name"`.]
+**Scope (PoC):** `poc-v041`, by render only, on the published chart of build `sha-4bb185d5`: `--set-json 'api.console.oidc.scopes=["openid","profile","email","groups"]' --set-string api.console.oidc.displayNameClaim=name` put `"scopes":["openid","profile","email","groups"]` and `"displayNameClaim":"name"` into the API configuration's `oidc:`; the control without them renders neither key, under the live ConfigMap's name; a list without `openid` was refused at render. A client-side `helm template` stops first at the chart's offline-render guard, so these renders set `identity.renderedOffline=false`. Nothing was applied.
 **Rollback:** remove both values before rolling the chart back: an older chart's schema refuses them. The API then asks for its default scopes again.
 
 #### 136. Console dependencies (FX-52 F7)
@@ -3466,7 +3525,7 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 **Changed.** The console's build dependencies move to `@tanstack/react-router` 1.170.41, `@playwright/test` 1.63.0, `axe-core` 4.13.0, `typescript-eslint` 8.71.0, `vitest` 5.0.3 and `jsdom` 30.1.1 (Dependabot #50, #52, #53 and #55). TypeScript stays 5.9.3 while `openapi-typescript` requires `^5`, and Dependabot no longer offers TypeScript's next major. Building the console now needs Node ≥ 22.22.2 or ≥ 24.15 (jsdom 30); the image's builder runs 22.23.3.
 **Do:** nothing; the console image carries them.
 **Scope:** `just console` passes unchanged: 36 files, 583 tests, and the build.
-[UNVERIFIED — the PoC has not served this console build yet; the PoC check reads the served console as this build's, byte for byte (`scripts/check-image-api.sh`), and Dependabot's #50, #52, #53 and #55 are then closed.]
+**Scope (PoC):** `poc-v041` (build `sha-4bb185d5`, 2026-10-15): `scripts/check-image-api.sh` on the console image (`sha256:9742206e…`) passes: `/ui` holds this tree's `console/dist` byte for byte and nothing else. Live, the served `index.html`, script and stylesheet equal the build's, and the pages used show no console error or warning. Dependabot's #50, #52, #53 and #55 are closed.
 **Rollback:** an older console image carries the older versions; nothing is stored.
 
 ### Required operator actions after `v0.2.0-rc.1`
