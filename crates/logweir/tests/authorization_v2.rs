@@ -50,7 +50,7 @@ const UID: &str = "uid-1";
 
 fn policies() -> ApprovalPolicySet {
     ApprovalPolicySet::parse(
-        "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: Ordinary\n  - name: prod-governed\n    mode: Governed\nnamespaces:\n  team-a: team-ordinary\n  prod: prod-governed\n",
+        "allowOrdinaryConfirmation: true\npolicies:\n  - name: team-ordinary\n    mode: Ordinary\n  - name: prod-governed\n    mode: Governed\nworkspaces:\n  team-a: team-ordinary\n  prod: prod-governed\n",
     )
     .expect("valid")
 }
@@ -76,6 +76,7 @@ fn document(mode: ApprovalMode) -> RestoreAuthorization {
             api_version: "logweir.dev/v1alpha1".into(),
             kind: "Restore".into(),
             namespace: NS.into(),
+            workspace: NS.into(),
             name: NAME.into(),
             uid: UID.into(),
         },
@@ -134,6 +135,7 @@ fn sidecar(doc: &[u8], k: &Keys, countersign: bool) -> Vec<u8> {
 fn subject() -> ContractSubject {
     ContractSubject {
         namespace: NS.into(),
+        workspace: NS.into(),
         name: NAME.into(),
         uid: UID.into(),
     }
@@ -193,6 +195,52 @@ fn an_ordinary_bundle_verifies_on_the_consoles_signature_alone() {
     assert_eq!(approved.approval.key_id, k.console.key_id());
     assert_eq!(approved.approval.ticket, "CHG-1");
     assert!(!approved.approval.self_attested);
+}
+
+/// **PROD-19.1 at the runner: an approval made in one workspace never runs in
+/// another.** The same signed document is refused when the contract names the
+/// subject's workspace as another (`prd`), and a document with no workspace
+/// (an older minor) is refused against any. CONTROL: the matching workspace
+/// verifies (the test above).
+#[test]
+fn the_runner_refuses_an_approval_of_another_workspace() {
+    let k = keys();
+    let snapshot = policy(ApprovalMode::Ordinary).snapshot_bytes();
+    let run = |doc: &RestoreAuthorization, workspace: &str| {
+        let bytes = doc.to_bytes();
+        let mut subject = subject();
+        subject.workspace = workspace.into();
+        verify(
+            PLAN,
+            &bytes,
+            &sidecar(&bytes, &k, false),
+            &pem(&k.console),
+            &pem(&k.console),
+            &snapshot,
+            &subject,
+            &k,
+        )
+    };
+    let doc = document(ApprovalMode::Ordinary);
+    assert!(run(&doc, NS).is_ok(), "{}", message(&run(&doc, NS)));
+    let other = run(&doc, "prd");
+    assert!(is_guard(&other), "{}", message(&other));
+    assert!(
+        message(&other).contains("names workspace team-a")
+            && message(&other).contains("in workspace prd"),
+        "{}",
+        message(&other)
+    );
+    let mut old = doc.clone();
+    old.subject.workspace = String::new();
+    old.format_version = "2.2.0".into();
+    let none = run(&old, NS);
+    assert!(is_guard(&none), "{}", message(&none));
+    assert!(
+        message(&none).contains("no workspace"),
+        "{}",
+        message(&none)
+    );
 }
 
 /// Under Ordinary the console key IS the authoriser: a bundle naming any other
@@ -508,6 +556,7 @@ fn contract_env(m: &Mounted) -> BTreeMap<String, String> {
         (wire::SUBJECT_KIND_ENV, "Restore".into()),
         (wire::SUBJECT_NAME_ENV, NAME.into()),
         (wire::SUBJECT_NAMESPACE_ENV, NS.into()),
+        (wire::SUBJECT_WORKSPACE_ENV, NS.into()),
         (wire::SUBJECT_UID_ENV, UID.into()),
         (wire::APPROVAL_NAME_ENV, "a1".into()),
         (wire::APPROVAL_UID_ENV, "approval-uid".into()),
@@ -952,15 +1001,7 @@ fn subject_document(plan: &str, format_version: &str) -> RestoreAuthorization {
 fn the_real_runner_reads_format_2_1_0_and_refuses_the_subject_under_2_0_0() {
     let k = keys();
     // 2.1.0: admitted.
-    let doc = subject_document(ORIGINAL_PLAN, "2.1.0");
-    assert_eq!(
-        logweir_core::approval_policy::restore_authorization_format_version_for(
-            doc.approval_subject.as_deref(),
-            doc.original_name_confirmation.as_ref()
-        ),
-        "2.1.0",
-        "the version the writer gives this document"
-    );
+    let doc = subject_document(ORIGINAL_PLAN, RESTORE_AUTHORIZATION_FORMAT_VERSION);
     let m = mount_with(
         &k,
         ApprovalMode::Ordinary,
@@ -1010,89 +1051,48 @@ fn the_real_runner_reads_format_2_1_0_and_refuses_the_subject_under_2_0_0() {
     );
 }
 
-/// **A runner built BEFORE the subject refuses every 2.1.0 document.** Run
-/// with `LOGWEIR_OLDER_RUNNER_BIN=<a logweir built from main>`; without it
+/// **A runner built before the workspace refuses every document this build
+/// writes**: each names `subject.workspace` (2.3.0), an unknown field to it, so
+/// it exits 3 before any client exists. Run with
+/// `LOGWEIR_OLDER_RUNNER_BIN=<a logweir built before PROD-19.1>`; without it
 /// the row measures nothing and says so (CI has no older binary).
-///
-/// - A 2.1.0 document — which always carries `approvalSubject` or the typed
-///   names — over an ORDINARY plan the older runner would otherwise run: exit
-///   3, `unknown field`, before any client exists. It never reads the
-///   document as an ordinary authorization.
-/// - The same over an original-name plan: refused too.
-/// - CONTROL: the 2.0.0 document this build writes for an ordinary restore is
-///   still admitted by the older runner (it fails later, on the broker).
 #[test]
-fn an_older_runner_refuses_every_2_1_0_document() {
+fn an_older_runner_refuses_every_document_this_build_writes() {
     let Some(older) = std::env::var_os("LOGWEIR_OLDER_RUNNER_BIN") else {
         eprintln!(
-            "an_older_runner_refuses_every_2_1_0_document: LOGWEIR_OLDER_RUNNER_BIN is not set, \
-             so no older runner was measured"
+            "an_older_runner_refuses_every_document_this_build_writes: \
+             LOGWEIR_OLDER_RUNNER_BIN is not set, so no older runner was measured"
         );
         return;
     };
     let older = std::path::PathBuf::from(older);
     assert!(older.is_file(), "{} is not a file", older.display());
     let k = keys();
-    for (label, plan) in [
-        ("an ordinary plan", PLAN),
-        ("an original-name plan", ORIGINAL_PLAN),
+    for (label, plan, doc) in [
+        (
+            "an ordinary document",
+            PLAN,
+            document(ApprovalMode::Ordinary),
+        ),
+        (
+            "an original-name document",
+            ORIGINAL_PLAN,
+            subject_document(ORIGINAL_PLAN, RESTORE_AUTHORIZATION_FORMAT_VERSION),
+        ),
     ] {
-        let doc = subject_document(plan, "2.1.0");
         let m = mount_with(&k, ApprovalMode::Ordinary, false, plan, &doc.to_bytes());
         let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
-        println!("older runner, a 2.1.0 document over {label}: exit {code}\n{transcript}");
+        println!("older runner, {label}: exit {code}\n{transcript}");
         assert_eq!(code, 3, "{label}: {transcript}");
+        assert!(
+            transcript.contains("unknown field `workspace`"),
+            "{label}: {transcript}"
+        );
         assert!(
             !transcript.contains("19099"),
             "{label}: no broker was dialled:\n{transcript}"
         );
-        if plan == PLAN {
-            assert!(
-                transcript.contains("unknown field `approvalSubject`"),
-                "{label}: {transcript}"
-            );
-            assert!(
-                transcript.contains("no data operation was started"),
-                "{label}: {transcript}"
-            );
-        }
     }
-    // The typed names alone (a document this build never writes) are an
-    // unknown field to the older reader too.
-    let mut typed_only = subject_document(PLAN, "2.1.0");
-    typed_only.approval_subject = None;
-    let m = mount_with(
-        &k,
-        ApprovalMode::Ordinary,
-        false,
-        PLAN,
-        &typed_only.to_bytes(),
-    );
-    let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
-    println!("older runner, typed names alone: exit {code}\n{transcript}");
-    assert_eq!(code, 3, "{transcript}");
-    assert!(
-        transcript.contains("unknown field `originalNameConfirmation`"),
-        "{transcript}"
-    );
-
-    // CONTROL: this build's 2.0.0 document for an ordinary restore.
-    let ordinary = document(ApprovalMode::Ordinary);
-    assert_eq!(ordinary.format_version, "2.0.0");
-    let m = mount_with(
-        &k,
-        ApprovalMode::Ordinary,
-        false,
-        PLAN,
-        &ordinary.to_bytes(),
-    );
-    let (code, transcript) = invoke_binary(&older, &m, &contract_env(&m), true);
-    println!("older runner, a 2.0.0 ordinary document: exit {code}\n{transcript}");
-    assert!(
-        !transcript.contains("no data operation was started"),
-        "the older runner admits a 2.0.0 document (exit {code}):\n{transcript}"
-    );
-    assert_ne!(code, 0, "no broker is running");
 }
 
 // Two-person approval in the console (`approverSignature: Console`).
@@ -1101,7 +1101,7 @@ const IDP: &str = "https://idp.example";
 
 /// The installation document of the two-person rows: `team-a` is bound to a
 /// two-person policy, and `prod` to the SAME policy with a personal key.
-const PAIR_POLICIES: &str = "policies:\n  - name: prod-pair\n    mode: two-person\n    maxAgeSeconds: 3600\n  - name: prod-strict\n    mode: strict\n    maxAgeSeconds: 3600\nnamespaces:\n  team-a: prod-pair\n  prod: prod-strict\n";
+const PAIR_POLICIES: &str = "policies:\n  - name: prod-pair\n    mode: two-person\n    maxAgeSeconds: 3600\n  - name: prod-strict\n    mode: strict\n    maxAgeSeconds: 3600\nworkspaces:\n  team-a: prod-pair\n  prod: prod-strict\n";
 
 fn pair_policy() -> logweir_core::approval_policy::ApprovalPolicy {
     ApprovalPolicySet::parse(PAIR_POLICIES)
@@ -1146,12 +1146,7 @@ fn pair_approved(plan: &str) -> RestoreAuthorization {
         subject: "bob".into(),
     });
     doc.approved_at = Some(doc.issued_at + Duration::seconds(30));
-    doc.format_version = logweir_core::approval_policy::restore_authorization_format_version(
-        doc.approval_subject.as_deref(),
-        doc.original_name_confirmation.as_ref(),
-        true,
-    )
-    .into();
+    doc.format_version = RESTORE_AUTHORIZATION_FORMAT_VERSION.into();
     doc
 }
 
@@ -1190,7 +1185,7 @@ fn a_console_approved_bundle_verifies_and_names_the_approvers_principal() {
     let k = keys();
     let snapshot = pair_policy().snapshot_bytes();
     let doc = pair_approved(PLAN);
-    assert_eq!(doc.format_version, "2.2.0");
+    assert_eq!(doc.format_version, RESTORE_AUTHORIZATION_FORMAT_VERSION);
     let approved = verify_console(PLAN, &doc, &snapshot, &k).expect("a console approval verifies");
     assert_eq!(approved.approval.approver, "https://idp.example#bob");
     assert_eq!(approved.approval.key_id, k.console.key_id());
@@ -1490,13 +1485,7 @@ fn an_original_name_restore_approved_in_the_console_carries_the_subject_and_no_t
         subject: "bob".into(),
     });
     doc.approved_at = Some(doc.issued_at + Duration::seconds(30));
-    doc.format_version = logweir_core::approval_policy::restore_authorization_format_version(
-        doc.approval_subject.as_deref(),
-        None,
-        true,
-    )
-    .into();
-    assert_eq!(doc.format_version, "2.2.0");
+    doc.format_version = RESTORE_AUTHORIZATION_FORMAT_VERSION.into();
     let approved =
         verify_console(ORIGINAL_PLAN, &doc, &snapshot, &k).expect("the combination verifies");
     assert_eq!(
@@ -1699,6 +1688,7 @@ const FIXTURE_APPROVED_AT: &str = "2026-10-10T12:04:00Z";
 const FIXTURE_EXPIRES_AT: &str = "2026-10-10T13:00:00Z";
 const FIXTURE_NOW: &str = "2026-10-10T12:05:00Z";
 const FIXTURE_NS: &str = "logweir-t16";
+const FIXTURE_WS: &str = "dev";
 const FIXTURE_RESTORE: &str = "r1";
 const FIXTURE_UID: &str = "restore-uid-1";
 
@@ -1730,6 +1720,7 @@ fn write_the_console_approval_fixture_for_the_controllers_rows() {
     let base = |plan: &str| {
         let mut doc = pair_request(plan);
         doc.subject.namespace = FIXTURE_NS.into();
+        doc.subject.workspace = FIXTURE_WS.into();
         doc.subject.name = FIXTURE_RESTORE.into();
         doc.subject.uid = FIXTURE_UID.into();
         doc.issued_at = fixture_instant(FIXTURE_ISSUED_AT);
@@ -1743,12 +1734,7 @@ fn write_the_console_approval_fixture_for_the_controllers_rows() {
             subject: subject.into(),
         });
         doc.approved_at = Some(fixture_instant(FIXTURE_APPROVED_AT));
-        doc.format_version = logweir_core::approval_policy::restore_authorization_format_version(
-            doc.approval_subject.as_deref(),
-            doc.original_name_confirmation.as_ref(),
-            true,
-        )
-        .into();
+        doc.format_version = RESTORE_AUTHORIZATION_FORMAT_VERSION.into();
         doc
     };
     let approved = || approve(base(PLAN), IDP, "bob");
@@ -1777,12 +1763,7 @@ fn write_the_console_approval_fixture_for_the_controllers_rows() {
     let original = || {
         let mut doc = base(ORIGINAL_PLAN);
         doc.approval_subject = Some("originalName".into());
-        doc.format_version =
-            logweir_core::approval_policy::restore_authorization_format_version_for(
-                doc.approval_subject.as_deref(),
-                None,
-            )
-            .into();
+        doc.format_version = RESTORE_AUTHORIZATION_FORMAT_VERSION.into();
         doc
     };
     // (name, document, countersigned by the personal approver key)
@@ -1913,6 +1894,11 @@ fn write_the_console_approval_fixture_for_the_controllers_rows() {
     let mut other_ns = approved();
     other_ns.subject.namespace = "elsewhere".into();
     cases.push(("approved-for-another-namespace", other_ns, false));
+    // PROD-19.1: approved in `dev`, presented for a `prd` subject (or the
+    // reverse): the workspace is in the signed bytes.
+    let mut other_ws = approved();
+    other_ws.subject.workspace = "prd".into();
+    cases.push(("approved-for-another-workspace", other_ws, false));
     let mut other_name = approved();
     other_name.subject.name = "r2".into();
     cases.push(("approved-for-another-restore", other_name, false));
@@ -1953,11 +1939,12 @@ fn write_the_console_approval_fixture_for_the_controllers_rows() {
                     only in that process. It holds public halves, key ids, documents and \
                     signatures: no private key.",
         "namespace": FIXTURE_NS,
+        "workspace": FIXTURE_WS,
         "restore": FIXTURE_RESTORE,
         "restoreUid": FIXTURE_UID,
         "planBytes": PLAN,
         "originalPlanBytes": ORIGINAL_PLAN,
-        "policyDocument": PAIR_POLICIES.split("namespaces:").next().expect("policies"),
+        "policyDocument": PAIR_POLICIES.split("workspaces:").next().expect("policies"),
         "twoPersonPolicy": pair.name,
         "strictPolicy": strict.name,
         "issuedAt": FIXTURE_ISSUED_AT,
@@ -1991,19 +1978,20 @@ fn the_checked_in_console_approval_fixture_is_judged_the_same_by_the_runner() {
     );
     let field = |name: &str| fixture[name].as_str().expect("a string field").to_string();
     let policies = ApprovalPolicySet::parse(&format!(
-        "{}namespaces:\n  {}: {}\n",
+        "{}workspaces:\n  {}: {}\n",
         field("policyDocument"),
-        field("namespace"),
+        field("workspace"),
         field("twoPersonPolicy")
     ))
     .expect("the fixture's policy document validates");
     let policy = policies
-        .resolve(&field("namespace"))
+        .resolve(&field("workspace"))
         .bound()
         .cloned()
         .expect("bound");
     let subject = ContractSubject {
         namespace: field("namespace"),
+        workspace: field("workspace"),
         name: field("restore"),
         uid: field("restoreUid"),
     };
@@ -2076,6 +2064,7 @@ fn the_checked_in_console_approval_fixture_is_judged_the_same_by_the_runner() {
         ("approved-for-another-uid", "uid restore-uid-2"),
         ("approved-for-another-plan", "plan hash"),
         ("approved-for-another-namespace", "namespace elsewhere"),
+        ("approved-for-another-workspace", "names workspace prd"),
         ("approved-for-another-restore", "name r2"),
         ("strict-with-a-console-approver", POLICY_MISMATCH),
         (

@@ -326,23 +326,6 @@ pub enum IdentityCmd {
         #[arg(long)]
         revoke_trust_binding: Option<String>,
     },
-    /// Copy the already established installation signer into one explicitly
-    /// authorized runner namespace. Refuses missing, incomplete, or different
-    /// target identities; intended only for the chart's short-lived hook Job.
-    Distribute {
-        /// Namespace containing the primary installation signing Secret.
-        #[arg(long)]
-        source_namespace: String,
-        /// Authorized runner namespace receiving the same signing identity.
-        #[arg(long)]
-        target_namespace: String,
-        /// Fixed retained Secret name in both namespaces.
-        #[arg(long, default_value = "logweir-signing-key")]
-        secret_name: String,
-        /// Key in the retained Secret.
-        #[arg(long, default_value = "signing.pem")]
-        secret_key: String,
-    },
 }
 
 /// `#[allow(clippy::large_enum_variant)]`, and the reason is clap.

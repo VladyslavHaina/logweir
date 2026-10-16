@@ -30,9 +30,6 @@ fn main() -> std::process::ExitCode {
     let code = match args.command {
         cli::Command::Identity(cmd) => match logweir::identity::Invocation::from(cmd) {
             logweir::identity::Invocation::Bootstrap(args) => logweir::identity::run(&args),
-            logweir::identity::Invocation::Distribute(args) => {
-                logweir::identity::run_distribution(&args)
-            }
         },
         cli::Command::Schema { which } => schema::run(&which),
         cli::Command::Catalog(cli::CatalogCmd::Sync {
