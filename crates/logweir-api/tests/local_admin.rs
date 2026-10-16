@@ -218,7 +218,30 @@ impl Watched {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         String::from_utf8_lossy(&buffer).into_owned()
     }
+
+    /// The log once it holds `needle`, polled for at most [`LOG_WAIT`]; the log
+    /// as it stands if it never does. The child writes a line some time after
+    /// the event behind it, and the reader threads copy it later still, so a
+    /// log asserted on at once races both. It lost under strace's slowdown in
+    /// ci-trace run 38842421765, and a loaded runner can lose it the same way.
+    fn log_containing(&self, needle: &str) -> Result<String, String> {
+        let deadline = Instant::now() + LOG_WAIT;
+        loop {
+            let log = self.log();
+            if log.contains(needle) {
+                return Ok(log);
+            }
+            if Instant::now() >= deadline {
+                return Err(log);
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
+
+/// How long a test waits for the child to log a line it is due to write: far
+/// past a loaded runner's delay, and short enough that a missing line fails fast.
+const LOG_WAIT: Duration = Duration::from_secs(10);
 
 /// What a start attempt came to.
 enum Start {
@@ -2902,13 +2925,14 @@ fn a_peer_outside_the_trusted_set_is_capped_at_its_share() {
         )
     });
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+    if let Err(log) = server.log_containing(CAP_REFUSAL) {
+        panic!(
+            "the server closed a connection over the cap without saying why: no \
+             {CAP_REFUSAL:?} within {LOG_WAIT:?}:\n{log}"
+        );
+    }
     assert!(
-        server.log().contains(CAP_REFUSAL),
-        "the server closed a connection over the cap without saying why:\n{}",
-        server.log()
-    );
-    assert!(
-        start_line(&server.log()).contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
+        start_line(&server).contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
             && !server.log().contains(CAP_OFF_WARNING),
         "the start line must say the cap is on, at {PEER_CAP} (review L1):\n{}",
         server.log()
@@ -2922,12 +2946,25 @@ const CAP_OFF_WARNING: &str = "the per-peer connection cap is off";
 
 /// The server's own `logweir-api started` line, and only it: the warning
 /// carries a `per_peer_cap` field too, so a search over the whole log could
-/// read the wrong line.
-fn start_line(log: &str) -> String {
-    log.lines()
-        .find(|line| line.contains(STARTED))
-        .unwrap_or_else(|| panic!("no start line in:\n{log}"))
-        .to_owned()
+/// read the wrong line. Polled until the line is whole (ends in a newline), for
+/// at most [`LOG_WAIT`]: the reader threads copy the pipes in chunks, and the
+/// line's `per_peer_cap` field comes after the `listen` one that
+/// [`wait_until_listening`] waited for.
+fn start_line(server: &Watched) -> String {
+    let deadline = Instant::now() + LOG_WAIT;
+    loop {
+        let log = server.log();
+        if let Some(line) = log
+            .split_inclusive('\n')
+            .find(|line| line.contains(STARTED) && line.ends_with('\n'))
+        {
+            return line.trim_end().to_owned();
+        }
+        if Instant::now() >= deadline {
+            panic!("no whole start line within {LOG_WAIT:?} in:\n{log}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Connect to `address`, send `request` if any, and require the server to
@@ -3035,11 +3072,9 @@ fn a_forwarded_header_cannot_move_a_connection_out_of_its_peers_share() {
             server.log()
         );
     }
-    assert!(
-        server.log().contains(CAP_REFUSAL),
-        "the refusal was not logged:\n{}",
-        server.log()
-    );
+    if let Err(log) = server.log_containing(CAP_REFUSAL) {
+        panic!("the refusal was not logged: no {CAP_REFUSAL:?} within {LOG_WAIT:?}:\n{log}");
+    }
     drop(held);
 }
 
@@ -3105,7 +3140,7 @@ fn the_trusted_proxy_is_never_capped_as_one_peer() {
     let (server, port) = start_shared_server(&fixture, "trustedProxyCidrs: [\"127.0.0.1/32\"]\n");
     held_past_the_cap(&server, port, "the trusted proxy");
     assert!(
-        start_line(&server.log()).contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
+        start_line(&server).contains(&format!("\"per_peer_cap\":{PEER_CAP}"))
             && !server.log().contains(CAP_OFF_WARNING),
         "a configured trusted proxy turns the cap on, and the start line says so:\n{}",
         server.log()
@@ -3123,10 +3158,13 @@ fn without_a_trusted_proxy_set_no_peer_is_capped() {
     held_past_the_cap(&server, port, "a peer of a console with no trusted proxy");
     // And it says so at start, as a warning: an uncapped install and a capped
     // one that refuses nobody look the same otherwise.
+    // The warning is the line after the start line (main.rs), so it too is
+    // waited for, not read at once.
+    let warned = server.log_containing(CAP_OFF_WARNING);
     assert!(
-        start_line(&server.log()).contains("\"per_peer_cap\":0")
-            && server.log().contains(CAP_OFF_WARNING),
-        "a shared console with no trusted proxy must say at start that the cap is off:\n{}",
+        start_line(&server).contains("\"per_peer_cap\":0") && warned.is_ok(),
+        "a shared console with no trusted proxy must say at start that the cap is off \
+         (waited {LOG_WAIT:?}):\n{}",
         server.log()
     );
 }
