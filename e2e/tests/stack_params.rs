@@ -328,9 +328,14 @@ fn the_other_endpoints_are_pinned_by_digest_and_opt_in() {
     for (name, svc) in doc["services"].as_mapping().expect("services:") {
         let name = name.as_str().expect("a service name");
         let image = svc["image"].as_str().unwrap_or("");
-        let profile = match image {
-            i if i.starts_with("redpandadata/redpanda:") => "redpanda",
-            i if i.starts_with("confluentinc/cp-kafka:") => "confluent",
+        // OD-23 (PROD-03.2): the `registry` profile's target registry is a
+        // Redpanda image too, opt-in under that profile alone.
+        let (family, profile) = match image {
+            i if i.starts_with("redpandadata/redpanda:") && name == "registry-target" => {
+                ("redpanda", "registry")
+            }
+            i if i.starts_with("redpandadata/redpanda:") => ("redpanda", "redpanda"),
+            i if i.starts_with("confluentinc/cp-kafka:") => ("confluent", "confluent"),
             _ => continue,
         };
         let digest = image
@@ -354,7 +359,7 @@ fn the_other_endpoints_are_pinned_by_digest_and_opt_in() {
             matrix.contains(&format!("sha256:{digest}")),
             "{name}: docs/support-matrix.md does not record {image}'s digest"
         );
-        seen.insert(profile);
+        seen.insert(family);
     }
     assert_eq!(
         seen,

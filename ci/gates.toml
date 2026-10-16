@@ -522,7 +522,7 @@ readers = [
 [gates.e2e-7]
 job = "e2e 7"
 covers = ["E0", "E1", "E2", "E3", "E4", "E6"]
-tests = ["schema_dependency", "stack_params", "check_image", "created_topics", "fixture_retention"]
+tests = ["schema_dependency", "stack_params", "check_image", "created_topics", "fixture_retention", "schema_registry"]
 rows = ["record_semantics::a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack"]
 definition = ["justfile", "scripts/e2e-seed.sh", "scripts/seed-manifest-check.py", "scripts/extract-engine.sh", "scripts/engine-source.sh", ".config/nextest.toml"]
 crates = ["logweir", "logweir-core", "logweir-engine-oso", "logweir-evidence", "logweir-kafka"]

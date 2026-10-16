@@ -440,7 +440,7 @@ jobs:
                     new_topic_parity, topic_configuration]
           # about 100: the binaries that read beyond the common inputs
           - shard: 7
-            tests: [schema_dependency, stack_params, check_image, created_topics, fixture_retention]
+            tests: [schema_dependency, stack_params, check_image, created_topics, fixture_retention, schema_registry]
             rows: [record_semantics::a_console_plan_asking_for_complete_coverage_verifies_every_record_on_the_stack]
     env:
       AWS_EC2_METADATA_DISABLED: "true"

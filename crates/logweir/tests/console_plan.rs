@@ -147,8 +147,15 @@ fn each_opt_in_arrives_under_the_key_the_runner_reads() {
 fn the_registry_and_the_rate_limit_arrive_under_the_keys_the_runner_reads() {
     let s = spec("plan-registry.golden.yaml");
     let f = fields("plan-registry-fields.json");
-    let registry = s.target.schema_registry.as_ref().expect("target.schema_registry");
-    assert_eq!(registry.url, f["target"]["schemaRegistry"]["url"].as_str().unwrap());
+    let registry = s
+        .target
+        .schema_registry
+        .as_ref()
+        .expect("target.schema_registry");
+    assert_eq!(
+        registry.url,
+        f["target"]["schemaRegistry"]["url"].as_str().unwrap()
+    );
     assert_eq!(
         registry.username.as_deref(),
         f["target"]["schemaRegistry"]["username"].as_str()
