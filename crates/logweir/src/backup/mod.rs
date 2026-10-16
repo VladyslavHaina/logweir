@@ -210,6 +210,12 @@ pub struct BackupOutcome {
     /// binds (`<run_id>.consumer-positions.json`, beside the receipt), put
     /// before the receipt is: `Some` exactly when `consumer_positions` is.
     pub consumer_positions_document: Option<Vec<u8>>,
+    /// The source registry's capture (PROD-03.1), or `None` when the plan
+    /// names no registry: the receipt's 1.9.0 `schema_registry` block.
+    pub schema_registry: Option<logweir_core::schema_registry::ReceiptSchemaRegistry>,
+    /// The exact snapshot bytes the block names, put before the receipt:
+    /// `Some` exactly when the block says captured.
+    pub schema_registry_snapshot: Option<Vec<u8>>,
     pub facts: BackupFacts,
     /// `logweir/backups/<backup_id>/<run_id>.receipt.json` (**GC6**), the key
     /// the receipt was PUT to. Printed as the runner's penultimate stdout line
@@ -734,6 +740,7 @@ fn execute_with_signer(
         owner_detection: &inputs.owner_detection,
         selected_groups: &selected,
         signing: crate::catalog::signing_of(&signer.verifying_key()),
+        schema_registry: inputs.spec.source.schema_registry.is_some(),
     }) {
         return Err(logweir_core::guard::GuardRefusal(format!(
             "{why}. NO backup was taken: this is refused before the engine is spawned and \
@@ -872,6 +879,8 @@ fn execute_with_signer(
         generations,
         consumer_positions,
         consumer_positions_document,
+        schema_registry: None,
+        schema_registry_snapshot: None,
         facts: ran.facts,
         // Filled by `persist_receipt` below, from the one function that
         // derives them. Empty here for exactly as long as it takes to put the

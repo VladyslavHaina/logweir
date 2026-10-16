@@ -928,6 +928,7 @@ pub(crate) mod tests {
             schema_dependency: None,
             generations: None,
             source_watermarks: None,
+            schema_registry: None,
         }
     }
 

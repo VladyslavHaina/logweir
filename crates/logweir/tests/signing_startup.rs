@@ -206,6 +206,7 @@ fn backup_binary_rejects_every_invalid_key_before_production_side_effects() {
                 topics: vec!["orders".into()],
                 topic_owners: None,
                 consumer_groups: None,
+                schema_registry: None,
             },
             storage: StorageUrl::Filesystem {
                 path: archive.clone(),

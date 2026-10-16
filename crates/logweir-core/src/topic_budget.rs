@@ -518,6 +518,7 @@ pub fn reference_receipt(
         // `backup_receipt::SOURCE_WATERMARKS_BUDGET_BYTES` inside the base
         // budget, and it is only from 1.8.0, which this reference is not.
         source_watermarks: None,
+        schema_registry: None,
     }
 }
 

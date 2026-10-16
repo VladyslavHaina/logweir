@@ -82,6 +82,29 @@ pub struct Known<'a> {
     pub selected_groups: &'a [String],
     /// The key that will sign the record.
     pub signing: crate::catalog::RecordSigning,
+    /// Whether the plan names a source registry (the receipt then carries
+    /// `schema_registry`).
+    pub schema_registry: bool,
+}
+
+/// The `schema_registry` block at its longest: every list full, every
+/// reference at its longest text, every count at `u64::MAX`.
+fn longest_schema_registry(
+    known: &Known<'_>,
+) -> logweir_core::schema_registry::ReceiptSchemaRegistry {
+    use logweir_core::schema_registry as sr;
+    sr::ReceiptSchemaRegistry {
+        captured: true,
+        reason: None,
+        snapshot_key: Some(sr::snapshot_key(known.backup_id, known.run_id)),
+        snapshot_sha256: Some(format!("sha256:{}", "f".repeat(64))),
+        subjects: u64::MAX,
+        versions: u64::MAX,
+        unresolved_references: (0..sr::LISTED)
+            .map(|i| format!("{i:02}{}", "s".repeat(sr::LISTED_TEXT_CHARS - 2)))
+            .collect(),
+        ids_not_in_snapshot: vec![logweir_core::schema_dependency::MAX_SCHEMA_ID; sr::LISTED],
+    }
 }
 
 /// The longest object key, and the longest version id, an S3 store carries.
@@ -311,6 +334,10 @@ pub fn longest_outcome(known: &Known<'_>) -> BackupOutcome {
         consumer_positions,
         consumer_positions_document,
         source_watermarks: longest_source_watermarks(known.topics),
+        schema_registry: known
+            .schema_registry
+            .then(|| longest_schema_registry(known)),
+        schema_registry_snapshot: None,
         facts: BackupFacts {
             started_at: at,
             finished_at: at,

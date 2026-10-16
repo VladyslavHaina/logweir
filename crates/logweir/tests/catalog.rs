@@ -94,6 +94,7 @@ fn receipt(backup_id: &str, run_id: &str) -> BackupReceipt {
         generations: None,
         consumer_positions: None,
         source_watermarks: None,
+        schema_registry: None,
     }
 }
 

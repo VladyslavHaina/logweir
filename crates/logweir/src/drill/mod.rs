@@ -3498,6 +3498,7 @@ fn new_scorecard(run_id: &str, args: &RunArgs, c: &Ctx) -> Scorecard {
             original_name: None,
             creation: None,
             topic_configuration: None,
+            schemas: None,
         },
         approval: ApprovalInfo {
             approver: String::new(),
@@ -3833,6 +3834,8 @@ fn target_info(
         // Filled once the creation step has created the topics with it
         // (`topic_configuration_block`).
         topic_configuration: None,
+        // Filled by the schema import, before topic creation.
+        schemas: None,
     })
 }
 

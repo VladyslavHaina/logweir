@@ -802,6 +802,51 @@ pub const FORMAT_VERSION_WITH_POSITIONS_MAPPING: &str = "1.12.0";
 /// The same, for a partition-subset restore (format 2).
 pub const FORMAT_VERSION_SUBSET_WITH_POSITIONS_MAPPING: &str = "2.4.0";
 
+/// The first minor of scorecard format 1 that defines `target.schemas` (arm
+/// SC-1). A renumber changes this and [`FORMAT_VERSION_WITH_SCHEMAS`]
+/// together, and `docs/verify_scorecard.py`'s `SCORECARD_SCHEMAS_SINCE_MINOR`
+/// follows it.
+pub const SCHEMAS_SINCE_MINOR: u64 = 13;
+
+/// The first minor of scorecard format 2 that defines the same block.
+pub const SCHEMAS_SINCE_MINOR_OF_MAJOR_2: u64 = 5;
+
+/// **PROD-03.2.** The `format_version` of a format-1 scorecard that carries
+/// `target.schemas`. MINOR under OD-7 (a): arms SC-1 to SC-3 read only the
+/// new block.
+pub const FORMAT_VERSION_WITH_SCHEMAS: &str = "1.13.0";
+
+/// The same, for a partition-subset restore (format 2).
+pub const FORMAT_VERSION_SUBSET_WITH_SCHEMAS: &str = "2.5.0";
+
+/// Whether a document of `format_version` defines `target.schemas` (arm SC-1).
+#[must_use]
+pub fn defines_schemas(format_version: &str) -> bool {
+    let Some(minor) = minor_version(format_version) else {
+        return false;
+    };
+    match major_version(format_version) {
+        Some(1) => minor >= SCHEMAS_SINCE_MINOR,
+        Some(PARTITION_SUBSETS_MAJOR) => minor >= SCHEMAS_SINCE_MINOR_OF_MAJOR_2,
+        _ => false,
+    }
+}
+
+/// The `format_version` a scorecard is written with once its `target.schemas`
+/// is known: raised to the version that defines the block when it carries
+/// one, else `current`. Monotonic within the major.
+#[must_use]
+pub fn format_version_with_schemas(current: &str, present: bool) -> &str {
+    if !present {
+        return current;
+    }
+    if major_version(current) == Some(PARTITION_SUBSETS_MAJOR) {
+        newer_format_version(current, FORMAT_VERSION_SUBSET_WITH_SCHEMAS)
+    } else {
+        newer_format_version(current, FORMAT_VERSION_WITH_SCHEMAS)
+    }
+}
+
 /// Whether a document of `format_version` defines
 /// `integrity.verification.positions_mapping` (arm PM-1).
 #[must_use]
@@ -1288,6 +1333,13 @@ pub struct TargetInfo {
     /// other document; arms TC-1 to TC-5 judge it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic_configuration: Option<crate::topic_transition::TopicConfigurationBlock>,
+    /// **PROD-03.2 (format 1.13.0, and 2.5.0).** The schemas this restore put
+    /// in the target registry, keeping their IDs, or why none were
+    /// ([`crate::schema_registry::ScorecardSchemas`], arms SC-1 to SC-3).
+    /// Present when the archive's receipt captured a registry or the plan
+    /// names a target registry; ABSENT on every other document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schemas: Option<crate::schema_registry::ScorecardSchemas>,
 }
 
 /// A nested optional block. GC12 as amended permits nested optional fields in
@@ -3481,6 +3533,17 @@ impl Scorecard {
                 .map_err(InvariantError)?;
             }
         }
+        // `target.schemas` (format 1.13.0, and 2.5.0; PROD-03.2): arms SC-1 to
+        // SC-3, only on a document carrying the block. Mirrored in this
+        // position (before `redactions`) by
+        // `docs/verify_scorecard.py::_schemas_fault`.
+        if let Some(block) = &self.target.schemas {
+            crate::schema_registry::check_scorecard_block(
+                block,
+                defines_schemas(&self.format_version),
+            )
+            .map_err(InvariantError)?;
+        }
         // `docs/formats/drill-scorecard.md` states that `redactions` is "Always
         // `[]` in v0.1" as a PROPERTY OF THE FORMAT: a non-empty list would
         // tell an auditor that a field they read first had been removed, and
@@ -3571,6 +3634,7 @@ mod tests {
                 original_name: None,
                 creation: None,
                 topic_configuration: None,
+                schemas: None,
             },
             approval: ApprovalInfo {
                 approver: "sre-oncall@example.com".into(),

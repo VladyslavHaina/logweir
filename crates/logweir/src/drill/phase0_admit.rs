@@ -1791,6 +1791,7 @@ mod tests {
                 default_replication_factor: 1,
                 teardown: "delete".into(),
                 topic_configuration: None,
+                schema_registry: None,
             },
             sample: SampleSpec {
                 window_start: ts("2026-08-29T00:00:00Z"),
@@ -2558,6 +2559,7 @@ mod topic_configuration_tests {
             schema_dependency: None,
             generations: None,
             source_watermarks: None,
+            schema_registry: None,
         };
         let coverage = r::SourceConfigCoverage::from_receipt(&receipt);
         let mapping = BTreeMap::from([("orders".to_string(), "r-orders".to_string())]);

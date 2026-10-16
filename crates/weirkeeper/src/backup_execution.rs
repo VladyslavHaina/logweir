@@ -1305,6 +1305,7 @@ impl FrozenInputs {
                 // From the frozen snapshot, so a re-created Job records the
                 // groups the run was admitted with.
                 consumer_groups: inputs.consumer_groups.clone(),
+                schema_registry: None,
             },
             storage: inputs.archive.storage.clone(),
             backup_id: inputs.execution.id.clone(),

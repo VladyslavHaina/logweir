@@ -121,6 +121,7 @@ fn receipt() -> BackupReceipt {
         schema_dependency: None,
         generations: None,
         source_watermarks: None,
+        schema_registry: None,
     }
 }
 

@@ -271,6 +271,15 @@ pub struct BackupReceipt {
     /// byte for byte.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_watermarks: Option<BTreeMap<String, Vec<[u64; 2]>>>,
+    /// **Format 1.9.0 (PROD-03.1).** The source connection's Schema Registry,
+    /// captured after the engine: whether the snapshot was written, its key
+    /// and digest, its counts, and what it lacks
+    /// ([`crate::schema_registry::ReceiptSchemaRegistry`], arms SR-R1 to
+    /// SR-R4). Present exactly when the source connection names a registry.
+    /// ABSENT means the registry was not captured — every receipt before
+    /// 1.9.0. Appended last and skipped when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<crate::schema_registry::ReceiptSchemaRegistry>,
 }
 
 /// **PROD-01.4a, receipt 1.6.0.** What one run observed about one topic's
@@ -473,6 +482,29 @@ pub const FORMAT_VERSION_WITH_SOURCE_WATERMARKS: &str = "1.8.0";
 /// `docs/verify_scorecard.py`'s `RECEIPT_SOURCE_WATERMARKS_SINCE_MINOR`
 /// together.
 pub const SOURCE_WATERMARKS_SINCE_MINOR: u64 = 8;
+
+/// The `format_version` of a receipt that carries `schema_registry`
+/// (PROD-03.1): a MINOR bump over [`FORMAT_VERSION_WITH_SOURCE_WATERMARKS`]
+/// under OD-7 (a), arms SR-R1 to SR-R4 reading only the new block. It
+/// includes every earlier minor.
+pub const FORMAT_VERSION_WITH_SCHEMA_REGISTRY: &str = "1.9.0";
+
+/// The first minor of format 1 that defines `schema_registry` (arm SR-R1). A
+/// renumber moves this, [`FORMAT_VERSION_WITH_SCHEMA_REGISTRY`] and
+/// `docs/verify_scorecard.py`'s `RECEIPT_SCHEMA_REGISTRY_SINCE_MINOR` together.
+pub const SCHEMA_REGISTRY_SINCE_MINOR: u64 = 9;
+
+/// The `format_version` once the receipt's `schema_registry` is known: at
+/// least [`FORMAT_VERSION_WITH_SCHEMA_REGISTRY`] when it carries the block,
+/// else `current` unchanged.
+#[must_use]
+pub fn format_version_with_schema_registry(current: &'static str, present: bool) -> &'static str {
+    if present {
+        FORMAT_VERSION_WITH_SCHEMA_REGISTRY
+    } else {
+        current
+    }
+}
 
 /// The most bytes a writer lets `source_watermarks`
 /// take in a receipt: 32 KiB, measured as the block encoded exactly as the
@@ -2083,6 +2115,17 @@ impl BackupReceipt {
                     ));
                 }
             }
+        }
+        // ARMS SR-R1 to SR-R4 (format 1.9.0): `schema_registry`, and ONLY
+        // when it is present (OD-7 (a)).
+        if let Some(block) = &self.schema_registry {
+            let minor = parse_semver(&self.format_version).map(|(_, minor, _)| minor);
+            crate::schema_registry::check_receipt_block(
+                block,
+                minor.is_some_and(|m| m >= SCHEMA_REGISTRY_SINCE_MINOR),
+                &self.backup_id,
+                &self.run_id,
+            )?;
         }
         Ok(())
     }

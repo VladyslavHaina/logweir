@@ -710,14 +710,17 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // defines every auth mode and the `topic_configuration` block too;
         // 1.7.0, which defines `consumer_positions`, when the run selected
         // consumer groups.
-        format_version: logweir_core::backup_receipt::format_version_for(
-            &archive,
-            true,
-            true,
-            &auth,
-            true,
-            outcome.consumer_positions.is_some(),
-            outcome.source_watermarks.is_some(),
+        format_version: logweir_core::backup_receipt::format_version_with_schema_registry(
+            logweir_core::backup_receipt::format_version_for(
+                &archive,
+                true,
+                true,
+                &auth,
+                true,
+                outcome.consumer_positions.is_some(),
+                outcome.source_watermarks.is_some(),
+            ),
+            outcome.schema_registry.is_some(),
         )
         .to_string(),
         run_id: outcome.run_id.clone(),
@@ -771,6 +774,8 @@ pub fn build_receipt(outcome: &crate::backup::BackupOutcome) -> BackupReceipt {
         // answered for every named partition (1.8.0); absent is coverage NOT
         // RECORDED.
         source_watermarks: outcome.source_watermarks.clone(),
+        // Present exactly when the plan named a source registry (1.9.0).
+        schema_registry: outcome.schema_registry.clone(),
     }
 }
 
