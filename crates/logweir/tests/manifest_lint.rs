@@ -365,7 +365,7 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
         while let Some(rel) = src[from..].find("follow::<") {
             let start = from + rel + "follow::<".len();
             from = start;
-            if let Some(end) = src[start..].find(|c: char| c == ',' || c == '>') {
+            if let Some(end) = src[start..].find([',', '>']) {
                 let ty = &src[start..start + end];
                 if !ty.is_empty() && ty.chars().all(is_word) {
                     out.entry(ty.to_string())
