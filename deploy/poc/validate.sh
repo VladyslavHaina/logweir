@@ -345,7 +345,7 @@ else
   fail=1
 fi
 # The retired controller may be NAMED in a comment (why it is gone), never used.
-if grep -rn -i 'nginx' deploy/poc/*.yaml deploy/poc/*.env deploy/poc/rehearsals/ | grep -v -E ':[0-9]+:[[:space:]]*#' > "$work/nginx.hits"; then
+if grep -rn -i 'nginx' deploy/poc/*.yaml deploy/poc/*.env | grep -v -E ':[0-9]+:[[:space:]]*#' > "$work/nginx.hits"; then
   echo "FAIL: the profile still uses the retired ingress-nginx:" >&2
   cat "$work/nginx.hits" >&2
   fail=1

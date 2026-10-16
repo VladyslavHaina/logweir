@@ -79,7 +79,8 @@ docker-desktop publishes Traefik's `LoadBalancer` Service on the host's
   natively on Apple silicon (linux/arm64); the identity hook does from a chart
   carrying release-notes item 84, and needs amd64 emulation before it.
 - `helm` 3.19+ or 4 (a first install with the console needs 3.19; the PoC runs
-  4.0.1), `kubectl`, `openssl`, `htpasswd` (macOS ships it), `git`.
+  4.0.1), `kubectl`, `openssl`, `htpasswd` (macOS ships it), `git`, and the
+  MinIO client `mc` for step 7's boundary check.
 
 ```bash
 git clone https://github.com/VladyslavHaina/logweir && cd logweir
@@ -246,11 +247,17 @@ kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-c
 # trust anchor for its IdP (chart gap G1). NOT the browser CA in ca.crt.
 kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create configmap logweir-dex-ca \
   --from-file=ca.crt=poc-secrets/dex-backchannel-ca.crt
-# The three least-privilege MinIO users' secret keys (step 7).
-for u in writer reader evidence; do openssl rand -hex 20 | tr -d '\n' > "poc-secrets/minio-$u"; done
+# The least-privilege MinIO users' secret keys (step 7): three per workspace,
+# and the controller's evidence reader. Read by the grants Job alone; no
+# workspace label, so no Logweir object can name it.
+args=()
+for ws in dev tst stg prd; do for r in writer reader evidence; do
+  openssl rand -hex 20 | tr -d '\n' > "poc-secrets/minio-$ws-$r"
+  args+=(--from-file="$ws-$r=poc-secrets/minio-$ws-$r")
+done; done
+openssl rand -hex 20 | tr -d '\n' > poc-secrets/minio-evidence
 kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" create secret generic logweir-poc-minio-users \
-  --from-file=writer=poc-secrets/minio-writer --from-file=reader=poc-secrets/minio-reader \
-  --from-file=evidence=poc-secrets/minio-evidence
+  "${args[@]}" --from-file=evidence=poc-secrets/minio-evidence
 # The controller's own read-only evidence credential (docs/install.md section 3, secret 4), as the
 # evidence user above. Its archive handle -- LOGWEIR_ARCHIVE_URL, s3://kafka-backups/logweir with
 # the demo MinIO -- is the only reader of the evidence of a run written WITHOUT a saved destination.
@@ -339,10 +346,14 @@ The chart's demo MinIO takes its **root** credential from chart values
 one credential is therefore in a rendered Secret and in Helm's release history —
 this profile's single exception to "nothing secret in values" — and it can
 delete. It is never handed to Logweir. A one-shot Job reads it inside the
-cluster and creates three users with the policies
-[docs/install.md](../../docs/install.md) §3.11 measured, none of which holds
-`s3:DeleteObject`. **Overwrite is not excluded:** the writer's `s3:PutObject`
-on `kafka-backups/poc/*` (every workspace's prefix is under it) and `…/logweir/*` can replace an existing key on this
+cluster, creates one bucket per workspace (`poc-dev`, `poc-tst`, `poc-stg`,
+`poc-prd`) and three users per workspace with the policies
+[docs/install.md](../../docs/install.md) §3.11 measured, each scoped to its own
+workspace's bucket, none of which holds `s3:DeleteObject`. **The bucket
+credential is the boundary between workspaces** (PROD-19.1, open point 2): a
+destination's evidence lives under the fixed `logweir/` of its own bucket, so
+only a bucket per workspace keeps archives and evidence apart. **Overwrite is not excluded:** the writer's `s3:PutObject`
+on `poc-<ws>/poc/*` and `…/logweir/*` can replace an existing key on this
 unversioned bucket, because `archiveWrite` is what writes a backup's segments
 and the receipt and catalog record, and S3 IAM has no put-if-absent action.
 Verification catches part of it — a replaced receipt fails its signature, and a
@@ -360,11 +371,26 @@ kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" wait --for=condition=complete \
   job/logweir-poc-minio-grants --timeout=180s
 ```
 
-| MinIO user | secret key | the destination grant it fills |
+| MinIO user | secret key | the grant it fills |
 |---|---|---|
-| `logweir-poc-writer` | `poc-secrets/minio-writer` | `archiveWrite` (and `evidenceWrite`, which falls back to it) |
-| `logweir-poc-reader` | `poc-secrets/minio-reader` | `archiveRead` (widened to the catalog-sync row) |
-| `logweir-poc-evidence` | `poc-secrets/minio-evidence` | `evidenceRead` (with the `s3:ListBucket` that makes "absent" mean absent) |
+| `logweir-poc-<ws>-writer` | `poc-secrets/minio-<ws>-writer` | `<ws>`'s destination: `archiveWrite` (and `evidenceWrite`, which falls back to it) |
+| `logweir-poc-<ws>-reader` | `poc-secrets/minio-<ws>-reader` | `<ws>`'s destination: `archiveRead` (widened to the catalog-sync row, and `legacy/`) |
+| `logweir-poc-<ws>-evidence` | `poc-secrets/minio-<ws>-evidence` | `<ws>`'s destination: `evidenceRead` (with the `s3:ListBucket` that makes "absent" mean absent) |
+| `logweir-poc-evidence` | `poc-secrets/minio-evidence` | the controller's `logweir-evidence-ro` only: `kafka-backups/logweir/*` |
+
+**Check (the boundary):** with `dev`'s reader, listing `prd`'s bucket is
+refused and its own is not. `mc` reads the key from a file, never a command
+line:
+
+```bash
+kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" port-forward svc/logweir-minio 9000:9000 &
+pf=$!
+MC_HOST_dev="http://logweir-poc-dev-reader:$(cat poc-secrets/minio-dev-reader)@127.0.0.1:9000" \
+  mc ls dev/poc-prd/poc/     # Access Denied
+MC_HOST_dev="http://logweir-poc-dev-reader:$(cat poc-secrets/minio-dev-reader)@127.0.0.1:9000" \
+  mc ls dev/poc-dev/poc/     # the control: lists (empty before step 10)
+kill "$pf"
+```
 
 ## 8. Trust
 
@@ -456,7 +482,7 @@ installation").
 |---|---|
 | Source connection | role `source`, `logweir-kafka-source.logweir.svc.cluster.local:9092`, plaintext (`<ws>-source` where a name is asked for). There is no name to type: the console names a connection `conn-<26 characters>` and shows it once created; the Clusters list prints each connection's role (`source` or `target`) under its name, which is how you tell it from the target |
 | Target connection | role `target`, `logweir-kafka-target.logweir.svc.cluster.local:9092`, plaintext (`<ws>-target`, or `conn-…` when the console names it) |
-| Destination | `<ws>-primary` (a destination keeps the name you type): endpoint `http://logweir-minio.logweir.svc:9000` (transport `InsecureHTTP`, the demo MinIO speaks no TLS), region `us-east-1`, path-style, bucket `kafka-backups`, prefix `poc/<ws>`; each grant the MinIO user in step 7's table, entered once as a new credential (access key = the user name, secret key = its file) |
+| Destination | `<ws>-primary` (a destination keeps the name you type): endpoint `http://logweir-minio.logweir.svc:9000` (transport `InsecureHTTP`, the demo MinIO speaks no TLS), region `us-east-1`, path-style, bucket `poc-<ws>`, prefix `poc`; each grant `<ws>`'s own MinIO user from step 7's table, entered once as a new credential (access key = the user name, secret key = its file); the console labels the credential Secret with `<ws>` |
 | Schedule | source = the `conn-…` connection with role `source`, topics `orders` and `payments` (the demo seeds both), daily, destination `<ws>-primary`; then *Run first backup now*. There is no name to type: the console names the schedule `sch-<26 characters>` and opens it by that name |
 | Restore | from the schedule's page, *Restore this point*; target = the `conn-…` connection with role `target`, new-topic prefix `restored-`; the readiness check; *Create the Restore* (named `rst-…` by the console); confirm it (one person), or in `prd` have `bob` approve it (step 9) |
 
@@ -643,16 +669,16 @@ the CRDs stay.
 ## Import an earlier install's archive
 
 An install of 0.4.x or older is not upgraded; its archive is imported. Before
-removing the old release, copy its archive into the new MinIO under `legacy/`
-(`mc mirror` from the old bucket and prefix to `kafka-backups/legacy/<old
-prefix>`; the reader user of step 7 reads `legacy/`), and export the old signer
+removing the old release, copy its archive into the new MinIO, into the bucket of the workspace that
+will hold the old points (`stg` here): `mc mirror` from the old bucket and
+prefix to `poc-stg/legacy/<old prefix>` (`stg`'s reader reads `legacy/`), and
+export the old signer
 as *Recover onto a clean installation with the kit* says
 ([docs/install.md](../../docs/install.md#recover-onto-a-clean-installation-with-the-kit)).
 In the new install, add the old signer's `EvidenceSigning` entry, with its own
 `notBefore`, to `logweir-installation` as historical (step 8). Then, in the
-workspace that should hold the old points (say `stg`): a destination over
-bucket `kafka-backups`, prefix `legacy/<old prefix>`, with the reader's grant,
-and a catalog over it. The catalog lists the old points, and a restore of one
+workspace `stg`: a destination over bucket `poc-stg`, prefix `legacy/<old
+prefix>`, with `stg`'s reader grant, and a catalog over it. The catalog lists the old points, and a restore of one
 ends verified. A catalog in another workspace that names that destination is
 refused: references never cross workspaces.
 
