@@ -1601,6 +1601,160 @@
         ]
       }
     },
+    "/api/v1/workspaces/{ws}/restores/{name}/cancel": {
+      "post": {
+        "operationId": "cancelRestore",
+        "summary": "PROD-07.2: stop a restore. Sets `logweir.dev/cancel-requested-by` (metadata; the sealed spec is untouched). Before the run's Job exists the restore fails `Cancelled` and nothing ran; while it runs the controller suspends the Job, the runner stops its engine (SIGTERM, SIGKILL after ten seconds) and signs nothing, and a run that created its target topics becomes `Interrupted`. A run that already signed keeps its outcome. A repeated request writes nothing. Requires the role that may create restores in the workspace. 409 once the restore has ended. Idempotency-Key is refused.",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "required": true,
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cancel is recorded (or already was).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{ws}/restores/{name}/cleanup": {
+      "post": {
+        "operationId": "cleanupRestore",
+        "summary": "PROD-07.2: remove the topics an interrupted restore created and left. Sets `logweir.dev/cleanup-requested-by`; the controller runs `logweir restore cleanup` over the reconcile's signed scorecard, which deletes only the topics it lists, each only while its topic ID is the one recorded at creation, and lists what it left. The recovery point is released once it succeeded. A repeated request writes nothing. Requires the role that may create restores in the workspace; no second approval. 409 unless the restore is `Interrupted` with a signed reconcile. Idempotency-Key is refused.",
+        "parameters": [
+          {
+            "name": "ws",
+            "in": "path",
+            "required": true,
+            "description": "A workspace of this install the actor holds a role in. Any other workspace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The cleanup is recorded (or already was).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
     "/api/v1/workspaces/{ws}/restores/{name}/approval": {
       "post": {
         "operationId": "submitGovernedApproval",
@@ -10474,10 +10628,17 @@
             ]
           },
           {
-            "description": "Cancelled. Not produced by current resources (no cancel exists).",
+            "description": "Cancelled before it created anything (PROD-07.2: a restore whose cancel landed before its Job, or that stopped before its creation step).",
             "type": "string",
             "enum": [
               "cancelled"
+            ]
+          },
+          {
+            "description": "PROD-07.2: stopped before it finished after it created its target topics; nothing was resumed. `interruption` says why and what the reconcile found.",
+            "type": "string",
+            "enum": [
+              "interrupted"
             ]
           },
           {
@@ -12546,6 +12707,11 @@
             "type": "string",
             "nullable": true
           },
+          "interruption": {
+            "description": "PROD-07.2: a run that ended without a signed scorecard after it created its target topics. ABSENT on every other run.",
+            "$ref": "#/components/schemas/RestoreInterruptionView",
+            "nullable": true
+          },
           "name": {
             "description": "The object name.",
             "type": "string"
@@ -12700,6 +12866,49 @@
           "requested": {
             "description": "What the Restore asks for: `spec.coverage`, absent read as `sampled`. The controller has held it to the plan's own `sample.coverage`.",
             "$ref": "#/components/schemas/RestoreCoverage"
+          }
+        }
+      },
+      "RestoreInterruptionView": {
+        "description": "`Restore.interruption` (PROD-07.2), from `status.interruption`.",
+        "type": "object",
+        "required": [
+          "cleanupOffered"
+        ],
+        "properties": {
+          "cause": {
+            "description": "`Cancelled`, `RunnerStopped` or `RunFailed`.",
+            "type": "string",
+            "nullable": true
+          },
+          "cleanup": {
+            "description": "The cleanup: `Removing`, `Removed` or `RemovalFailed`.",
+            "type": "string",
+            "nullable": true
+          },
+          "cleanupOffered": {
+            "description": "Whether `cleanup` may be requested now.",
+            "type": "boolean"
+          },
+          "cleanupReason": {
+            "description": "Why the cleanup failed, when it did.",
+            "type": "string",
+            "nullable": true
+          },
+          "requestedBy": {
+            "description": "Who asked for the cancel.",
+            "type": "string",
+            "nullable": true
+          },
+          "verification": {
+            "description": "`Running`, `Done` or `Failed`: the reconcile of the partial targets. Its signed scorecard's counts are this restore's `integrity` and `coverage`.",
+            "type": "string",
+            "nullable": true
+          },
+          "verificationReason": {
+            "description": "Why the reconcile failed, or what it found when nothing was left.",
+            "type": "string",
+            "nullable": true
           }
         }
       },

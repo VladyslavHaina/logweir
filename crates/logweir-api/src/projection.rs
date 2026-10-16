@@ -507,6 +507,26 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
         topic_configuration: status
             .and_then(|s| s.topic_configuration.as_ref())
             .map(topic_configuration_view),
+        interruption: status.and_then(|s| s.interruption.as_ref()).map(|i| {
+            use weirkeeper::controllers::restore::restore_interruption as ri;
+            crate::contract::RestoreInterruptionView {
+                cause: i.cause.clone(),
+                requested_by: i.requested_by.as_deref().map(|r| bounded(r, 256)),
+                verification: i.verification.clone(),
+                verification_reason: i.verification_reason.as_deref().map(|r| bounded(r, 1024)),
+                cleanup_offered: status.and_then(|s| s.phase.as_deref())
+                    == Some(ri::PHASE_INTERRUPTED)
+                    && i.verification.as_deref() == Some(ri::VERIFICATION_DONE)
+                    && i.reconcile_run_id.is_some()
+                    && i.cleanup.is_none(),
+                cleanup: i.cleanup.as_ref().and_then(|c| c.phase.clone()),
+                cleanup_reason: i
+                    .cleanup
+                    .as_ref()
+                    .and_then(|c| c.reason.as_deref())
+                    .map(|r| bounded(r, 1024)),
+            }
+        }),
         old_topics: status
             .and_then(|s| s.old_topics.clone())
             .unwrap_or_default()

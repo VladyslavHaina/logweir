@@ -512,6 +512,30 @@ fn paths() -> Value {
             vec![get_one("getRestore", "One Restore projection, planBytes included.", "RestoreResponse")],
         ),
         (
+            "/api/v1/workspaces/{ws}/restores/{name}/cancel",
+            vec![Op {
+                method: "post",
+                operation_id: "cancelRestore",
+                summary: "PROD-07.2: stop a restore. Sets `logweir.dev/cancel-requested-by` (metadata; the sealed spec is untouched). Before the run's Job exists the restore fails `Cancelled` and nothing ran; while it runs the controller suspends the Job, the runner stops its engine (SIGTERM, SIGKILL after ten seconds) and signs nothing, and a run that created its target topics becomes `Interrupted`. A run that already signed keeps its outcome. A repeated request writes nothing. Requires the role that may create restores in the workspace. 409 once the restore has ended. Idempotency-Key is refused.",
+                parameters: vec![ws(), name(), origin()],
+                request: None,
+                success: vec![("200", "The cancel is recorded (or already was).", "RestoreResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, &[ProblemCode::NotFound, ProblemCode::StateConflict]]),
+            }],
+        ),
+        (
+            "/api/v1/workspaces/{ws}/restores/{name}/cleanup",
+            vec![Op {
+                method: "post",
+                operation_id: "cleanupRestore",
+                summary: "PROD-07.2: remove the topics an interrupted restore created and left. Sets `logweir.dev/cleanup-requested-by`; the controller runs `logweir restore cleanup` over the reconcile's signed scorecard, which deletes only the topics it lists, each only while its topic ID is the one recorded at creation, and lists what it left. The recovery point is released once it succeeded. A repeated request writes nothing. Requires the role that may create restores in the workspace; no second approval. 409 unless the restore is `Interrupted` with a signed reconcile. Idempotency-Key is refused.",
+                parameters: vec![ws(), name(), origin()],
+                request: None,
+                success: vec![("200", "The cleanup is recorded (or already was).", "RestoreResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, &[ProblemCode::NotFound, ProblemCode::StateConflict]]),
+            }],
+        ),
+        (
             "/api/v1/workspaces/{ws}/restores/{name}/approval",
             vec![Op {
                 method: "post",

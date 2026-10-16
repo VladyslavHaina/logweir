@@ -320,6 +320,18 @@ pub const ROUTES: &[RouteAccess] = &[
         "/api/v1/workspaces/{ws}/restores/{name}",
         ws(&[Action::ReadRestores]),
     ),
+    // PROD-07.2: whoever may create restores in the workspace may cancel one
+    // and clean up an interrupted one (OD-23 open point 3).
+    route(
+        "POST",
+        "/api/v1/workspaces/{ws}/restores/{name}/cancel",
+        ws(&[Action::CreateRestore]),
+    ),
+    route(
+        "POST",
+        "/api/v1/workspaces/{ws}/restores/{name}/cleanup",
+        ws(&[Action::CreateRestore]),
+    ),
     // PROD-04.2: switchovers, under the restore actions (reading one is
     // reading a restore's consequence; requesting one is an operator's).
     route(

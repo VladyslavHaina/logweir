@@ -62,6 +62,8 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/workspaces/{ws}/backups/{name}",
             "/api/v1/workspaces/{ws}/restores",
             "/api/v1/workspaces/{ws}/restores/{name}",
+            "/api/v1/workspaces/{ws}/restores/{name}/cancel",
+            "/api/v1/workspaces/{ws}/restores/{name}/cleanup",
             "/api/v1/workspaces/{ws}/restores/{name}/approval",
             "/api/v1/workspaces/{ws}/restores/{name}/approval-request",
             "/api/v1/workspaces/{ws}/restores/{name}/console-approval",
@@ -119,8 +121,9 @@ fn the_document_names_every_route_and_every_route_answers() {
     // getApprovalPolicy, getApprovalRequest, approveInConsole), less the two
     // withdrawn rehearsal-schedule reads and createDestinationFromLegacy; plus
     // PROD-04.2's six switchover operations (list, create, get, approval,
-    // approval request, console approval).
-    assert_eq!(operation_ids.len(), 63);
+    // approval request, console approval); plus PROD-07.2's cancelRestore and
+    // cleanupRestore.
+    assert_eq!(operation_ids.len(), 65);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and
