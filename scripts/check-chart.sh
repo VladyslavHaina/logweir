@@ -1527,7 +1527,7 @@ check_console_grants() {
   # Approval its ordinary confirmation IS, the governed confirmation object and
   # the approver's countersigned Approval on `POST .../restores/{name}/approval`),
   # the two named merge patches plus the two `CancellableCheck`
-  # kinds, D3 W11's three namespaced reads and its ONE write, the cluster-scoped
+  # kinds, a Restore's cancel and clean-up annotations (PROD-07.2), D3 W11's three namespaced reads and its ONE write, the cluster-scoped
   # `TrustPolicy` read, the ONE roster read (`get trustrosters@default`: the
   # rule's `resourceNames` is part of the pair, so the name list cannot be
   # dropped — PREFLIGHT-TRUSTROSTER-STALE), and the two core objects with one
@@ -1539,7 +1539,7 @@ check_console_grants() {
     'get backupschedules'    'list backupschedules'    'create backupschedules'    'patch backupschedules' \
     'get kafkaclusters'      'list kafkaclusters'      'create kafkaclusters' \
     'get preflights'         'list preflights'         'create preflights'         'patch preflights' \
-    'get restores'           'list restores'           'create restores' \
+    'get restores'           'list restores'           'create restores'           'patch restores' \
     'get switchovers'        'list switchovers'        'create switchovers' \
     'get topicdiscoveries'   'list topicdiscoveries'   'create topicdiscoveries'   'patch topicdiscoveries' \
     'get protectionpolicies' 'list protectionpolicies' \
