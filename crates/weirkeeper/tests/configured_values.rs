@@ -1122,7 +1122,7 @@ fn clean_listing(cluster_id: &str) -> InventoryResult {
 /// discovery** (`backup_selection::run_time_visibility`, the read `resolve`
 /// makes), from the policy reference in this process's environment.
 ///
-/// The tuned document attests `team-a`'s `source` cluster
+/// The tuned document attests the release namespace's `source` cluster
 /// (`M29I2S7FQPyHBEX12Vx7XA`) for `User:backup` until 2027, so a clean listing
 /// of it is `attestedComplete`, the one state a `Backup` with
 /// `incompleteDiscovery: Refuse` resolves under. CONTROL: served the default
@@ -1138,7 +1138,7 @@ async fn the_installation_policys_attestation_reaches_a_backups_run_time_discove
         weirkeeper::controllers::backup_selection::run_time_visibility(
             &client,
             &clean_listing(cluster_id),
-            NS,
+            RELEASE_NS,
             "source",
             "User:backup",
             utc(12, 0, 0),

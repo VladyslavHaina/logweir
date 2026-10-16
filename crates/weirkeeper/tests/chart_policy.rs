@@ -95,7 +95,7 @@ fn a_configured_render_parses_and_keeps_its_attestation_and_allowlist() {
     assert_eq!(parsed.discovery.visibility_attestations.len(), 1);
     let att = &parsed.discovery.visibility_attestations[0];
     assert_eq!(att.id, "att-orders-prod");
-    assert_eq!(att.namespace, "team-a");
+    assert_eq!(att.namespace, "logweir-system", "the release namespace: every KafkaCluster is there");
     assert_eq!(att.kafka_cluster, "source");
     assert_eq!(att.principal, "User:backup");
     assert!(
@@ -419,11 +419,11 @@ fn the_policy_template_names_its_cross_field_rule_in_its_refusal() {
     );
 
     // AND THE CONDITION IS LIVE. Pinning the MESSAGE alone is not enough:
-    // replacing `{{- if lt $maxTotal $maxNs -}}` with `{{- if false -}}` leaves
+    // replacing `{{- if lt $maxTotal $maxWs -}}` with `{{- if false -}}` leaves
     // the `fail` and its message where they were. `scripts/check-chart.sh`
     // renders the inverted pair and is the live proof; this is the cheap half
     // that says which comparison the `fail` hangs off.
-    let condition = "{{- if lt $maxTotal $maxNs -}}";
+    let condition = "{{- if lt $maxTotal $maxWs -}}";
     assert!(
         code.contains(condition),
         "templates/_validate.tpl must guard the refusal with `{condition}`; a `fail` behind a \
@@ -710,7 +710,7 @@ const FOLLOWED: &[Followed] = &[
         access: &[".max_active_per_workspace"],
         sites: Ok(&[Site {
             file: "check/limits.rs",
-            needle: "counts.namespace >= policy.max_active_per_workspace",
+            needle: "counts.workspace >= policy.max_active_per_workspace",
             proof: Ok((
                 "topic_discovery_controller.rs",
                 "the_installation_policys_ceilings_reach_discovery_admission_and_the_plan",
@@ -748,7 +748,7 @@ const FOLLOWED: &[Followed] = &[
             Site {
                 file: "check/limits.rs",
                 needle:
-                    "counts.evidence_namespace >= policy.max_evidence_fetch_active_per_workspace",
+                    "counts.evidence_workspace >= policy.max_evidence_fetch_active_per_workspace",
                 proof: Ok((
                     "check_framework.rs",
                     "every_check_ceiling_is_the_policys_own_at_a_non_default_value",

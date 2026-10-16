@@ -50,7 +50,8 @@ fn restore_value(annotations: Value, status: Value) -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
         "metadata": {"name": NAME, "namespace": NS, "uid": UID, "generation": 1,
-                     "resourceVersion": "100", "annotations": annotations},
+                     "resourceVersion": "100", "annotations": annotations,
+                     "labels": {"logweir.dev/workspace": "dev"}},
         "spec": {
             "planBytes": plan(), "approvalRef": {"name": "a1"},
             "sourceArchive": {"url": "s3://b/p"}, "backupSetRef": "s",
