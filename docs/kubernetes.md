@@ -112,6 +112,10 @@ the images are per install.
   catalog or policy whose `…Ref` names an object of another workspace gets
   `WorkspaceMismatch`, terminal, with no Job; an approval signed for one
   workspace never authorises a run in another (`AuthorizationSubjectMismatch`).
+  The rule follows each reference to the end: a `Preflight` or `Switchover` of
+  a `dev` `Restore` whose connection, destination or credential is in `prd` is
+  refused at the `Preflight` or `Switchover` itself, and so is a TTL clone
+  being deleted (it keeps its finalizer and says why).
   `prd` data reaches `stg` for a drill through a `stg` destination with a
   read-only grant on `prd`'s bucket, which an administrator sets up.
 - **A credential Secret carries the label too.** The controller mounts a Secret

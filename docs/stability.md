@@ -137,7 +137,7 @@ of its format's Versions table:
 ## The product API's OpenAPI document is pre-release, and says so
 
 `schemas/logweir-api-v1.openapi.json` is the one checked-in schema the rule
-above does **not** cover. `info.version` is `1.0.0-alpha.3`. Its consumers are
+above does **not** cover. `info.version` is `1.0.0-alpha.4`. Its consumers are
 the console image and its typed client (PLAT-18.1); the binary is
 `publish = false`, and no client outside this repository is supported, so the
 console and the API ship and upgrade together. The owner decided on 2026-10-07
@@ -168,6 +168,15 @@ is still pre-release, so they move only the pre-release number, from
 
 [release-notes.md](release-notes.md) item 86 lists every change, one line each.
 
+`-alpha.4` (OD-23) is breaking again, so it moves the pre-release number only:
+- **breaking:** every product route moves from `/api/v1/namespaces/{ns}/…` to
+  `/api/v1/workspaces/{ws}/…`, and `GET /api/v1/namespaces` is
+  `GET /api/v1/workspaces`;
+- **breaking:** the session lists `workspaces[]`, and the problem code
+  `namespace_forbidden` is `workspace_forbidden`;
+- added: `POST …/restores/{name}/cancel` and `/cleanup`, and a restore's
+  `interruption` (PROD-07.2).
+
 ## The CLI, and what is not a contract
 
 - **CLI flags and exit codes are stable within a major.** A given Logweir major
@@ -195,11 +204,18 @@ keep the bucket, import trust and connect a catalog in each workspace
   are renamed per workspace. Each is refused at render by name. The
   `kubectl` write roles `logweir-operator`, `logweir-approver` and
   `logweir-retention-admin` are gone.
-- **Controller:** `LOGWEIR_WATCH_NAMESPACES` is gone; `LOGWEIR_WORKSPACES` is
-  required. An object without a listed `logweir.dev/workspace` label is
-  `WorkspaceUnknown`; a reference into another workspace is `WorkspaceMismatch`.
+- **Controller:** `LOGWEIR_WATCH_NAMESPACES` is gone;
+  `LOGWEIR_INSTALLATION_NAMESPACE` (the release namespace, which every watch
+  and Job uses) and `LOGWEIR_WORKSPACES` (the comma list) are required, and a
+  missing or malformed value refuses to start. An object without a listed
+  `logweir.dev/workspace` label is `WorkspaceUnknown`; a reference into another
+  workspace, directly or through what a referent names, is `WorkspaceMismatch`.
   The installation policy's caps are `…PerWorkspace`, and the approval-policy
-  document binds `workspaces:`.
+  document binds `workspaces:`. The controller's Role gains `get` on `secrets`,
+  for the label of each Secret an object names; it reads no Secret's data.
+- **Runner:** the restore Job's contract gains
+  `LOGWEIR_EXECUTION_SUBJECT_WORKSPACE`, and `logweir switchover run` gains
+  `--workspace`. `logweir identity distribute` is removed.
 - **API:** `/api/v1/namespaces/{ns}/…` is `/api/v1/workspaces/{ws}/…`, with a
   new OpenAPI pre-release ([api.md](api.md)).
 - **Signed formats:** the authorization document gains `subject.workspace`, one
