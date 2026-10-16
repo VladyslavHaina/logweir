@@ -202,6 +202,7 @@ impl Subject {
         ExpectedSubject {
             kind: self.wire().to_string(),
             namespace: self.namespace.clone(),
+            workspace: self.namespace.clone(),
             name: self.name.clone(),
             uid: self.uid.clone(),
             plan_hash: self.plan_hash(),

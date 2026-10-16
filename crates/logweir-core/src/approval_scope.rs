@@ -248,6 +248,8 @@ pub struct ApprovalScope {
     pub requester: ScopePrincipal,
     /// The namespace of the Restore.
     pub namespace: String,
+    /// Its workspace.
+    pub workspace: String,
     /// The Restore.
     pub restore: String,
     /// Its UID.
@@ -548,10 +550,11 @@ impl std::fmt::Display for ScopeIncomplete {
 }
 
 /// The values of a scope that come from the REQUEST, not from its plan.
-const REQUEST_VALUES: [&str; 10] = [
+const REQUEST_VALUES: [&str; 11] = [
     "the requester's issuer",
     "the requester's subject",
     "the namespace",
+    "the workspace",
     "the Restore's name",
     "the Restore's UID",
     "the Switchover's name",
@@ -899,6 +902,7 @@ pub fn approval_scope(
             subject: shown(&request.requester.subject, "the requester's subject")?,
         },
         namespace: shown(&request.subject.namespace, "the namespace")?,
+        workspace: shown(&request.subject.workspace, "the workspace")?,
         restore: shown(&request.subject.name, "the Restore's name")?,
         restore_uid: shown(&request.subject.uid, "the Restore's UID")?,
         plan_hash: request.plan_hash.clone(),
@@ -991,6 +995,8 @@ pub struct SwitchoverScope {
     pub requester: ScopePrincipal,
     /// The namespace of the Switchover.
     pub namespace: String,
+    /// Its workspace.
+    pub workspace: String,
     /// The Switchover.
     pub switchover: String,
     /// Its UID.
@@ -1118,6 +1124,7 @@ pub fn switchover_scope(
             subject: shown(&request.requester.subject, "the requester's subject")?,
         },
         namespace: shown(&request.subject.namespace, "the namespace")?,
+        workspace: shown(&request.subject.workspace, "the workspace")?,
         switchover: shown(&request.subject.name, "the Switchover's name")?,
         switchover_uid: shown(&request.subject.uid, "the Switchover's UID")?,
         plan_hash: request.plan_hash.clone(),
@@ -1187,6 +1194,7 @@ mod tests {
                 api_version: "logweir.dev/v1alpha1".into(),
                 kind: "Restore".into(),
                 namespace: "team-a".into(),
+                workspace: "dev".into(),
                 name: "rst-1".into(),
                 uid: "uid-1".into(),
             },

@@ -976,6 +976,10 @@ pub enum SwitchoverCmd {
         scorecard_key: String,
         #[arg(long, default_value = "")]
         namespace: String,
+        /// The `Switchover`'s workspace label, which an authorization
+        /// document v2 must name.
+        #[arg(long, default_value = "")]
+        workspace: String,
         #[arg(long, default_value = "")]
         name: String,
         #[arg(long, default_value = "")]

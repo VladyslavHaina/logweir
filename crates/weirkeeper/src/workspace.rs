@@ -221,7 +221,9 @@ where
     })
 }
 
-fn label_of<K: Resource>(object: &K) -> Option<&str> {
+/// The object's workspace label, as written.
+#[must_use]
+pub fn label_of<K: Resource>(object: &K) -> Option<&str> {
     object
         .meta()
         .labels

@@ -679,6 +679,10 @@ pub fn runner_argv(
         scorecard_key.to_string(),
         "--namespace".to_string(),
         sw.namespace().unwrap_or_default(),
+        "--workspace".to_string(),
+        crate::workspace::label_of(sw)
+            .unwrap_or_default()
+            .to_string(),
         "--name".to_string(),
         sw.name_any(),
         "--uid".to_string(),
@@ -1231,7 +1235,9 @@ pub async fn reconcile(
     let v2 = match st.authorization.as_ref() {
         None => None,
         Some(a) => {
-            let effective = policies.effective().resolve(&namespace);
+            let effective = policies
+                .effective()
+                .resolve(crate::workspace::label_of(sw.as_ref()).unwrap_or_default());
             let (Some(bound), Some(console)) =
                 (effective.bound(), trust.key(&a.confirmation_key_id))
             else {

@@ -281,6 +281,7 @@ pub struct ExecutionContract {
     pub subject_kind: String,
     pub subject_name: String,
     pub subject_namespace: String,
+    pub subject_workspace: String,
     pub subject_uid: String,
     pub approval_name: String,
     pub approval_uid: String,
@@ -485,7 +486,7 @@ pub fn execution_contract_from(
         .into());
     }
 
-    // The eleven mandatory variables are read first, in their original order,
+    // The twelve mandatory variables are read first, in their original order,
     // so an incomplete contract refuses by naming the first mandatory variable
     // it is missing
     // (`contract_transport_is_all_or_nothing_while_standalone_is_compatible`).
@@ -493,6 +494,7 @@ pub fn execution_contract_from(
     let subject_kind = required(wire::SUBJECT_KIND_ENV)?;
     let subject_name = required(wire::SUBJECT_NAME_ENV)?;
     let subject_namespace = required(wire::SUBJECT_NAMESPACE_ENV)?;
+    let subject_workspace = required(wire::SUBJECT_WORKSPACE_ENV)?;
     let subject_uid = required(wire::SUBJECT_UID_ENV)?;
     let approval_name = required(wire::APPROVAL_NAME_ENV)?;
     let approval_uid = required(wire::APPROVAL_UID_ENV)?;
@@ -541,6 +543,7 @@ pub fn execution_contract_from(
         subject_kind,
         subject_name,
         subject_namespace,
+        subject_workspace,
         subject_uid,
         approval_name,
         approval_uid,
@@ -1786,6 +1789,7 @@ fn load_startup_inputs(
                         snapshot,
                         &phase1_approval::ContractSubject {
                             namespace: contract.subject_namespace.clone(),
+                            workspace: contract.subject_workspace.clone(),
                             name: contract.subject_name.clone(),
                             uid: contract.subject_uid.clone(),
                         },

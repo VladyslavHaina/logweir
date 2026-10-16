@@ -495,12 +495,8 @@ pub fn approved_document(
     approved_at: DateTime<Utc>,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
-        format_version: logweir_core::approval_policy::restore_authorization_format_version(
-            request.approval_subject.as_deref(),
-            request.original_name_confirmation.as_ref(),
-            true,
-        )
-        .to_string(),
+        format_version: logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+            .to_string(),
         approver: Some(approver),
         approved_at: Some(approved_at),
         ..request.clone()
@@ -752,20 +748,15 @@ pub fn document(
     original_name_confirmation: Option<logweir_core::original_name::OriginalNameConfirmation>,
 ) -> RestoreAuthorization {
     RestoreAuthorization {
-        // 2.1.0 exactly when the document carries the approval
-        // subject or the typed confirmation; every other document is 2.0.0,
-        // byte for byte what it was.
-        format_version: logweir_core::approval_policy::restore_authorization_format_version_for(
-            approval_subject.wire(),
-            original_name_confirmation.as_ref(),
-        )
-        .to_string(),
+        format_version: logweir_core::approval_policy::RESTORE_AUTHORIZATION_FORMAT_VERSION
+            .to_string(),
         kind: RESTORE_AUTHORIZATION_KIND.to_string(),
         authorization_mode: policy.mode,
         subject: AuthorizedSubject {
             api_version: SUBJECT_API_VERSION.to_string(),
             kind: SUBJECT_KIND_RESTORE.to_string(),
             namespace: namespace.to_string(),
+            workspace: namespace.to_string(),
             name: name.to_string(),
             uid: uid.to_string(),
         },

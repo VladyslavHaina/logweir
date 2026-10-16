@@ -1620,6 +1620,7 @@ fn evaluate_planned_referent(
     trust: &ResolvedTrust,
     now: DateTime<Utc>,
     namespace: &str,
+    workspace: &str,
     plan_bytes: &str,
     referent: Option<&VerifiedSubjectRef>,
     effective: &EffectivePolicy,
@@ -1631,7 +1632,7 @@ fn evaluate_planned_referent(
     match effective {
         EffectivePolicy::Legacy => {
             if payload_type.as_deref() == Some(PAYLOAD_TYPE_RESTORE_AUTHORIZATION) {
-                return Err(policy::unbound_namespace_refusal(namespace).into());
+                return Err(policy::unbound_workspace_refusal(workspace).into());
             }
             evaluate(
                 approval.spec.approval_bytes.as_bytes(),
@@ -1649,6 +1650,7 @@ fn evaluate_planned_referent(
             let expected = ExpectedSubject {
                 kind: kind.as_str().to_string(),
                 namespace: namespace.to_string(),
+                workspace: workspace.to_string(),
                 name: approval.spec.subject_ref.name.clone(),
                 uid: referent.map(|r| r.uid.clone()).unwrap_or_default(),
                 plan_hash: sha256_prefixed(plan_bytes.as_bytes()),
@@ -1758,6 +1760,9 @@ async fn judge(
     let namespace = approval
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
+    // The binding and the signed subject are the Approval's workspace, which
+    // its referent shares (`workspace::same`, checked where it is read).
+    let workspace = crate::workspace::label_of(approval).unwrap_or_default();
 
     // A standing authorization is withdrawn: refused by name first, before a
     // stored record, the trust or the referent is read, and never recorded
@@ -2019,9 +2024,10 @@ async fn judge(
             &trust,
             consumed_at.unwrap_or(now),
             &namespace,
+            workspace,
             &plan_bytes,
             verified_subject_ref.as_ref(),
-            &policies.resolve(&namespace),
+            &policies.resolve(workspace),
             subject.kind,
         )
     } else {
