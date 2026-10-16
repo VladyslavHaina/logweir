@@ -286,7 +286,7 @@ fn log(tail: &str) -> String {
     format!("{{\"level\":\"INFO\"}}\n{tail}")
 }
 
-fn exit_routes(value: &Value, log_tail: &str) -> Vec<Route> {
+fn exit_routes(value: &Value, log_tail: &str, exit_code: i32) -> Vec<Route> {
     vec![
         route(
             "GET",
@@ -294,7 +294,7 @@ fn exit_routes(value: &Value, log_tail: &str) -> Vec<Route> {
             200,
             job(NAME, JOB_UID, run_args(), false, finished("Failed")),
         ),
-        route("GET", "/pods".into(), 200, pods(NAME, JOB_UID, Some(1))),
+        route("GET", "/pods".into(), 200, pods(NAME, JOB_UID, Some(exit_code))),
         route("GET", "/log".into(), 200, log(log_tail)),
         status_route(value),
         route(
@@ -328,7 +328,7 @@ async fn an_exit_without_a_scorecard_after_creating_targets_is_interrupted() {
             "RunFailed",
         ),
     ] {
-        let (requeue, seen) = pass(&value, exit_routes(&value, tail)).await;
+        let (requeue, seen) = pass(&value, exit_routes(&value, tail, 1)).await;
         let status = status_patches(&seen).remove(0);
         assert_eq!(status["phase"], "Interrupted", "{status}");
         assert_eq!(status["interruption"]["cause"], cause, "{status}");
@@ -339,9 +339,29 @@ async fn an_exit_without_a_scorecard_after_creating_targets_is_interrupted() {
         );
         assert_eq!(requeue, Requeue::After(1));
     }
-    let (_, seen) = pass(&value, exit_routes(&value, "")).await;
+    let (_, seen) = pass(&value, exit_routes(&value, "", 1)).await;
     let status = status_patches(&seen).remove(0);
     assert_eq!(status["phase"], "Failed", "the control: {status}");
+}
+
+/// **A runner killed by the kernel (OOMKilled, 137) or by a panic (101)
+/// prints no targets line, and is still `Interrupted`**, cause
+/// `RunnerStopped` (od23 review M-1): the runner never chooses those codes,
+/// so it may have created topics, and the reconcile decides. The control is
+/// the orderly exit 1 with no line above, which stays `Failed`.
+#[tokio::test]
+async fn a_runner_killed_without_a_line_is_interrupted() {
+    let value = restore_value(
+        json!({}),
+        json!({"phase": "Running", "jobRef": {"name": NAME}}),
+    );
+    for code in [137, 101] {
+        let (_, seen) = pass(&value, exit_routes(&value, "", code)).await;
+        let status = status_patches(&seen).remove(0);
+        assert_eq!(status["phase"], "Interrupted", "{code}: {status}");
+        assert_eq!(status["interruption"]["cause"], "RunnerStopped");
+        assert_eq!(status["interruption"]["runId"], RUN_ID);
+    }
 }
 
 /// **A lost pod (no exit code) of a named run is `Interrupted`**, cause
