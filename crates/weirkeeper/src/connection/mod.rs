@@ -51,6 +51,7 @@ use crate::conditions::{
 use crate::crds::kafka_cluster::{
     AuthBlock, AuthMode, KafkaCluster, KafkaClusterSpec, ObjectKeyRef, UnrecognizedFields,
     DEFAULT_CLIENT_CERTIFICATE_KEY, DEFAULT_CLIENT_PRIVATE_KEY_KEY, DEFAULT_PASSWORD_KEY,
+    DEFAULT_REGISTRY_PASSWORD_KEY,
 };
 use crate::job::{ConfigMapMount, EnvFromSecret, SecretMount};
 use logweir_core::spec::AuthSpec;
@@ -252,6 +253,26 @@ impl Side {
         }
     }
 
+    /// The variable the Schema Registry password is projected into
+    /// (PROD-03.1/03.2).
+    #[must_use]
+    pub const fn registry_password_env(self) -> &'static str {
+        match self {
+            Side::Source => logweir_core::connection::SOURCE_REGISTRY_PASSWORD_ENV,
+            Side::Target => logweir_core::connection::TARGET_REGISTRY_PASSWORD_ENV,
+        }
+    }
+
+    /// The variable the registry Secret's `logweir-binding` key is projected
+    /// into (optional).
+    #[must_use]
+    pub const fn registry_credential_binding_env(self) -> &'static str {
+        match self {
+            Side::Source => logweir_core::connection::SOURCE_REGISTRY_CREDENTIAL_BINDING_ENV,
+            Side::Target => logweir_core::connection::TARGET_REGISTRY_CREDENTIAL_BINDING_ENV,
+        }
+    }
+
     /// The variable naming the projected `mtls` client certificate.
     #[must_use]
     pub const fn tls_cert_file_env(self) -> &'static str {
@@ -413,6 +434,57 @@ pub struct ResolvedConnection {
     /// did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_certificate: Option<ClientCertificateReference>,
+    /// The connection's Schema Registry (PROD-03.1/03.2): its URL, username
+    /// and where its password is. Absent for a connection that names none, so
+    /// a resolution of an earlier object serialises as it did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<ResolvedRegistry>,
+}
+
+/// A connection's Schema Registry, resolved.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedRegistry {
+    /// The base URL.
+    pub url: String,
+    /// The basic-auth username.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Where the basic-auth password is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<SecretKeyReference>,
+}
+
+impl ResolvedRegistry {
+    /// The plan's `schema_registry` block: URL and username, never the
+    /// password.
+    #[must_use]
+    pub fn plan(&self) -> logweir_core::spec::SchemaRegistrySpec {
+        logweir_core::spec::SchemaRegistrySpec {
+            url: self.url.clone(),
+            username: self.username.clone(),
+        }
+    }
+}
+
+/// Whether `url` is a registry URL this build dials: `http://` or `https://`,
+/// a host with no userinfo, no whitespace or control character, no query or
+/// fragment, at most 2048 bytes.
+#[must_use]
+pub fn is_registry_url(url: &str) -> bool {
+    let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split('/').next().unwrap_or_default();
+    url.len() <= 2048
+        && !host.is_empty()
+        && !host.contains('@')
+        && !url
+            .chars()
+            .any(|c| c.is_whitespace() || c.is_control() || c == '?' || c == '#')
 }
 
 /// What a resolution contributes to one runner Job.
@@ -758,6 +830,8 @@ pub fn resolve(
         }
     };
 
+    let schema_registry = registry_of(&namespace, &name, spec)?;
+
     Ok(ResolvedConnection {
         contract_version: CONTRACT_VERSION.to_string(),
         connection_use,
@@ -781,7 +855,72 @@ pub fn resolve(
         password,
         tls_ca,
         client_certificate,
+        schema_registry,
     })
+}
+
+/// `spec.schemaRegistry`, when named: a registry URL, and a username exactly
+/// when a password Secret is named, with a legal name and key.
+fn registry_of(
+    namespace: &str,
+    name: &str,
+    spec: &KafkaClusterSpec,
+) -> Result<Option<ResolvedRegistry>, ConnectionRefusal> {
+    let Some(block) = spec.schema_registry.as_ref() else {
+        return Ok(None);
+    };
+    if !is_registry_url(&block.url) {
+        return Err(refusal(
+            TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
+            "spec.schemaRegistry.url",
+            format!(
+                "KafkaCluster {namespace}/{name} names schemaRegistry.url {:?}, which is not an \
+                 http:// or https:// URL without userinfo, query or whitespace",
+                block.url
+            ),
+        ));
+    }
+    let username = block.username.clone().filter(|u| !u.trim().is_empty());
+    if username.is_some() != block.secret_ref.is_some() {
+        return Err(refusal(
+            TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
+            "spec.schemaRegistry",
+            format!(
+                "KafkaCluster {namespace}/{name}: schemaRegistry.username and \
+                 schemaRegistry.secretRef are set together (HTTP basic auth) or not at all"
+            ),
+        ));
+    }
+    let password = match block.secret_ref.as_ref() {
+        None => None,
+        Some(secret) => {
+            check_object_name(
+                namespace,
+                name,
+                "spec.schemaRegistry.secretRef.name",
+                &secret.name,
+            )?;
+            let key = secret
+                .password_key
+                .clone()
+                .unwrap_or_else(|| DEFAULT_REGISTRY_PASSWORD_KEY.to_string());
+            check_data_key(
+                namespace,
+                name,
+                "spec.schemaRegistry.secretRef.passwordKey",
+                &key,
+            )?;
+            Some(SecretKeyReference {
+                name: secret.name.clone(),
+                key,
+            })
+        }
+    };
+    Ok(Some(ResolvedRegistry {
+        url: block.url.clone(),
+        username,
+        password,
+    }))
 }
 
 /// The mode as the documents spell it — `AuthSpec::mode_str`'s twin for the
@@ -889,6 +1028,20 @@ fn unrecognized_paths(spec: &KafkaClusterSpec) -> Vec<String> {
             "spec.auth.clientCertificate",
             &cert.unrecognized_fields,
         );
+    }
+    if let Some(registry) = spec.schema_registry.as_ref() {
+        push(
+            &mut out,
+            "spec.schemaRegistry",
+            &registry.unrecognized_fields,
+        );
+        if let Some(secret) = registry.secret_ref.as_ref() {
+            push(
+                &mut out,
+                "spec.schemaRegistry.secretRef",
+                &secret.unrecognized_fields,
+            );
+        }
     }
     if let Some(ca) = spec.auth.tls_ca.as_ref() {
         push(&mut out, "spec.auth.tlsCa", &ca.unrecognized_fields);
@@ -1076,6 +1229,9 @@ impl ResolvedConnection {
             &self.bootstrap_servers,
             &self.auth,
             ca.as_deref(),
+            self.schema_registry
+                .as_ref()
+                .map(|r| (r.url.as_str(), r.username.as_deref())),
         ))
     }
 
@@ -1087,6 +1243,32 @@ impl ResolvedConnection {
             .as_ref()
             .map(|p| p.name.as_str())
             .or(self.client_certificate.as_ref().map(|c| c.name.as_str()))
+    }
+
+    /// Every Secret this connection names, sorted and distinct: the Kafka
+    /// credential, the `mtls` client certificate, the registry password
+    /// (PROD-03.1) and a Secret-held CA. Each one's `logweir.dev/workspace`
+    /// must equal the connection's ([`check_secret_workspaces`]).
+    #[must_use]
+    pub fn named_secrets(&self) -> Vec<&str> {
+        let mut out: Vec<&str> = [
+            self.password.as_ref().map(|p| p.name.as_str()),
+            self.client_certificate.as_ref().map(|c| c.name.as_str()),
+            self.schema_registry
+                .as_ref()
+                .and_then(|r| r.password.as_ref())
+                .map(|p| p.name.as_str()),
+            self.tls_ca
+                .as_ref()
+                .filter(|ca| ca.kind == CaSourceKind::Secret)
+                .map(|ca| ca.name.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        out.sort_unstable();
+        out.dedup();
+        out
     }
 
     /// The environment and mounts this connection contributes to its Job.
@@ -1148,6 +1330,44 @@ impl ResolvedConnection {
                     items,
                 }),
             }
+        }
+        // The registry password (PROD-03.1/03.2), OPTIONAL: a missing key is a
+        // registry the run reports unauthorized, never a pod that cannot
+        // start. The registry Secret's own binding is projected beside it and
+        // compared with the expected one before the password is presented.
+        if let Some(password) = self
+            .schema_registry
+            .as_ref()
+            .and_then(|r| r.password.as_ref())
+        {
+            // A connection whose only Secret is its registry's: the side's
+            // expected binding, and the side's projected one from that Secret,
+            // so the runner's Kafka-side comparison holds the same Secret.
+            if self.credential_secret().is_none() {
+                projection.env_literal.push((
+                    side.credential_binding_expected_env().to_string(),
+                    self.credential_binding()
+                        .unwrap_or_else(|| "unbound:no-uid".to_string()),
+                ));
+                projection.env_from_secret.push(EnvFromSecret {
+                    name: side.credential_binding_env().to_string(),
+                    secret_name: password.name.clone(),
+                    key: logweir_core::connection::CREDENTIAL_BINDING_KEY.to_string(),
+                    optional: true,
+                });
+            }
+            projection.env_from_secret.push(EnvFromSecret {
+                name: side.registry_password_env().to_string(),
+                secret_name: password.name.clone(),
+                key: password.key.clone(),
+                optional: true,
+            });
+            projection.env_from_secret.push(EnvFromSecret {
+                name: side.registry_credential_binding_env().to_string(),
+                secret_name: password.name.clone(),
+                key: logweir_core::connection::CREDENTIAL_BINDING_KEY.to_string(),
+                optional: true,
+            });
         }
         // The `mtls` pair, from one Secret, as two files in one read-only volume
         // at the runner's `0440` Secret mode; the variables carry paths.
@@ -1267,6 +1487,8 @@ impl ResolvedConnection {
             bootstrap_servers: Vec<String>,
             #[serde(default)]
             auth: AuthSpec,
+            #[serde(default)]
+            schema_registry: Option<logweir_core::spec::SchemaRegistrySpec>,
         }
         let view: PlanView = serde_yaml::from_str(plan_bytes).map_err(|e| {
             refusal(
@@ -1279,7 +1501,48 @@ impl ResolvedConnection {
                 ),
             )
         })?;
-        self.check_restore_target(&view.target.bootstrap_servers, &view.target.auth)
+        self.check_restore_target(&view.target.bootstrap_servers, &view.target.auth)?;
+        self.check_restore_registry(view.target.schema_registry.as_ref())
+    }
+
+    /// Refuse a restore whose approved plan names a different target registry
+    /// than this connection (PROD-03.2): the runner presents this
+    /// connection's registry password to the plan's registry URL, so the two
+    /// must be one. Both absent, or equal URL and username.
+    ///
+    /// # Errors
+    ///
+    /// [`TERMINAL_STATE_CONNECTION_PLAN_MISMATCH`].
+    pub fn check_restore_registry(
+        &self,
+        planned: Option<&logweir_core::spec::SchemaRegistrySpec>,
+    ) -> Result<(), ConnectionRefusal> {
+        let own = self.schema_registry.as_ref().map(ResolvedRegistry::plan);
+        if planned == own.as_ref() {
+            return Ok(());
+        }
+        let shown = |r: Option<&logweir_core::spec::SchemaRegistrySpec>| {
+            r.map_or("no registry".to_string(), |r| {
+                format!(
+                    "{:?} as {:?}",
+                    r.url,
+                    r.username.as_deref().unwrap_or_default()
+                )
+            })
+        };
+        Err(refusal(
+            TERMINAL_STATE_CONNECTION_PLAN_MISMATCH,
+            "spec.planBytes.target.schema_registry",
+            format!(
+                "the approved plan's target.schema_registry is {} but KafkaCluster {}/{} \
+                 names {}; the runner presents the connection's registry credential to the \
+                 plan's registry. Build a plan from the saved connection and approve it",
+                shown(planned),
+                self.namespace,
+                self.cluster_name,
+                shown(own.as_ref())
+            ),
+        ))
     }
 
     /// [`Self::check_restore_plan`] over the target of a plan already read.
@@ -1347,4 +1610,42 @@ fn describe_auth(auth: &AuthSpec) -> String {
             auth.username().unwrap_or_default()
         ),
     }
+}
+
+/// **PROD-19.1 §4.4.** Every Secret a connection names carries the
+/// connection's `logweir.dev/workspace`: `secrets` are the named Secrets'
+/// objects (metadata is enough), and each must be in the cluster's workspace
+/// ([`crate::workspace::same`]). A Secret of another workspace, or with no
+/// label, refuses the connection before any Job; a named Secret missing from
+/// `secrets` is the kubelet's to report, as before.
+///
+/// # Errors
+///
+/// [`crate::workspace::REASON_MISMATCH`], naming the field and both
+/// workspaces.
+pub fn check_secret_workspaces(
+    cluster: &KafkaCluster,
+    resolved: &ResolvedConnection,
+    secrets: &[k8s_openapi::api::core::v1::Secret],
+) -> Result<(), ConnectionRefusal> {
+    for name in resolved.named_secrets() {
+        let Some(secret) = secrets
+            .iter()
+            .find(|s| s.metadata.name.as_deref() == Some(name))
+        else {
+            continue;
+        };
+        if let Err(why) = crate::workspace::same(cluster, secret) {
+            return Err(refusal(
+                why.reason(),
+                "spec",
+                format!(
+                    "KafkaCluster {}/{}: {why}; a connection names only Secrets of its own \
+                     workspace",
+                    resolved.namespace, resolved.cluster_name
+                ),
+            ));
+        }
+    }
+    Ok(())
 }

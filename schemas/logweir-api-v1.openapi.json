@@ -7984,6 +7984,11 @@
             "description": "The role label.",
             "type": "string"
           },
+          "schemaRegistry": {
+            "description": "The connection's Schema Registry (PROD-03.1), when it names one.",
+            "$ref": "#/components/schemas/SchemaRegistryView",
+            "nullable": true
+          },
           "uid": {
             "description": "The Kubernetes UID.",
             "type": "string"
@@ -8270,6 +8275,11 @@
           "role": {
             "description": "`source` or `target`.",
             "$ref": "#/components/schemas/ConnectionRole"
+          },
+          "schemaRegistry": {
+            "description": "**PROD-03.1.** The cluster's Schema Registry: captured by a backup of this connection, written by a restore into it. The password, when given, goes into the connection's own Secret under `registry-password`.",
+            "$ref": "#/components/schemas/SchemaRegistryRequest",
+            "nullable": true
           }
         },
         "additionalProperties": false
@@ -11136,6 +11146,38 @@
           }
         }
       },
+      "PointSchemaRegistryView": {
+        "description": "A point's Schema Registry capture (PROD-03.1).",
+        "type": "object",
+        "required": [
+          "captured",
+          "subjects",
+          "versions"
+        ],
+        "properties": {
+          "captured": {
+            "description": "Whether the snapshot was taken.",
+            "type": "boolean"
+          },
+          "incompleteReason": {
+            "description": "Why the capture is incomplete (`registryUnreachable`, `registryUnauthorized`, `snapshotTooLarge`, `snapshotIncomplete`, `unresolvedReferences`, `idsNotInSnapshot`); absent when complete.",
+            "type": "string",
+            "nullable": true
+          },
+          "subjects": {
+            "description": "Distinct subjects captured.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "versions": {
+            "description": "Subject-versions captured.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          }
+        }
+      },
       "PointTopicView": {
         "description": "**PROD-05.1.** One topic of a recovery point, as the catalog's view lists it: what the archive records of its layout and how its configuration is held. Never a configuration value — the settings themselves are in the signed receipt and the point record, not in a listing.",
         "type": "object",
@@ -11283,6 +11325,11 @@
           "runId": {
             "description": "The run that produced it.",
             "type": "string"
+          },
+          "schemaRegistry": {
+            "description": "**PROD-03.1.** Whether the backup captured its source Schema Registry, its counts, and why the capture is incomplete. ABSENT: the source connection names no registry, the point predates it, or not published.",
+            "$ref": "#/components/schemas/PointSchemaRegistryView",
+            "nullable": true
           },
           "selectable": {
             "description": "The conjunction of the two, materialised by the controller so no surface writes D3 §5.4's selection rule a second time — and `false` whenever `backupVerdict` is present, because a verdict the controller reached outranks a view row that may predate it.",
@@ -12700,6 +12747,11 @@
           "requested": {
             "description": "What the Restore asks for: `spec.coverage`, absent read as `sampled`. The controller has held it to the plan's own `sample.coverage`.",
             "$ref": "#/components/schemas/RestoreCoverage"
+          },
+          "schemas": {
+            "description": "**PROD-03.2.** The schemas the run imported into the target registry keeping their IDs, how many were there already, or why none were: copied from `status.integrity.schemas`. ABSENT: no registry on either side, or not recorded.",
+            "$ref": "#/components/schemas/RestoreSchemasView",
+            "nullable": true
           }
         }
       },
@@ -12893,6 +12945,33 @@
           "state": {
             "description": "Where the submission goes next.",
             "$ref": "#/components/schemas/AuthorizationState"
+          }
+        }
+      },
+      "RestoreSchemasView": {
+        "description": "`Restore.coverage.schemas` (PROD-03.2).",
+        "type": "object",
+        "required": [
+          "alreadyPresent",
+          "imported"
+        ],
+        "properties": {
+          "alreadyPresent": {
+            "description": "Subject-versions the target already held.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "imported": {
+            "description": "Subject-versions imported with their source IDs.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0.0
+          },
+          "notImported": {
+            "description": "`noTargetRegistry` or `noSnapshot` when nothing was imported.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -13950,6 +14029,55 @@
           "ready": {
             "description": "The `Ready` condition.",
             "$ref": "#/components/schemas/ConditionView",
+            "nullable": true
+          }
+        }
+      },
+      "SchemaRegistryRequest": {
+        "description": "A new connection's Schema Registry. `Debug` and `Serialize` never carry the password.",
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "password": {
+            "description": "The basic-auth password, entered once.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "url": {
+            "description": "`http://` or `https://`, no userinfo, query or fragment.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The basic-auth username; given exactly when `password` is.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "SchemaRegistryView": {
+        "description": "A stored connection's Schema Registry: the URL, the username and the Secret's NAME. Never the password.",
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "credentialRef": {
+            "description": "The Secret holding the password, by name.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "url": {
+            "description": "The registry URL.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The basic-auth username.",
+            "type": "string",
             "nullable": true
           }
         }

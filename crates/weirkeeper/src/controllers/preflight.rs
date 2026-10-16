@@ -5273,7 +5273,35 @@ fn connection_plan(c: &ResolvedConnection) -> ConnectionPlan {
             .as_ref()
             .map(|_| side.client_key_file_path()),
         principal: c.principal.clone(),
+        // PROD-03.1/03.2: the registry's URL and username, and the NAME of
+        // the variable its password is projected into.
+        schema_registry: c.schema_registry.as_ref().map(|r| {
+            logweir_core::check_contract::RegistryPlan {
+                url: r.url.clone(),
+                username: r.username.clone(),
+                password_env: r
+                    .password
+                    .as_ref()
+                    .map(|_| side.registry_password_env().to_string()),
+            }
+        }),
     }
+}
+
+/// The capability rows for `operation` against connection `c`: the
+/// registry rows (PROD-03.1/03.2) only when the connection names a registry.
+fn capability_checks_for_connection(
+    operation: CheckOperation,
+    skip: &[CheckId],
+    c: &ResolvedConnection,
+) -> Vec<CheckId> {
+    capability_checks(operation, skip)
+        .into_iter()
+        .filter(|id| {
+            c.schema_registry.is_some()
+                || !matches!(id, CheckId::RegistryReachable | CheckId::TargetSchemas)
+        })
+        .collect()
 }
 
 fn destination_plan(
@@ -5402,7 +5430,11 @@ pub fn build_job_shape(
                 evidence_write: evidence_write_grant.clone(),
                 evidence_read: evidence_read_grant.clone(),
                 skip_checks: skip.clone(),
-                capability_checks: capability_checks(CheckOperation::Backup, &skip),
+                capability_checks: capability_checks_for_connection(
+                    CheckOperation::Backup,
+                    &skip,
+                    c,
+                ),
             }))
         }
         PreflightOperation::SourceConnection => {
@@ -5412,7 +5444,11 @@ pub fn build_job_shape(
                 // FX-46: what the endpoint could be used for, so the test
                 // can say "usable as a source, not as a target". The request
                 // carries no skip list.
-                capability_checks: capability_checks(CheckOperation::SourceConnection, &[]),
+                capability_checks: capability_checks_for_connection(
+                    CheckOperation::SourceConnection,
+                    &[],
+                    c,
+                ),
             })
         }
         PreflightOperation::DestinationAccess => {
@@ -5480,7 +5516,11 @@ pub fn build_job_shape(
                 // second catalogue to drift from the runner's.
                 checks: Vec::new(),
                 skip_checks: skip.clone(),
-                capability_checks: capability_checks(CheckOperation::Restore, &skip),
+                capability_checks: capability_checks_for_connection(
+                    CheckOperation::Restore,
+                    &skip,
+                    c,
+                ),
             }))
         }
     };

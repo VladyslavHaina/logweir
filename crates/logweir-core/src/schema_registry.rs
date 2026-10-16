@@ -10,14 +10,16 @@
 //!   API ([`capture`]): every subject (soft-deleted included), every version
 //!   with its ID, type, schema text, references and a `deleted` flag;
 //! - the **receipt block** that names the snapshot ([`ReceiptSchemaRegistry`],
-//!   arms SR-R1 to SR-R4 in [`check_receipt_block`]);
+//!   arms 46 to 49 of `BackupReceipt::validate_invariants`);
 //! - the restore's **closure** ([`closure`]): the subjects holding an ID the
 //!   restored records carry, and transitively the subjects their references
 //!   name, each whole, references first;
 //! - the **classifier** ([`classify`]) that compares the closure with the
 //!   target registry before any topic is created, refusing `SchemaConflict`;
 //! - the **import** ([`import`]) in Confluent's `IMPORT` mode, refusing
-//!   `SchemaRegistryCannotKeepIds` when the target cannot keep an ID;
+//!   `SchemaRegistryCannotKeepIds` when the target cannot keep an ID and
+//!   `SchemaRegistryReadOnly` for a read-only subject, and putting each
+//!   subject's mode back exactly as it was;
 //! - the **scorecard block** ([`ScorecardSchemas`], arms SC-1 to SC-3 in
 //!   [`check_scorecard_block`]).
 //!
@@ -89,6 +91,12 @@ pub const CANNOT_KEEP_IDS: &str = "SchemaRegistryCannotKeepIds";
 pub const SNAPSHOT_INVALID: &str = "SchemaSnapshotInvalid";
 /// Restore refusal: the target registry did not answer.
 pub const UNREACHABLE: &str = "SchemaRegistryUnreachable";
+/// Restore refusal: a subject to import is, or inherits, `READONLY` or
+/// `READONLY_OVERRIDE`; refused before any write.
+pub const READ_ONLY: &str = "SchemaRegistryReadOnly";
+/// Restore refusal: a subject's mode could not be put back after the import
+/// set it to `IMPORT`.
+pub const MODE_NOT_RESTORED: &str = "SchemaRegistryModeNotRestored";
 
 /// The snapshot object's key: beside the receipt, create-only.
 #[must_use]
@@ -525,48 +533,132 @@ impl ReceiptSchemaRegistry {
     }
 }
 
+/// The tail every "not captured" receipt line ends with.
+const NOT_CAPTURED_TAIL: &str =
+    "this receipt holds no schema snapshot, so a restore cannot put the schemas its records \
+     reference in a target registry";
+
+/// The `schema_registry` line both readers print for a receipt: what was
+/// captured and what is missing, or that the registry was not captured
+/// (every receipt before 1.9.0 too). `docs/verify_scorecard.py::
+/// _schema_registry_lines` prints the same line.
+#[must_use]
+pub fn receipt_lines(block: Option<&ReceiptSchemaRegistry>) -> Vec<String> {
+    let Some(block) = block else {
+        return vec![format!(
+            "schema_registry: registry not captured: {NOT_CAPTURED_TAIL}"
+        )];
+    };
+    if !block.captured {
+        return vec![format!(
+            "schema_registry: registry not captured ({}): {NOT_CAPTURED_TAIL}",
+            block.reason.as_deref().unwrap_or_default()
+        )];
+    }
+    let mut line = format!(
+        "schema_registry: captured {} subject(s), {} version(s) in {} ({})",
+        block.subjects,
+        block.versions,
+        block.snapshot_key.as_deref().unwrap_or_default(),
+        block.snapshot_sha256.as_deref().unwrap_or_default()
+    );
+    if !block.unresolved_references.is_empty() {
+        line.push_str(&format!(
+            "; INCOMPLETE: references to versions the snapshot lacks: {}",
+            block.unresolved_references.join(", ")
+        ));
+    }
+    if !block.ids_not_in_snapshot.is_empty() {
+        line.push_str(&format!(
+            "; INCOMPLETE: record schema IDs the snapshot lacks: {}",
+            join_ids(&block.ids_not_in_snapshot)
+        ));
+    }
+    vec![line]
+}
+
+fn join_ids(ids: &[u32]) -> String {
+    ids.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The `schemas:` line both readers print for a scorecard carrying
+/// `target.schemas`; nothing for one without it.
+/// `docs/verify_scorecard.py::_schemas_lines` prints the same line.
+#[must_use]
+pub fn scorecard_lines(block: Option<&ScorecardSchemas>) -> Vec<String> {
+    let Some(block) = block else {
+        return Vec::new();
+    };
+    if let Some(reason) = &block.not_imported {
+        return vec![format!(
+            "schemas: not imported ({reason}): the restored records carry their source schema \
+             IDs, which the target registry may not hold"
+        )];
+    }
+    let mut line = format!(
+        "schemas: imported {} subject-version(s) into {} keeping their source IDs, {} already \
+         present; snapshot {}",
+        block.imported_count,
+        block.target_registry_url.as_deref().unwrap_or_default(),
+        block.already_present,
+        block.snapshot_sha256.as_deref().unwrap_or_default()
+    );
+    if !block.ids_not_in_snapshot.is_empty() {
+        line.push_str(&format!(
+            "; record schema IDs the snapshot lacks: {}",
+            join_ids(&block.ids_not_in_snapshot)
+        ));
+    }
+    vec![line]
+}
+
 fn sorted_distinct<T: Ord>(items: &[T]) -> bool {
     items.windows(2).all(|w| w[0] < w[1])
 }
 
-/// Arms SR-R1 to SR-R4 of the receipt's `schema_registry` block. `defined`
-/// is whether the document's version defines it (1.9.0 on).
-/// `docs/verify_scorecard.py::_schema_registry_fault` mirrors each arm, in
-/// order, with the same text.
-///
-/// # Errors
-///
-/// The first arm the block breaks.
-pub fn check_receipt_block(
+/// **A point's registry capture as the catalog carries it** (catalog point
+/// 1.8.0): the receipt block's verdict and counts, never the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PointSchemaRegistry {
+    /// The receipt's `captured`.
+    pub captured: bool,
+    /// The receipt's `subjects`.
+    pub subjects: u64,
+    /// The receipt's `versions`.
+    pub versions: u64,
+    /// Why the capture is incomplete: the receipt's `reason`,
+    /// `unresolvedReferences` or `idsNotInSnapshot`. Absent when complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
+}
+
+impl PointSchemaRegistry {
+    /// The summary of a receipt's block.
+    #[must_use]
+    pub fn of(block: &ReceiptSchemaRegistry) -> Self {
+        Self {
+            captured: block.captured,
+            subjects: block.subjects,
+            versions: block.versions,
+            incomplete_reason: block.incomplete_reason(),
+        }
+    }
+}
+
+/// Arm 48's predicate (`BackupReceipt::validate_invariants`): a captured
+/// block names its snapshot beside this receipt by key and digest and counts
+/// no more subjects than versions (both zero or neither); an uncaptured one
+/// names, counts and lists nothing.
+#[must_use]
+pub fn receipt_block_shape_ok(
     block: &ReceiptSchemaRegistry,
-    defined: bool,
     backup_id: &str,
     run_id: &str,
-) -> Result<(), String> {
-    // SR-R1.
-    if !defined {
-        return Err(
-            "schema_registry is present but format_version predates it: the block is defined \
-             from 1.9.0"
-                .to_string(),
-        );
-    }
-    // SR-R2. A reason exactly when not captured, from the closed set.
-    let reason_ok = match (&block.reason, block.captured) {
-        (None, true) => true,
-        (Some(r), false) => CAPTURE_REASONS.contains(&r.as_str()),
-        _ => false,
-    };
-    if !reason_ok {
-        return Err(
-            "schema_registry.reason is present exactly when captured is false, and is \
-             registryUnreachable, registryUnauthorized, snapshotTooLarge or snapshotIncomplete"
-                .to_string(),
-        );
-    }
-    // SR-R3. A captured block names its snapshot beside this receipt; an
-    // uncaptured one names nothing and counts nothing.
-    let shape_ok = if block.captured {
+) -> bool {
+    if block.captured {
         block.snapshot_key.as_deref() == Some(snapshot_key(backup_id, run_id).as_str())
             && block
                 .snapshot_sha256
@@ -581,37 +673,26 @@ pub fn check_receipt_block(
             && block.versions == 0
             && block.unresolved_references.is_empty()
             && block.ids_not_in_snapshot.is_empty()
-    };
-    if !shape_ok {
-        return Err(
-            "schema_registry names its snapshot (logweir/backups/<backup_id>/<run_id>.schema-registry.json \
-             and its sha256) and counts subjects no more than versions exactly when captured, \
-             and names and counts nothing otherwise"
-                .to_string(),
-        );
     }
-    // SR-R4. The two lists are bounded, sorted and distinct, and list real
-    // schema IDs.
-    if block.unresolved_references.len() > LISTED
-        || block.ids_not_in_snapshot.len() > LISTED
-        || !sorted_distinct(&block.unresolved_references)
-        || block
+}
+
+/// Arm 49's predicate: both lists at most [`LISTED`] entries, sorted and
+/// distinct, each reference at most [`LISTED_TEXT_CHARS`] characters, each ID
+/// a plausible schema ID.
+#[must_use]
+pub fn receipt_block_lists_ok(block: &ReceiptSchemaRegistry) -> bool {
+    block.unresolved_references.len() <= LISTED
+        && block.ids_not_in_snapshot.len() <= LISTED
+        && sorted_distinct(&block.unresolved_references)
+        && sorted_distinct(&block.ids_not_in_snapshot)
+        && block
             .unresolved_references
             .iter()
-            .any(|r| r.chars().count() > LISTED_TEXT_CHARS)
-        || !sorted_distinct(&block.ids_not_in_snapshot)
-        || block
+            .all(|r| r.chars().count() <= LISTED_TEXT_CHARS)
+        && block
             .ids_not_in_snapshot
             .iter()
-            .any(|id| *id == 0 || *id > crate::schema_dependency::MAX_SCHEMA_ID)
-    {
-        return Err(format!(
-            "schema_registry.unresolved_references and ids_not_in_snapshot list at most {LISTED} \
-             entries each, sorted and distinct, every reference at most {LISTED_TEXT_CHARS} \
-             characters and every ID from 1 to 16777215"
-        ));
-    }
-    Ok(())
+            .all(|id| (1..=crate::schema_dependency::MAX_SCHEMA_ID).contains(id))
 }
 
 /// The subject-versions a restore imports: every subject holding an ID in
@@ -717,6 +798,23 @@ pub enum ImportRefusal {
     },
     /// [`UNREACHABLE`].
     Unreachable(String),
+    /// [`READ_ONLY`]: a subject to import is, or inherits, a read-only mode;
+    /// refused before any write.
+    ReadOnly {
+        /// The subject.
+        subject: String,
+        /// Its effective mode.
+        mode: String,
+    },
+    /// [`MODE_NOT_RESTORED`]: a subject's mode could not be put back after
+    /// the import touched it; `after` is the refusal that stopped the import
+    /// first, if any.
+    ModeNotRestored {
+        /// Which subjects, and what the registry answered.
+        detail: String,
+        /// The refusal that came first.
+        after: Option<Box<ImportRefusal>>,
+    },
 }
 
 impl ImportRefusal {
@@ -727,6 +825,8 @@ impl ImportRefusal {
             Self::Conflict { .. } => SCHEMA_CONFLICT,
             Self::CannotKeepIds { .. } => CANNOT_KEEP_IDS,
             Self::Unreachable(_) => UNREACHABLE,
+            Self::ReadOnly { .. } => READ_ONLY,
+            Self::ModeNotRestored { .. } => MODE_NOT_RESTORED,
         }
     }
 }
@@ -756,9 +856,24 @@ impl std::fmt::Display for ImportRefusal {
             ),
             Self::Unreachable(why) => write!(
                 f,
-                "{UNREACHABLE}: the target registry did not answer ({why}); nothing was written \
-                 and no topic was created"
+                "{UNREACHABLE}: the target registry did not answer ({why}); no topic was created"
             ),
+            Self::ReadOnly { subject, mode } => write!(
+                f,
+                "{READ_ONLY}: the target registry's subject {subject:?} is {mode}, so no schema \
+                 was written and no topic was created; Logweir does not override a registry's \
+                 read-only mode. Lift it, or restore into another registry"
+            ),
+            Self::ModeNotRestored { detail, after } => {
+                write!(
+                    f,
+                    "{MODE_NOT_RESTORED}: {detail}; set it back by hand. No topic was created"
+                )?;
+                if let Some(first) = after {
+                    write!(f, ". The import had stopped first: {first}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -908,15 +1023,61 @@ pub struct ImportedVersion {
     pub id: u32,
 }
 
-/// Register every [`Class::Import`] entry keeping its ID and version: per
-/// subject, `PUT /mode/{s}?force=true` `IMPORT` (and `GET /mode/{s}` must
-/// answer `IMPORT`), each version with its `id` and `version` (the answer's ID
-/// must be it), then `READWRITE` after the subject's last entry. A failure
-/// part-way leaves identical versions only, so a retry continues.
+/// The mode a subject had before the import touched it: its own
+/// (subject-level) mode, or `None` when it inherits the registry's.
+fn own_mode(rest: &mut dyn Rest, s: &str) -> Result<Option<String>, ImportRefusal> {
+    let (status, mode) = call(rest, "GET", &format!("/mode/{s}"), None)?;
+    Ok((status == 200)
+        .then(|| mode.get("mode").and_then(Value::as_str).map(str::to_string))
+        .flatten())
+}
+
+/// Put a subject's mode back to what it was: its own value, or, when it
+/// inherited, no subject-level mode at all (`DELETE /mode/{s}`).
+fn restore_mode(rest: &mut dyn Rest, subject: &str, before: Option<&str>) -> Result<(), String> {
+    let s = encode(subject);
+    let answer = match before {
+        Some(mode) => rest.call(
+            "PUT",
+            &format!("/mode/{s}?force=true"),
+            Some(&json!({ "mode": mode })),
+        ),
+        None => rest.call("DELETE", &format!("/mode/{s}"), None),
+    };
+    match answer {
+        Ok((status, _)) if (200..300).contains(&status) => Ok(()),
+        Ok((status, body)) => Err(format!(
+            "subject {subject:?}'s mode could not be put back to {} (answered {status} {body})",
+            before.unwrap_or("the registry's default")
+        )),
+        Err(e) => Err(format!(
+            "subject {subject:?}'s mode could not be put back to {} ({e})",
+            before.unwrap_or("the registry's default")
+        )),
+    }
+}
+
+/// Whether a mode forbids writes (`READONLY`, `READONLY_OVERRIDE`).
+fn read_only(mode: &str) -> bool {
+    matches!(mode, "READONLY" | "READONLY_OVERRIDE")
+}
+
+/// Register every [`Class::Import`] entry keeping its ID and version.
+///
+/// First, before any write, each subject to import is read for its mode: one
+/// that is (or inherits) `READONLY` or `READONLY_OVERRIDE` is refused
+/// [`READ_ONLY`]. Then per subject: `PUT /mode/{s}?force=true` `IMPORT` (and
+/// `GET /mode/{s}` must answer `IMPORT`), each version with its `id` and
+/// `version` (the answer's ID must be it), and after the subject's last entry
+/// its mode is put back exactly: its own value, or no subject-level mode when
+/// it inherited. A failure part-way puts every touched subject's mode back
+/// too and leaves identical versions only, so a retry continues; a mode that
+/// cannot be put back is said in the refusal ([`MODE_NOT_RESTORED`]).
 ///
 /// # Errors
 ///
-/// [`ImportRefusal::CannotKeepIds`] or [`ImportRefusal::Unreachable`].
+/// [`ImportRefusal::ReadOnly`], [`ImportRefusal::CannotKeepIds`],
+/// [`ImportRefusal::ModeNotRestored`] or [`ImportRefusal::Unreachable`].
 pub fn import(
     rest: &mut dyn Rest,
     entries: &[&SnapshotVersion],
@@ -931,7 +1092,34 @@ pub fn import(
             report.already_present += 1;
         }
     }
+    if last.is_empty() {
+        return Ok(report);
+    }
+    // Every subject's mode, before any write.
+    let (status, global) = call(rest, "GET", "/mode", None)?;
+    let global = (status == 200)
+        .then(|| {
+            global
+                .get("mode")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .flatten();
+    let mut before: BTreeMap<&str, Option<String>> = BTreeMap::new();
+    for subject in last.keys() {
+        let own = own_mode(rest, &encode(subject))?;
+        if let Some(mode) = own.as_deref().or(global.as_deref()) {
+            if read_only(mode) {
+                return Err(ImportRefusal::ReadOnly {
+                    subject: (*subject).to_string(),
+                    mode: mode.to_string(),
+                });
+            }
+        }
+        before.insert(subject, own);
+    }
     let mut importing: BTreeSet<&str> = BTreeSet::new();
+    let mut not_restored: Vec<String> = Vec::new();
     let result = (|| {
         for (i, (v, c)) in entries.iter().zip(classes).enumerate() {
             if *c != Class::Import {
@@ -972,22 +1160,34 @@ pub fn import(
                 id: v.id,
             });
             if last.get(v.subject.as_str()) == Some(&i) {
-                let path = format!("/mode/{s}");
-                call(rest, "PUT", &path, Some(&json!({"mode": "READWRITE"})))?;
                 importing.remove(v.subject.as_str());
+                if let Err(why) =
+                    restore_mode(rest, &v.subject, before[v.subject.as_str()].as_deref())
+                {
+                    not_restored.push(why);
+                }
             }
         }
         Ok(())
     })();
-    // Best effort: never leave a subject in IMPORT mode after a failure.
+    // Every subject still in IMPORT after a failure gets its mode back too.
     for subject in importing {
-        let _ = rest.call(
-            "PUT",
-            &format!("/mode/{}", encode(subject)),
-            Some(&json!({"mode": "READWRITE"})),
-        );
+        if let Err(why) = restore_mode(rest, subject, before[subject].as_deref()) {
+            not_restored.push(why);
+        }
     }
-    result.map(|()| report)
+    match (result, not_restored.is_empty()) {
+        (Ok(()), true) => Ok(report),
+        (Ok(()), false) => Err(ImportRefusal::ModeNotRestored {
+            detail: not_restored.join("; "),
+            after: None,
+        }),
+        (Err(e), true) => Err(e),
+        (Err(e), false) => Err(ImportRefusal::ModeNotRestored {
+            detail: not_restored.join("; "),
+            after: Some(Box::new(e)),
+        }),
+    }
 }
 
 /// The IDs a restore needs, collected from the restored records' first

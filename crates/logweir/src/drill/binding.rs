@@ -147,6 +147,10 @@ pub struct BoundSet {
     /// a store that answers none (a filesystem archive, an unversioned
     /// bucket). The pin verdict is about the object AT this version.
     pub manifest_version_id: Option<String>,
+    /// **PROD-03.2.** The verified receipt's `schema_registry` block: whether
+    /// the backup captured its source registry, and where the snapshot is.
+    /// `None` for a receipt without one.
+    pub schema_registry: Option<logweir_core::schema_registry::ReceiptSchemaRegistry>,
 }
 
 /// Re-verify the recovery point the plan is bound to, against the archive.
@@ -404,6 +408,7 @@ pub fn verify_point_binding(
             manifest_key,
             manifest_sha256: manifest_digest,
             manifest_version_id: current_version,
+            schema_registry: receipt.schema_registry.clone(),
         },
         source_cluster_id: receipt.source.cluster_id.clone(),
         owners: receipt_owners(&receipt),
@@ -1030,6 +1035,7 @@ pub(crate) mod tests {
                 manifest_key: MANIFEST_KEY.into(),
                 manifest_sha256: logweir_core::ids::sha256_prefixed(br#"{"topics":[]}"#),
                 manifest_version_id,
+                schema_registry: None,
             },
             // The fixture receipt's measured source, and no owner record
             // ("not checked").
@@ -1721,6 +1727,7 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             manifest_key: "archive/nightly-7/manifest.json".into(),
             manifest_sha256: format!("sha256:{}", "a".repeat(64)),
             manifest_version_id: Some("v-1".into()),
+            schema_registry: None,
         }
     }
 

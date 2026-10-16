@@ -956,7 +956,8 @@ fn the_projection_carries_every_field_the_receipt_defines() {
         owner_detection: &["declared".to_string()],
         selected_groups: &selected,
         signing: logweir::catalog::signing_of(&seam.key.verifying_key()),
-        schema_registry: spec.source.schema_registry.is_some(),
+        // Every block at its longest, the registry one included.
+        schema_registry: true,
     });
     let receipt = logweir::backup::phase_run::build_receipt(&outcome);
     let value = serde_json::to_value(&receipt).expect("JSON");

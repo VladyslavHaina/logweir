@@ -448,6 +448,12 @@ pub struct SourceInputs {
     /// invalidates frozen inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_cluster_id: Option<String>,
+    /// **PROD-03.1.** The connection's Schema Registry, URL and username,
+    /// rendered into the plan's `source.schema_registry`. Executable; absent
+    /// when the connection names none, so older snapshots re-encode to the
+    /// same bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<logweir_core::spec::SchemaRegistrySpec>,
 }
 
 /// Where the archive is written.
@@ -1123,6 +1129,10 @@ pub fn resolve_inputs(
             bootstrap_servers: connection.bootstrap_servers,
             auth: connection.auth,
             tls_ca: connection.tls_ca,
+            schema_registry: connection
+                .schema_registry
+                .as_ref()
+                .map(crate::connection::ResolvedRegistry::plan),
             observed_cluster_id: cluster
                 .status
                 .as_ref()
@@ -1305,7 +1315,7 @@ impl FrozenInputs {
                 // From the frozen snapshot, so a re-created Job records the
                 // groups the run was admitted with.
                 consumer_groups: inputs.consumer_groups.clone(),
-                schema_registry: None,
+                schema_registry: inputs.source.schema_registry.clone(),
             },
             storage: inputs.archive.storage.clone(),
             backup_id: inputs.execution.id.clone(),

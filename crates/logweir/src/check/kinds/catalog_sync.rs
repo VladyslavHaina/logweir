@@ -554,6 +554,11 @@ pub struct CatalogEntry {
     /// the sync could not stand behind.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<EntryConsumerPositions>,
+    /// **PROD-03.1.** The point's registry capture, for an `Available` point
+    /// whose record carries the 1.8.0 summary. ABSENT is not captured, or not
+    /// published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<logweir_core::schema_registry::PointSchemaRegistry>,
 }
 
 /// The signature half of [`CatalogCounts`].
@@ -2031,6 +2036,7 @@ fn build_entry(observation: &Observation) -> CatalogEntry {
         topics_omitted: None,
         owner_detection: None,
         consumer_positions: None,
+        schema_registry: None,
     };
     // One sync contributes one location, so this can only ever be a no-op —
     // and it is written down so the cap is enforced on the side that renders
@@ -2049,6 +2055,10 @@ fn build_entry(observation: &Observation) -> CatalogEntry {
     // The consumer position summary, from a record the cross-check
     // let stand.
     entry.consumer_positions = entry_consumer_positions(point, availability);
+    // The registry capture, from a record the cross-check let stand.
+    if availability == Availability::Available {
+        entry.schema_registry = point.schema_registry.clone();
+    }
     entry
 }
 
@@ -2083,6 +2093,7 @@ fn without_record_entry(observation: &Observation) -> CatalogEntry {
         topics_omitted: None,
         owner_detection: None,
         consumer_positions: None,
+        schema_registry: None,
     }
 }
 
@@ -2568,6 +2579,7 @@ mod tests {
             topics_omitted: None,
             owner_detection: Some(Vec::new()),
             consumer_positions: None,
+            schema_registry: None,
         };
         let (full, slim) = entry_renderings(&entry);
         let full: serde_json::Value = serde_json::from_str(&full).unwrap();
@@ -2657,6 +2669,7 @@ mod tests {
                 }],
                 groups_omitted: None,
             }),
+            schema_registry: None,
         };
         let (full, slim) = entry_renderings(&entry);
         let full: serde_json::Value = serde_json::from_str(&full).unwrap();

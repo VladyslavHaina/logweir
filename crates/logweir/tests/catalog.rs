@@ -1646,8 +1646,8 @@ fn the_checked_in_catalog_point_schema_is_the_one_the_type_generates() {
     // document. `just schema` is the only sanctioned way to change the file.
     // The CURRENT file is the newest MINOR's, named by the writer's constant,
     // so a renumber moves the constant and the justfile, not this test; the
-    // 1.0.0 to 1.6.0 files are frozen beside it.
-    let version = logweir::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS;
+    // 1.0.0 to 1.7.0 files are frozen beside it.
+    let version = logweir::catalog::record::FORMAT_VERSION_WITH_SCHEMA_REGISTRY;
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
         "../../schemas/logweir-catalog-point-{version}.json"
     ));
@@ -3172,4 +3172,57 @@ fn sync_counts_an_empty_capture_only_over_verified_bytes() {
     let report = sync_once(&store, &signer, &trust);
     assert_eq!(report.unverified_signer, 1);
     assert_eq!(report.empty_capture, 0);
+}
+
+/// **PROD-03.1: the 1.7.0 catalog point schema is FROZEN**, and 1.8.0 is it
+/// plus the optional `schema_registry` summary; a record copies the receipt's
+/// block, and a record whose summary the receipt does not back is refused by
+/// rule 3. KILLS: a writer that drops the summary; a reader that believes one
+/// the receipt does not carry.
+#[test]
+fn a_1_8_0_record_summarises_the_receipts_schema_registry() {
+    use logweir_core::schema_registry::{CaptureFailure, ReceiptSchemaRegistry};
+    let frozen: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../schemas/logweir-catalog-point-1.7.0.json"
+    ))
+    .unwrap();
+    let mut current: serde_json::Value =
+        serde_json::from_str(&logweir::catalog::schema::catalog_point_schema()).unwrap();
+    current["$id"] = frozen["$id"].clone();
+    current["properties"]
+        .as_object_mut()
+        .unwrap()
+        .remove("schema_registry");
+    current["definitions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("PointSchemaRegistry");
+    assert_eq!(current, frozen, "1.8.0 is 1.7.0 plus one optional block");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_, key, _) = signer_in(dir.path());
+    let mut r = receipt("nightly-20260915", "01J9X2QK7C4V0R8YB3ZP6MTS5A");
+    r.format_version = logweir_core::backup_receipt::FORMAT_VERSION_WITH_SCHEMA_REGISTRY.into();
+    r.schema_registry = Some(ReceiptSchemaRegistry::not_captured(
+        &CaptureFailure::Unauthorized,
+    ));
+    let point = point_for(&r, "s3://kafka-backups/prod", &key);
+    assert_eq!(point.format_version, "1.8.0");
+    let summary = point.schema_registry.clone().expect("the summary travels");
+    assert!(!summary.captured);
+    assert_eq!(
+        summary.incomplete_reason.as_deref(),
+        Some("registryUnauthorized")
+    );
+    use logweir::catalog::reader::{cross_check, CrossCheck};
+    let bytes = receipt_bytes(&r);
+    assert_eq!(cross_check(&point, &r, &bytes), CrossCheck::Agrees);
+    let mut forged = point.clone();
+    forged.schema_registry.as_mut().unwrap().captured = true;
+    assert_eq!(
+        cross_check(&forged, &r, &bytes),
+        CrossCheck::RecordMismatch(vec![
+            "schema_registry: the summary is not the receipt block's".to_string()
+        ])
+    );
 }

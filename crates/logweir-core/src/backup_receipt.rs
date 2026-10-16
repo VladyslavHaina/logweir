@@ -2116,16 +2116,54 @@ impl BackupReceipt {
                 }
             }
         }
-        // ARMS SR-R1 to SR-R4 (format 1.9.0): `schema_registry`, and ONLY
+        // ARMS 46-49 (format 1.9.0, PROD-03.1): `schema_registry`, and ONLY
         // when it is present (OD-7 (a)).
         if let Some(block) = &self.schema_registry {
+            use crate::schema_registry as sr;
+            // ARM 46. A document declaring a minor before 9 cannot carry it.
             let minor = parse_semver(&self.format_version).map(|(_, minor, _)| minor);
-            crate::schema_registry::check_receipt_block(
-                block,
-                minor.is_some_and(|m| m >= SCHEMA_REGISTRY_SINCE_MINOR),
-                &self.backup_id,
-                &self.run_id,
-            )?;
+            if minor.is_some_and(|m| m < SCHEMA_REGISTRY_SINCE_MINOR) {
+                return Err(format!(
+                    "schema_registry is present but format_version {:?} predates it: the \
+                     field is defined from 1.{SCHEMA_REGISTRY_SINCE_MINOR}.0",
+                    self.format_version
+                ));
+            }
+            // ARM 47. A reason exactly when not captured, from the closed set.
+            let reason_ok = match (&block.reason, block.captured) {
+                (None, true) => true,
+                (Some(r), false) => sr::CAPTURE_REASONS.contains(&r.as_str()),
+                _ => false,
+            };
+            if !reason_ok {
+                let (last, rest) = sr::CAPTURE_REASONS.split_last().expect("four reasons");
+                return Err(format!(
+                    "schema_registry.reason is present exactly when captured is false, and is \
+                     {} or {last}",
+                    rest.join(", ")
+                ));
+            }
+            // ARM 48. A captured block names its snapshot beside this receipt
+            // and counts no more subjects than versions; an uncaptured one
+            // names and counts nothing.
+            if !sr::receipt_block_shape_ok(block, &self.backup_id, &self.run_id) {
+                return Err(format!(
+                    "schema_registry names its snapshot ({} and its sha256) and counts no more \
+                     subjects than versions exactly when captured, and names and counts \
+                     nothing otherwise",
+                    sr::snapshot_key("<backup_id>", "<run_id>")
+                ));
+            }
+            // ARM 49. The two lists are bounded, sorted and distinct.
+            if !sr::receipt_block_lists_ok(block) {
+                return Err(format!(
+                    "schema_registry.unresolved_references and ids_not_in_snapshot list at \
+                     most {} entries each, sorted and distinct, every reference at most {} \
+                     characters and every ID from 1 to 16777215",
+                    sr::LISTED,
+                    sr::LISTED_TEXT_CHARS
+                ));
+            }
         }
         Ok(())
     }

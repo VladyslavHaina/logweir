@@ -5,10 +5,10 @@
 //! compatibility API accepts the mode and assigns its own IDs.
 
 use logweir_core::schema_registry::{
-    capture, check_receipt_block, check_scorecard_block, classify, closure, import, Class,
-    ImportRefusal, ImportReport, ImportedVersion, NeededIds, ReceiptSchemaRegistry, Rest,
-    ScorecardSchemas, Snapshot, SnapshotVersion, CANNOT_KEEP_IDS, IMPORTED_LISTED, LISTED,
-    REASON_INCOMPLETE, REASON_TOO_LARGE, REASON_UNAUTHORIZED, REASON_UNREACHABLE, SCHEMA_CONFLICT,
+    capture, check_scorecard_block, classify, closure, import, Class, ImportRefusal, ImportReport,
+    ImportedVersion, NeededIds, ReceiptSchemaRegistry, Rest, ScorecardSchemas, Snapshot,
+    SnapshotVersion, CANNOT_KEEP_IDS, IMPORTED_LISTED, REASON_INCOMPLETE, REASON_TOO_LARGE,
+    REASON_UNAUTHORIZED, REASON_UNREACHABLE, SCHEMA_CONFLICT,
 };
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,6 +39,10 @@ struct Fake {
     writes: Vec<String>,
     /// Fail every request after this many (a registry that goes away).
     budget: Option<usize>,
+    global_mode: String,
+    refuse_mode_delete: bool,
+    /// Answer 500 to the registration of this ID.
+    fail_register: Option<u32>,
 }
 
 impl Fake {
@@ -52,6 +56,9 @@ impl Fake {
             status_for_everything: None,
             writes: Vec::new(),
             budget: None,
+            global_mode: "READWRITE".into(),
+            refuse_mode_delete: false,
+            fail_register: None,
         }
     }
 
@@ -189,17 +196,25 @@ impl Rest for Fake {
                 self.modes.insert(decode(s), mode.clone());
                 Ok((200, json!({"mode": mode})))
             }
-            ("GET", ["mode", s]) => {
-                let mode = self
-                    .modes
-                    .get(&decode(s))
-                    .cloned()
-                    .unwrap_or("READWRITE".into());
-                Ok((200, json!({"mode": mode})))
+            ("GET", ["mode"]) => Ok((200, json!({"mode": self.global_mode}))),
+            ("GET", ["mode", s]) => match self.modes.get(&decode(s)) {
+                Some(mode) => Ok((200, json!({ "mode": mode }))),
+                None => Ok((404, json!({"error_code": 40409}))),
+            },
+            ("DELETE", ["mode", s]) => {
+                if self.refuse_mode_delete {
+                    return Ok((500, Value::Null));
+                }
+                self.writes.push(format!("mode {} deleted", decode(s)));
+                self.modes.remove(&decode(s));
+                Ok((200, json!({"mode": "READWRITE"})))
             }
             ("POST", ["subjects", s, "versions"]) => {
                 let s = decode(s);
                 let body = body.unwrap().clone();
+                if self.fail_register == body.get("id").and_then(Value::as_u64).map(|i| i as u32) {
+                    return Ok((500, Value::Null));
+                }
                 let import = self.modes.get(&s).map(String::as_str) == Some("IMPORT");
                 let id = match (import && self.kind == Kind::KeepsIds, body.get("id")) {
                     (true, Some(id)) => {
@@ -471,10 +486,8 @@ fn an_empty_target_gets_every_id_kept_and_a_second_run_writes_nothing() {
         );
         // Imported versions stay live, soft deletes are not replayed.
         assert!(!target.subjects[&v.subject][&v.version].1);
-        assert_eq!(
-            target.modes.get(&v.subject).map(String::as_str),
-            Some("READWRITE")
-        );
+        // Each subject inherited its mode, so it ends with none of its own.
+        assert_eq!(target.modes.get(&v.subject), None, "{}", v.subject);
     }
     // SR-9: the idempotence half.
     let writes = target.writes.len();
@@ -548,8 +561,8 @@ fn registries_that_cannot_keep_ids_are_refused_with_nothing_registered() {
                 target.writes
             );
         }
-        // Never left in IMPORT mode.
-        assert!(target.modes.values().all(|m| m == "READWRITE"));
+        // Never left in IMPORT mode: the subject inherited, so it has none.
+        assert!(target.modes.is_empty(), "{:?}", target.modes);
     }
 }
 
@@ -600,49 +613,6 @@ fn needed_ids_never_include_what_the_snapshot_lacks() {
     let _ = Class::Import;
 }
 
-fn receipt_block() -> ReceiptSchemaRegistry {
-    ReceiptSchemaRegistry::captured(
-        &snapshot(),
-        logweir_core::schema_registry::snapshot_key("b", "r"),
-        logweir_core::ids::sha256_prefixed(b"x"),
-        &BTreeMap::new(),
-    )
-}
-
-#[test]
-fn receipt_arms_refuse_each_contradiction() {
-    let ok = receipt_block();
-    check_receipt_block(&ok, true, "b", "r").unwrap();
-    assert_eq!((ok.subjects, ok.versions), (5, 6));
-    assert!(check_receipt_block(&ok, false, "b", "r")
-        .unwrap_err()
-        .contains("predates"));
-    let mut bad = ok.clone();
-    bad.reason = Some(REASON_UNREACHABLE.into());
-    assert!(check_receipt_block(&bad, true, "b", "r")
-        .unwrap_err()
-        .contains("reason"));
-    let mut bad = ok.clone();
-    bad.snapshot_key = Some("logweir/backups/b/other.schema-registry.json".into());
-    assert!(check_receipt_block(&bad, true, "b", "r")
-        .unwrap_err()
-        .contains("names its snapshot"));
-    let not = ReceiptSchemaRegistry::not_captured(
-        &logweir_core::schema_registry::CaptureFailure::Unauthorized,
-    );
-    check_receipt_block(&not, true, "b", "r").unwrap();
-    let mut bad = not.clone();
-    bad.versions = 3;
-    assert!(check_receipt_block(&bad, true, "b", "r").is_err());
-    let mut bad = ok.clone();
-    bad.ids_not_in_snapshot = vec![3, 2];
-    assert!(check_receipt_block(&bad, true, "b", "r")
-        .unwrap_err()
-        .contains("sorted"));
-    bad.ids_not_in_snapshot = (1..=(LISTED as u32 + 1)).collect();
-    assert!(check_receipt_block(&bad, true, "b", "r").is_err());
-}
-
 #[test]
 fn scorecard_arms_refuse_each_contradiction() {
     let report = ImportReport {
@@ -674,4 +644,73 @@ fn scorecard_arms_refuse_each_contradiction() {
     bad.already_present = 1;
     assert!(check_scorecard_block(&bad, true).is_err());
     assert!(check_scorecard_block(&ScorecardSchemas::not_imported("other"), true).is_err());
+}
+
+#[test]
+fn a_read_only_subject_or_registry_is_refused_and_untouched() {
+    for (own, global) in [(Some("READONLY"), "READWRITE"), (None, "READONLY_OVERRIDE")] {
+        let mut target = Fake::new(Kind::KeepsIds);
+        target.global_mode = global.into();
+        if let Some(mode) = own {
+            target.modes.insert("customer".into(), mode.into());
+        }
+        let err = run(&mut target, &[4]).unwrap_err();
+        assert_eq!(
+            err.reason(),
+            logweir_core::schema_registry::READ_ONLY,
+            "{err}"
+        );
+        assert!(target.writes.is_empty(), "untouched: {:?}", target.writes);
+        assert_eq!(target.modes.get("customer").map(String::as_str), own);
+    }
+}
+
+#[test]
+fn each_subject_ends_with_the_mode_it_had() {
+    // An explicit READWRITE stays an explicit READWRITE; an inherited mode
+    // stays inherited (no subject-level mode).
+    let mut target = Fake::new(Kind::KeepsIds);
+    target.modes.insert("customer".into(), "READWRITE".into());
+    run(&mut target, &[5]).unwrap();
+    assert_eq!(
+        target.modes.get("customer").map(String::as_str),
+        Some("READWRITE")
+    );
+    assert_eq!(target.modes.get("orders-value"), None);
+    // KILLS: an import that writes READWRITE on every subject.
+    assert!(target
+        .writes
+        .contains(&"mode orders-value deleted".to_string()));
+}
+
+#[test]
+fn a_failure_mid_import_puts_the_prior_mode_back() {
+    let mut target = Fake::new(Kind::KeepsIds);
+    target
+        .modes
+        .insert("orders-value".into(), "READWRITE".into());
+    target.fail_register = Some(7); // orders-value v2
+    let err = run(&mut target, &[5]).unwrap_err();
+    assert_eq!(
+        err.reason(),
+        logweir_core::schema_registry::UNREACHABLE,
+        "{err}"
+    );
+    assert_eq!(
+        target.modes.get("orders-value").map(String::as_str),
+        Some("READWRITE")
+    );
+    assert_eq!(target.modes.get("customer"), None);
+}
+
+#[test]
+fn a_mode_that_cannot_be_put_back_is_said() {
+    let mut target = Fake::new(Kind::KeepsIds);
+    target.refuse_mode_delete = true;
+    let err = run(&mut target, &[4]).unwrap_err();
+    assert_eq!(
+        err.reason(),
+        logweir_core::schema_registry::MODE_NOT_RESTORED
+    );
+    assert!(err.to_string().contains("customer"), "{err}");
 }

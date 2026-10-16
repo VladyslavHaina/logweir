@@ -1439,7 +1439,7 @@ fn stability_lists_the_deferred_items() {
 
     const NEVER: [&str; 4] = [
         "Restore-in-place into a live topic",
-        "Confluent Schema Registry / Apicurio / RBAC-MDS / CSFLE",
+        "RBAC-MDS and CSFLE; Schema Registry beyond backup, resolution and selective import",
         "MSK ZK-to-KRaft migration",
         "Multi-cluster or fleet views",
     ];

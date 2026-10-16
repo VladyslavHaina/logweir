@@ -1918,6 +1918,7 @@ fn bound_as_restored(f: &fixtures::OrchestratorFixture) -> logweir::drill::bindi
         manifest_key: set.manifest_key,
         manifest_sha256: facts.manifest_sha256,
         manifest_version_id: facts.manifest_version_id,
+        schema_registry: None,
     }
 }
 

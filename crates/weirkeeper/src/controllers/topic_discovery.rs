@@ -238,6 +238,7 @@ pub fn connection_plan(resolved: &ResolvedConnection) -> ConnectionPlan {
             .as_ref()
             .map(|_| side.client_key_file_path()),
         principal: resolved.principal.clone(),
+        schema_registry: None,
     }
 }
 

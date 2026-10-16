@@ -2253,6 +2253,7 @@ pub fn runner_job_spec_with_policy(
         crate::connection::resolve(cluster, crate::connection::ConnectionUse::RestoreTarget)?;
     connection.check_job_namespace(&namespace)?;
     connection.check_restore_target(&plan.target.bootstrap_servers, &plan.target.auth)?;
+    connection.check_restore_registry(plan.target.schema_registry.as_ref())?;
     let projection = connection.project();
 
     // The private signing key is the only file-backed Secret; the approval
@@ -2768,6 +2769,9 @@ pub struct ScorecardObservation {
     /// read by [`positions_mapping_record`]: `Some` on every document read,
     /// `bound: false` when it binds none (DUI-50).
     pub positions_mapping: Option<crate::crds::restore::PositionsMappingRecord>,
+    /// `target.schemas` (format 1.13.0 / 2.5.0, PROD-03.2): `None` when the
+    /// document carries no block.
+    pub schemas: Option<crate::crds::restore::SchemasRecord>,
     /// `Some` when the scorecard was not read because it exceeds the
     /// controller's read cap: the `NotAttempted` detail naming the cap
     /// ([`crate::verification::over_read_cap_detail`]). Every other field is
@@ -3223,6 +3227,7 @@ pub fn scorecard_observation(bytes: &[u8]) -> Option<ScorecardObservation> {
         positions_mapping: Some(positions_mapping_record(
             doc.pointer("/integrity/verification/positions_mapping"),
         )),
+        schemas: doc.pointer("/target/schemas").and_then(schemas_record),
         read_refused: None,
     })
 }
@@ -3255,6 +3260,24 @@ pub fn positions_mapping_record(
             .filter(|o| logweir_core::positions_mapping::OMITTED_REASONS.contains(o))
             .map(str::to_string),
     }
+}
+
+/// A signed `target.schemas` block read as the status'
+/// [`crate::crds::restore::SchemasRecord`]: the counts, and `not_imported`
+/// only as one of the scorecard's own reasons.
+#[must_use]
+pub fn schemas_record(block: &Value) -> Option<crate::crds::restore::SchemasRecord> {
+    let block = block.as_object()?;
+    let count = |k: &str| block.get(k).and_then(Value::as_u64).unwrap_or(0);
+    Some(crate::crds::restore::SchemasRecord {
+        imported: count("imported_count"),
+        already_present: count("already_present"),
+        not_imported: block
+            .get("not_imported")
+            .and_then(Value::as_str)
+            .filter(|r| logweir_core::schema_registry::NOT_IMPORTED_REASONS.contains(r))
+            .map(str::to_string),
+    })
 }
 
 /// `target_diff.would_create` read as `(topic, partitions)` pairs — all of
@@ -5417,6 +5440,14 @@ pub fn integrity_block(o: &ScorecardObservation) -> serde_json::Map<String, Valu
         .and_then(|pm| serde_json::to_value(pm).ok())
     {
         m.insert("positionsMapping".to_string(), v);
+    }
+    // PROD-03.2: the schemas the run imported, or why none were.
+    if let Some(v) = o
+        .schemas
+        .as_ref()
+        .and_then(|sc| serde_json::to_value(sc).ok())
+    {
+        m.insert("schemas".to_string(), v);
     }
     m
 }

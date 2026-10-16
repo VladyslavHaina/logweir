@@ -184,6 +184,20 @@ pub const RUNNER_ROWS: &[(CheckId, Gating, Option<Duration>)] = &[
         Gating::Blocking,
         Some(EXPIRY_DEFAULT),
     ),
+    // PROD-03.1/03.2: a registry that does not answer never fails a backup
+    // (the receipt says not captured), so `registry.reachable` is advisory; a
+    // schema that would conflict refuses the restore, so `target.schemas`
+    // blocks, with the shortest expiry (the target registry can change).
+    (
+        CheckId::RegistryReachable,
+        Gating::Advisory,
+        Some(EXPIRY_DEFAULT),
+    ),
+    (
+        CheckId::TargetSchemas,
+        Gating::Blocking,
+        Some(EXPIRY_TARGET_COLLISION),
+    ),
     // PROD-04.2 §3.8, `switchoverReadiness`. The evidence row reads signed
     // bytes, and the trust that judges them can change, so it carries the
     // default expiry; the target and the groups can change at any moment (a

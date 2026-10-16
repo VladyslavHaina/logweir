@@ -290,8 +290,9 @@ pub fn run(req: &OperationReadinessRequest, wiring: &dyn Wiring, deadline: Deadl
             }
             for id in &capabilities {
                 push(
-                    capability::blocked(
+                    capability::blocked_unless_registry(
                         *id,
+                        &req.connection,
                         "the connection did not authenticate, so this check did not run",
                         now,
                     )
@@ -419,6 +420,43 @@ pub fn topics_blocked_sentence(code: CheckCode) -> &'static str {
 /// not describe (DUI-36).
 #[must_use]
 pub fn capability_rows(
+    listed: &[CheckId],
+    connection: &ConnectionPlan,
+    probe: &dyn InventoryProbe,
+    topics: &[String],
+    passed: (bool, Option<CheckCode>),
+    deadline: Deadline,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<CheckOutcome> {
+    let (authenticated_ok, topics_blocked) = passed;
+    // PROD-03.1: the registry row asks the registry, not the brokers, so it is
+    // answered whatever the Kafka authentication said.
+    let registry: Vec<CheckOutcome> = listed
+        .iter()
+        .filter(|id| **id == CheckId::RegistryReachable)
+        .map(|_| capability::registry_reachable(connection, now))
+        .collect();
+    let listed: Vec<CheckId> = listed
+        .iter()
+        .copied()
+        .filter(|id| *id != CheckId::RegistryReachable)
+        .collect();
+    let listed = listed.as_slice();
+    let mut rows = registry;
+    rows.extend(capability_rows_kafka(
+        listed,
+        connection,
+        probe,
+        topics,
+        (authenticated_ok, topics_blocked),
+        deadline,
+        now,
+    ));
+    rows
+}
+
+/// [`capability_rows`] for every row that reads the brokers.
+fn capability_rows_kafka(
     listed: &[CheckId],
     connection: &ConnectionPlan,
     probe: &dyn InventoryProbe,

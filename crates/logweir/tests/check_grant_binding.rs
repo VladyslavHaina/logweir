@@ -488,6 +488,7 @@ fn fx20c_a_backup_readiness_check_names_a_foreign_evidence_write_secret() {
                 client_cert_file: None,
                 client_key_file: None,
                 principal: "User:ANONYMOUS".to_string(),
+                schema_registry: None,
             },
             destination: Some(dest),
             roles: vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
@@ -555,6 +556,7 @@ fn fx20c_a_restore_preflight_names_each_destinations_grant() {
                 client_cert_file: None,
                 client_key_file: None,
                 principal: "User:ANONYMOUS".to_string(),
+                schema_registry: None,
             },
             source_destination: destination(
                 "source",

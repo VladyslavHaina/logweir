@@ -147,7 +147,13 @@ pub fn project(
         .as_ref()
         .map(crate::catalog::record::RecordConsumerPositions::of)
         .transpose()?;
-    let format_version = if consumer_positions.is_some() {
+    let schema_registry = receipt
+        .schema_registry
+        .as_ref()
+        .map(logweir_core::schema_registry::PointSchemaRegistry::of);
+    let format_version = if schema_registry.is_some() {
+        crate::catalog::record::FORMAT_VERSION_WITH_SCHEMA_REGISTRY
+    } else if consumer_positions.is_some() {
         crate::catalog::record::FORMAT_VERSION_WITH_CONSUMER_POSITIONS
     } else if receipt.generations.is_some() {
         crate::catalog::record::FORMAT_VERSION_WITH_GENERATIONS
@@ -205,6 +211,7 @@ pub fn project(
         signing: inputs.signing.clone(),
         installation: inputs.installation.clone(),
         consumer_positions,
+        schema_registry,
     })
 }
 

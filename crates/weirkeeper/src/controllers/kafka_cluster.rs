@@ -882,7 +882,13 @@ pub fn probe_started_patch(cluster: &KafkaCluster, job_name: &str, now: DateTime
 #[must_use]
 pub fn credential_binding_of(cluster: &KafkaCluster) -> Option<String> {
     let resolved = connection::resolve(cluster, ConnectionUse::Probe).ok()?;
-    resolved.credential_secret()?;
+    let registry_secret = resolved
+        .schema_registry
+        .as_ref()
+        .is_some_and(|r| r.password.is_some());
+    if resolved.credential_secret().is_none() && !registry_secret {
+        return None;
+    }
     resolved.credential_binding()
 }
 

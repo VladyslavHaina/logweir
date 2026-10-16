@@ -652,6 +652,28 @@ pub struct PointView {
     /// the point is not `Available`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumer_positions: Option<PointConsumerPositionsView>,
+    /// **PROD-03.1.** Whether the backup captured its source Schema Registry,
+    /// its counts, and why the capture is incomplete. ABSENT: the source
+    /// connection names no registry, the point predates it, or not published.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<PointSchemaRegistryView>,
+}
+
+/// A point's Schema Registry capture (PROD-03.1).
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PointSchemaRegistryView {
+    /// Whether the snapshot was taken.
+    pub captured: bool,
+    /// Distinct subjects captured.
+    pub subjects: u64,
+    /// Subject-versions captured.
+    pub versions: u64,
+    /// Why the capture is incomplete (`registryUnreachable`,
+    /// `registryUnauthorized`, `snapshotTooLarge`, `snapshotIncomplete`,
+    /// `unresolvedReferences`, `idsNotInSnapshot`); absent when complete.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
 }
 
 /// The longest topic name Kafka accepts.
@@ -741,6 +763,15 @@ fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
             .owner_detection
             .as_ref()
             .map(|d| d.iter().take(2).map(|w| bounded(w, 32)).collect()),
+        schema_registry: entry
+            .schema_registry
+            .as_ref()
+            .map(|r| PointSchemaRegistryView {
+                captured: r.captured,
+                subjects: r.subjects,
+                versions: r.versions,
+                incomplete_reason: r.incomplete_reason.as_deref().map(|w| bounded(w, 32)),
+            }),
         consumer_positions: entry
             .consumer_positions
             .as_ref()
@@ -1516,6 +1547,7 @@ mod tests {
             topics_omitted: None,
             owner_detection: None,
             consumer_positions: None,
+            schema_registry: None,
         }
     }
 

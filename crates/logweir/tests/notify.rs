@@ -180,7 +180,10 @@ fn every_notification_post_goes_through_the_bounded_agent() {
     // One builder per reviewed timeout policy, confined to the function named
     // beside its file. Its bounds are asserted below because no behavioural
     // row exercises them.
-    const SANCTIONED: [(&str, &str); 1] = [("identity.rs", "fn kubernetes_agent(")];
+    const SANCTIONED: [(&str, &str); 2] = [
+        ("backup/schema_registry.rs", "fn registry_agent("),
+        ("identity.rs", "fn kubernetes_agent("),
+    ];
 
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut offenders = Vec::new();
@@ -249,6 +252,17 @@ fn every_notification_post_goes_through_the_bounded_agent() {
             body.contains(BUILDER),
             "{file}'s `{BUILDER}` moved out of `{function}`, the one place its policy is reviewed"
         );
+    }
+    for (file, function) in SANCTIONED {
+        let body = fn_body(&sources[file], function).unwrap();
+        for bound in [
+            ".timeout_connect(",
+            ".timeout_read(",
+            ".timeout_write(",
+            ".redirects(0)",
+        ] {
+            assert!(body.contains(bound), "`{function}` must call `{bound}`");
+        }
     }
     let kubernetes = fn_body(&sources["identity.rs"], "fn kubernetes_agent(").unwrap();
     for bound in [".timeout_connect(", ".timeout_read(", ".timeout_write("] {

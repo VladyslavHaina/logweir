@@ -2635,15 +2635,21 @@ pub fn runner_job_spec_from_inputs(
     // reference still resolve to what the frozen plan was rendered from. This
     // function is public and pure, so a caller holding frozen inputs may reach
     // it without the reconciler's `verify_frozen_config_map` pass.
+    let resolved_registry = connection
+        .schema_registry
+        .as_ref()
+        .map(crate::connection::ResolvedRegistry::plan);
     let frozen_connection = (
         &inputs.source.bootstrap_servers,
         &inputs.source.auth,
         &inputs.source.tls_ca,
+        &inputs.source.schema_registry,
     );
     let resolved_connection = (
         &connection.bootstrap_servers,
         &connection.auth,
         &connection.tls_ca,
+        &resolved_registry,
     );
     if frozen_connection != resolved_connection {
         return Err(BackupError::Refused(
