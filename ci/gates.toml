@@ -362,6 +362,10 @@ readers = [
   # C8 reads the Scorecard struct's text
   "crates/logweir-core/src/**",
 ]
+# C19, scripts/test-check-cosign-verify.py:169, runs the cosign-pin checker
+# over the real tree (os.walk of every .sh .yml .md .py .mjs .js .rs .toml,
+# justfile and Dockerfile*): traced run 38839435318, 368 files read.
+walks = ["**"]
 
 # ------------------------------------------------------------------ docs
 # Links, doc_lint and the unverified-label scan (FX-53 §2.4).
