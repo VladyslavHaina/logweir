@@ -40,12 +40,12 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/schedules";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/schedules";
 /// The create route identifier.
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/schedules";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/schedules";
 /// The command route identifier.
 pub const ROUTE_SET_SUSPENSION: &str =
-    "POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension";
+    "POST /api/v1/workspaces/{ws}/schedules/{name}:set-suspension";
 /// The command suffix.
 pub const SET_SUSPENSION: &str = ":set-suspension";
 /// The field-error code for an expression the cadence engine cannot read.
@@ -354,12 +354,7 @@ pub async fn command(
     }
     let updated = state
         .kube()
-        .set_schedule_suspension(
-            &ns,
-            name,
-            request.suspended,
-            &request.expected_resource_version,
-        )
+        .set_schedule_suspension(name, request.suspended, &request.expected_resource_version)
         .await
         .map_err(|failure| match failure {
             KubeFailure::Conflict => ApiError::new(
@@ -389,7 +384,7 @@ pub async fn command(
 // THE EDITABLE FUTURE POLICY.
 
 /// The edit route identifier.
-pub const ROUTE_UPDATE: &str = "PUT /api/v1/namespaces/{ns}/schedules/{name}";
+pub const ROUTE_UPDATE: &str = "PUT /api/v1/workspaces/{ws}/schedules/{name}";
 
 /// The most named topics one schedule may carry, as on create.
 pub const MAX_TOPICS: usize = 256;
@@ -801,7 +796,7 @@ pub async fn update(
 
     let updated = state
         .kube()
-        .set_schedule_policy(&ns, &name, &edit, &version)
+        .set_schedule_policy(&name, &edit, &version)
         .await
         .map_err(|failure| match failure {
             // THE OBJECT MOVED BETWEEN THE READ AND THE WRITE. The generation

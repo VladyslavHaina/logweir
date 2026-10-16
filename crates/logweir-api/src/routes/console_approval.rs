@@ -75,15 +75,15 @@ use crate::problem::{ApiError, FieldError, ProblemCode};
 use crate::projection;
 
 /// The read route identifier.
-pub const ROUTE_REQUEST: &str = "GET /api/v1/namespaces/{ns}/restores/{name}/approval-request";
+pub const ROUTE_REQUEST: &str = "GET /api/v1/workspaces/{ws}/restores/{name}/approval-request";
 /// The click's route identifier.
-pub const ROUTE_APPROVE: &str = "POST /api/v1/namespaces/{ns}/restores/{name}/console-approval";
+pub const ROUTE_APPROVE: &str = "POST /api/v1/workspaces/{ws}/restores/{name}/console-approval";
 /// PROD-04.2: a switchover's request read.
 pub const ROUTE_SWITCHOVER_REQUEST: &str =
-    "GET /api/v1/namespaces/{ns}/switchovers/{name}/approval-request";
+    "GET /api/v1/workspaces/{ws}/switchovers/{name}/approval-request";
 /// PROD-04.2: a switchover's click.
 pub const ROUTE_SWITCHOVER_APPROVE: &str =
-    "POST /api/v1/namespaces/{ns}/switchovers/{name}/console-approval";
+    "POST /api/v1/workspaces/{ws}/switchovers/{name}/console-approval";
 
 /// What both routes need about the namespace before they read a request: the
 /// policy a `two-person` namespace is bound to, or the refusal.

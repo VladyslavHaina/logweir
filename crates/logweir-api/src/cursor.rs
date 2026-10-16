@@ -55,7 +55,7 @@ impl std::fmt::Debug for CursorKey {
 pub struct CursorScope {
     /// The actor ID.
     pub actor_id: String,
-    /// The route identifier, e.g. `GET /api/v1/namespaces/{ns}/backups`.
+    /// The route identifier, e.g. `GET /api/v1/workspaces/{ws}/backups`.
     pub route: String,
     /// The namespace.
     pub namespace: String,
@@ -164,7 +164,7 @@ mod tests {
     fn scope() -> CursorScope {
         CursorScope {
             actor_id: "urn:logweir:local-admin#admin".into(),
-            route: "GET /api/v1/namespaces/{ns}/backups".into(),
+            route: "GET /api/v1/workspaces/{ws}/backups".into(),
             namespace: "team-a".into(),
             filters: String::new(),
         }

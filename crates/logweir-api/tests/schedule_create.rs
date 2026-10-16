@@ -1,4 +1,4 @@
-//! `POST /api/v1/namespaces/{ns}/schedules`: the create route takes the whole
+//! `POST /api/v1/workspaces/{ws}/schedules`: the create route takes the whole
 //! future policy the edit route takes, so the console's guided form never has
 //! to create a policy and then patch a saved destination, a dynamic
 //! selection, a zone, a catch-up policy or retries onto an object that is
@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use support::{TestApp, NS_A};
 
 fn create_path() -> String {
-    format!("/api/v1/namespaces/{NS_A}/schedules")
+    format!("/api/v1/workspaces/{NS_A}/schedules")
 }
 
 /// The guided form's body: a saved destination, a dynamic selection, a zone

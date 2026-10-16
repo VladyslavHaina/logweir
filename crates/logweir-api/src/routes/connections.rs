@@ -37,9 +37,9 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier (cursor scope).
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/connections";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/connections";
 /// The create route identifier (idempotency scope).
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/connections";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/connections";
 /// The deterministic name prefix. With 26 hash characters the name is 31
 /// characters, inside the 49 the probe Job name leaves a KafkaCluster.
 pub const NAME_PREFIX: &str = "conn-";
@@ -645,7 +645,7 @@ pub async fn create(
         let probe = probe_secret(&ns, &secret_name, secret_type);
         if state
             .kube()
-            .credential_name_is_taken(&ns, &probe)
+            .credential_name_is_taken(&probe)
             .await
             .map_err(KubeFailure::into_api_error)?
         {

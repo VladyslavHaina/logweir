@@ -66,7 +66,7 @@ fn app(namespace: &str) -> TestApp {
 }
 
 fn events_path(namespace: &str) -> String {
-    format!("/api/v1/namespaces/{namespace}/operations/backup/held/events")
+    format!("/api/v1/workspaces/{namespace}/operations/backup/held/events")
 }
 
 async fn open_without_reading(app: &TestApp, namespace: &str) -> axum::response::Response {

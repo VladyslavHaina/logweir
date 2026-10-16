@@ -149,7 +149,7 @@ async fn an_allowed_read_is_attributed_completely() {
     let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
 
     let response = app
-        .get("/api/v1/namespaces/team-a/backups/backup-1", &cookie)
+        .get("/api/v1/workspaces/team-a/backups/backup-1", &cookie)
         .await;
     assert_eq!(response.status.as_u16(), 200);
 
@@ -170,7 +170,7 @@ async fn an_allowed_read_is_attributed_completely() {
     assert_eq!(record["resource"], "Backup/backup-1");
     assert_eq!(record["objectName"], "backup-1");
     assert_eq!(record["method"], "GET");
-    assert_eq!(record["path"], "/api/v1/namespaces/team-a/backups/backup-1");
+    assert_eq!(record["path"], "/api/v1/workspaces/team-a/backups/backup-1");
     assert_eq!(record["httpStatus"], 200);
     assert_eq!(record["failureCode"], "");
     assert!(record["latencyMs"].is_number());
@@ -203,7 +203,7 @@ async fn a_denied_mutation_is_recorded_as_a_deny() {
 
     let response = app
         .post(
-            "/api/v1/namespaces/team-a/schedules",
+            "/api/v1/workspaces/team-a/schedules",
             &cookie,
             Some(&app.csrf_for("u-view")),
             Some("audit-denied-000001"),
@@ -236,7 +236,7 @@ async fn an_enumeration_resistant_404_still_records_the_real_reason() {
     let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
 
     let response = app
-        .get("/api/v1/namespaces/team-b/backups/backup-1", &cookie)
+        .get("/api/v1/workspaces/team-b/backups/backup-1", &cookie)
         .await;
     response.assert_problem(404, "not_found");
 
@@ -265,7 +265,7 @@ async fn a_create_and_its_replay_correlate() {
 
     let first = app
         .post(
-            "/api/v1/namespaces/team-a/schedules",
+            "/api/v1/workspaces/team-a/schedules",
             &cookie,
             Some(&csrf),
             Some(key),
@@ -275,7 +275,7 @@ async fn a_create_and_its_replay_correlate() {
     assert_eq!(first.status.as_u16(), 201, "{}", first.code());
     let second = app
         .post(
-            "/api/v1/namespaces/team-a/schedules",
+            "/api/v1/workspaces/team-a/schedules",
             &cookie,
             Some(&csrf),
             Some(key),
@@ -517,7 +517,7 @@ async fn nothing_from_seven_secret_classes_reaches_the_log() {
         .send(
             Request::builder()
                 .method("GET")
-                .uri("/api/v1/namespaces/team-a/backups?password=hunter2-the-password")
+                .uri("/api/v1/workspaces/team-a/backups?password=hunter2-the-password")
                 .header("host", SHARED_HOST)
                 .header("cookie", &cookie)
                 .header(
@@ -532,7 +532,7 @@ async fn nothing_from_seven_secret_classes_reaches_the_log() {
     // 4. Approval and sidecar bytes, through the one route that serves them.
     let packet = app
         .get(
-            "/api/v1/namespaces/team-a/approvals/approval-1/packet",
+            "/api/v1/workspaces/team-a/approvals/approval-1/packet",
             &cookie,
         )
         .await;
@@ -541,7 +541,7 @@ async fn nothing_from_seven_secret_classes_reaches_the_log() {
     // 5. Plan bytes, submitted to the one route that takes them.
     let created = app
         .post(
-            "/api/v1/namespaces/team-a/restores",
+            "/api/v1/workspaces/team-a/restores",
             &cookie,
             Some(&csrf),
             Some("redaction-plan-00001"),
@@ -568,12 +568,12 @@ async fn nothing_from_seven_secret_classes_reaches_the_log() {
         delay: None,
         remaining: 1,
     });
-    let failed = app.get("/api/v1/namespaces/team-a/backups", &cookie).await;
+    let failed = app.get("/api/v1/workspaces/team-a/backups", &cookie).await;
     assert!(failed.status.as_u16() >= 500);
 
     // 7. An object-store URL carrying userinfo, read back through a projection.
     let projected = app
-        .get("/api/v1/namespaces/team-a/backups/backup-1", &cookie)
+        .get("/api/v1/workspaces/team-a/backups/backup-1", &cookie)
         .await;
     assert_eq!(projected.status.as_u16(), 200);
     assert_eq!(
@@ -637,7 +637,7 @@ async fn every_request_produces_exactly_one_record() {
             .send(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/v1/namespaces/team-a/schedules")
+                    .uri("/api/v1/workspaces/team-a/schedules")
                     .header("host", SHARED_HOST)
                     .header("origin", SHARED_ORIGIN)
                     .header("content-type", "application/json")
@@ -699,7 +699,7 @@ async fn a_dependencys_debug_logging_cannot_print_the_upstream_body() {
         delay: None,
         remaining: 1,
     });
-    let failed = app.get("/api/v1/namespaces/team-a/backups", &cookie).await;
+    let failed = app.get("/api/v1/workspaces/team-a/backups", &cookie).await;
     assert_eq!(failed.status.as_u16(), 503);
     assert_eq!(failed.code(), "kubernetes_unavailable");
     // The response says nothing about the upstream message either.
@@ -813,7 +813,7 @@ async fn every_transport_refusal_names_itself_in_the_audit_record() {
         async move {
             let mut builder = Request::builder()
                 .method("POST")
-                .uri("/api/v1/namespaces/team-a/schedules")
+                .uri("/api/v1/workspaces/team-a/schedules")
                 .header("host", SHARED_HOST)
                 .header("cookie", &cookie)
                 .header("idempotency-key", "transport-refusal-1");
@@ -930,7 +930,7 @@ async fn a_credential_entered_once_reaches_no_log_line() {
 
     let response = app
         .post(
-            "/api/v1/namespaces/team-a/destinations",
+            "/api/v1/workspaces/team-a/destinations",
             &cookie,
             Some(&app.csrf_for("u-op")),
             Some("credential-log-0001"),
@@ -998,7 +998,7 @@ async fn opening_an_event_stream_records_both_actions_under_the_route_s_own() {
 
     let response = app
         .get(
-            "/api/v1/namespaces/team-a/operations/backup/backup-1/events",
+            "/api/v1/workspaces/team-a/operations/backup/backup-1/events",
             &cookie,
         )
         .await;

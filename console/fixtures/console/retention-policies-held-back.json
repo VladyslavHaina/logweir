@@ -3,7 +3,7 @@
   "items": [
     {
       "name": "keep-10",
-      "namespace": "team-a",
+      "namespace": "logweir-system",
       "uid": "22220010-0000-4000-8000-000000000022",
       "resourceVersion": "1002",
       "generation": 4,
@@ -352,7 +352,7 @@
     },
     {
       "name": "keep-300",
-      "namespace": "team-a",
+      "namespace": "logweir-system",
       "uid": "22220300-0000-4000-8000-000000000022",
       "resourceVersion": "1001",
       "generation": 4,

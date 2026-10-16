@@ -1,4 +1,4 @@
-//! `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` -- the read
+//! `GET /api/v1/workspaces/{ws}/protection-policies[/{name}]` -- the read
 //! half of protection health: is this data protected, and by when.
 //!
 //! THE THREE THINGS THIS PAGE EXISTS TO KEEP APART. "A schedule is enabled",
@@ -35,7 +35,7 @@ use crate::status::condition_view;
 use crate::validate::bounded;
 
 /// The cursor scope's route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/protection-policies";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/protection-policies";
 
 /// The most alerts, schedules and topics a response carries.
 pub const MAX_ROWS: usize = 16;

@@ -43,7 +43,7 @@ fn back_up_now() -> String {
 }
 
 fn backups_path() -> String {
-    format!("/api/v1/namespaces/{NS_A}/backups")
+    format!("/api/v1/workspaces/{NS_A}/backups")
 }
 
 fn shared(fake: &FakeKube, clock: Arc<TestClock>) -> SharedApp {
@@ -190,7 +190,7 @@ async fn a_manual_restore_is_limited_and_the_ceiling_is_configurable() {
         ),
     ] {
         let app = TestApp::with(FakeKube::new(), options);
-        let path = format!("/api/v1/namespaces/{NS_A}/restores");
+        let path = format!("/api/v1/workspaces/{NS_A}/restores");
         for i in 0..limit {
             let mut body = support::restore_body(&plan);
             body["approvalRef"]["name"] = json!(format!("approval-{i:08}"));
@@ -321,7 +321,7 @@ async fn a_queued_run_is_published_as_queued_with_its_ceiling() {
 
     let view = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/operations/backup/logweir-manual-queued"
+            "/api/v1/workspaces/{NS_A}/operations/backup/logweir-manual-queued"
         ))
         .await;
     assert_eq!(view.status.as_u16(), 200, "{}", view.text());
@@ -441,7 +441,7 @@ async fn a_queued_restore_publishes_its_approval_deadline() {
     body["approvalRef"]["name"] = json!("approval-queued1");
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("restore-key-queued"),
             &body.to_string(),
         )
@@ -461,7 +461,7 @@ async fn a_queued_restore_publishes_its_approval_deadline() {
     });
     app.fake.seed("restores", NS_A, object);
     let got = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/restores/{name}"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/restores/{name}"))
         .await;
     assert_eq!(got.status.as_u16(), 200, "{}", got.text());
     let item = got.json();

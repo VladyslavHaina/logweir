@@ -1,4 +1,4 @@
-//! `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` -- the read half
+//! `GET /api/v1/workspaces/{ws}/retention-policies[/{name}]` -- the read half
 //! of retention: what would be removed, what is actually enforcing it, and
 //! whether the plan an administrator approved is still the plan.
 //!
@@ -41,7 +41,7 @@ use crate::status::condition_view;
 use crate::validate::bounded;
 
 /// The cursor scope's route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/retention-policies";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/retention-policies";
 
 /// The most rows of each evaluation list a response carries.
 pub const MAX_ROWS: usize = 200;

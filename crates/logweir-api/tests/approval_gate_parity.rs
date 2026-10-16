@@ -60,7 +60,7 @@ impl Kind {
     }
 
     fn path(self) -> String {
-        format!("/api/v1/namespaces/{NS_A}/{}", self.plural())
+        format!("/api/v1/workspaces/{NS_A}/{}", self.plural())
     }
 }
 

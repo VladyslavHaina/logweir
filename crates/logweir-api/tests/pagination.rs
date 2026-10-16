@@ -10,14 +10,21 @@ use logweir_api::auth::LocalAdminAuthenticator;
 use serde_json::json;
 use support::{FakeKube, Options, TestApp, NS_A, NS_B};
 
+/// Names are unique per install, so another workspace's backups carry its
+/// name as a prefix.
 fn seed_backups(fake: &FakeKube, ns: &str, count: usize) {
+    let prefix = if ns == NS_A {
+        String::new()
+    } else {
+        format!("{ns}-")
+    };
     for i in 0..count {
         let schedule = if i % 2 == 0 { "nightly" } else { "hourly" };
         fake.seed(
             "backups",
             ns,
             json!({
-                "metadata": {"name": format!("backup-{i:04}"), "labels": {"logweir.dev/schedule": schedule}},
+                "metadata": {"name": format!("{prefix}backup-{i:04}"), "labels": {"logweir.dev/schedule": schedule}},
                 "spec": {"sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "s3://b/p"}, "triggeredBy": "schedule", "deadlineSeconds": 1800}
             }),
         );
@@ -28,7 +35,7 @@ fn seed_backups(fake: &FakeKube, ns: &str, count: usize) {
 async fn the_default_page_is_fifty_and_the_maximum_is_two_hundred() {
     let app = TestApp::new();
     seed_backups(&app.fake, NS_A, 250);
-    let base = format!("/api/v1/namespaces/{NS_A}/backups");
+    let base = format!("/api/v1/workspaces/{NS_A}/backups");
 
     let page = app.get(&base).await.json();
     assert_eq!(page["items"].as_array().unwrap().len(), 50);
@@ -57,7 +64,7 @@ async fn the_default_page_is_fifty_and_the_maximum_is_two_hundred() {
 async fn a_cursor_walks_every_item_exactly_once() {
     let app = TestApp::new();
     seed_backups(&app.fake, NS_A, 23);
-    let base = format!("/api/v1/namespaces/{NS_A}/backups");
+    let base = format!("/api/v1/workspaces/{NS_A}/backups");
     let mut seen = Vec::new();
     let mut url = format!("{base}?limit=5");
     let mut pages = 0;
@@ -98,7 +105,7 @@ async fn a_tampered_or_rescoped_cursor_is_invalid() {
     seed_backups(&fake, NS_A, 10);
     seed_backups(&fake, NS_B, 10);
     let app = TestApp::with(fake.clone(), Options::default());
-    let base_a = format!("/api/v1/namespaces/{NS_A}/backups");
+    let base_a = format!("/api/v1/workspaces/{NS_A}/backups");
     let cursor = first_cursor(&app, &format!("{base_a}?limit=3")).await;
 
     // Tamper: flip a character in the payload and in the tag.
@@ -128,13 +135,13 @@ async fn a_tampered_or_rescoped_cursor_is_invalid() {
     }
     // Another namespace.
     app.get(&format!(
-        "/api/v1/namespaces/{NS_B}/backups?limit=3&cursor={cursor}"
+        "/api/v1/workspaces/{NS_B}/backups?limit=3&cursor={cursor}"
     ))
     .await
     .assert_problem(400, "cursor_invalid");
     // Another route in the same namespace.
     app.get(&format!(
-        "/api/v1/namespaces/{NS_A}/restores?limit=3&cursor={cursor}"
+        "/api/v1/workspaces/{NS_A}/restores?limit=3&cursor={cursor}"
     ))
     .await
     .assert_problem(400, "cursor_invalid");
@@ -192,7 +199,7 @@ async fn a_tampered_or_rescoped_cursor_is_invalid() {
 async fn an_expired_cursor_is_410() {
     let app = TestApp::new();
     seed_backups(&app.fake, NS_A, 10);
-    let base = format!("/api/v1/namespaces/{NS_A}/backups");
+    let base = format!("/api/v1/workspaces/{NS_A}/backups");
     let cursor = first_cursor(&app, &format!("{base}?limit=3")).await;
     app.clock.advance(14 * 60 + 59);
     assert_eq!(
@@ -214,7 +221,7 @@ async fn an_expired_cursor_is_410() {
 async fn a_kubernetes_410_on_continue_is_cursor_expired() {
     let app = TestApp::new();
     seed_backups(&app.fake, NS_A, 10);
-    let base = format!("/api/v1/namespaces/{NS_A}/backups");
+    let base = format!("/api/v1/workspaces/{NS_A}/backups");
     let cursor = first_cursor(&app, &format!("{base}?limit=3")).await;
     app.fake.expire_continue_tokens();
     app.get(&format!("{base}?limit=3&cursor={cursor}"))
@@ -228,7 +235,7 @@ async fn a_kubernetes_410_on_continue_is_cursor_expired() {
 async fn label_selectors_are_equality_only_and_bound_into_the_cursor() {
     let app = TestApp::new();
     seed_backups(&app.fake, NS_A, 12);
-    let base = format!("/api/v1/namespaces/{NS_A}/backups");
+    let base = format!("/api/v1/workspaces/{NS_A}/backups");
     let page = app
         .get(&format!(
             "{base}?labelSelector=logweir.dev/schedule%3Dnightly&limit=4"
@@ -275,7 +282,7 @@ async fn a_large_catalog_pages_through_with_cursor_continuity_and_bounded_reads(
     const LIMIT: usize = 200;
     let app = TestApp::new();
     seed_backups(&app.fake, NS_A, TOTAL);
-    let base = format!("/api/v1/namespaces/{NS_A}/backups");
+    let base = format!("/api/v1/workspaces/{NS_A}/backups");
     app.fake.clear_requests();
 
     let mut seen: Vec<String> = Vec::new();

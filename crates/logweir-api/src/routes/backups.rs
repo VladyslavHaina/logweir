@@ -52,7 +52,7 @@ use crate::projection;
 use crate::validate;
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/backups";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/backups";
 
 /// `GET .../backups`. `labelSelector=logweir.dev/schedule=<name>` lists one
 /// schedule's runs.
@@ -101,7 +101,7 @@ pub async fn get_one(
 
 /// The create route identifier. It is part of the idempotency scope, so it is
 /// also part of the object's name.
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/backups";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/backups";
 
 /// D1 §3.1/§8.1: the deterministic name of a manual run. `logweir-manual-`
 /// plus the 26 base32 characters of the idempotency scope digest is 41

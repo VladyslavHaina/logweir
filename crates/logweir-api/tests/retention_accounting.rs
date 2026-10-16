@@ -90,7 +90,7 @@ async fn the_api_reads_the_counts_the_controller_wrote() {
     }
     let app = TestApp::with(fake, Options::default());
     let body = app
-        .get("/api/v1/namespaces/team-a/retention-policies")
+        .get("/api/v1/workspaces/team-a/retention-policies")
         .await;
     assert_eq!(body.status.as_u16(), 200);
     let answer = body.json();
@@ -368,7 +368,7 @@ async fn the_response_says_whether_the_accounting_is_recorded() {
     fake.seed("retentionpolicies", NS_A, named("keep-300"));
     let app = TestApp::with(fake, Options::default());
     let body = app
-        .get("/api/v1/namespaces/team-a/retention-policies")
+        .get("/api/v1/workspaces/team-a/retention-policies")
         .await;
     assert_eq!(body.status.as_u16(), 200);
     let answer = body.json();

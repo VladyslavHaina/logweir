@@ -68,14 +68,14 @@ use crate::status::{condition_view, MAX_CONDITIONS};
 use crate::validate;
 
 /// The list route identifier (cursor scope).
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/destinations";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/destinations";
 /// The create route identifier (idempotency scope).
-pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/destinations";
+pub const ROUTE_CREATE: &str = "POST /api/v1/workspaces/{ws}/destinations";
 /// The access-rotation route identifier.
 pub const ROUTE_UPDATE_ACCESS: &str =
-    "POST /api/v1/namespaces/{ns}/destinations/{name}:update-access";
+    "POST /api/v1/workspaces/{ws}/destinations/{name}:update-access";
 /// The test route identifier (idempotency scope).
-pub const ROUTE_TEST: &str = "POST /api/v1/namespaces/{ns}/destinations/{name}:test";
+pub const ROUTE_TEST: &str = "POST /api/v1/workspaces/{ws}/destinations/{name}:test";
 
 /// The `:update-access` command suffix.
 pub const UPDATE_ACCESS: &str = ":update-access";
@@ -1240,7 +1240,7 @@ async fn refuse_taken_credential_names(
         let probe = probe_secret(namespace, &name);
         if state
             .kube()
-            .credential_name_is_taken(namespace, &probe)
+            .credential_name_is_taken(&probe)
             .await
             .map_err(KubeFailure::into_api_error)?
         {
@@ -1961,7 +1961,7 @@ pub async fn update_access(
     let version = object.meta().resource_version.clone().unwrap_or_default();
     let updated = state
         .kube()
-        .set_destination_access(&ns, &name, &access_json, ca_bundle, &version)
+        .set_destination_access(&name, &access_json, ca_bundle, &version)
         .await
         .map_err(|failure| match failure {
             KubeFailure::Conflict => ApiError::new(

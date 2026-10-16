@@ -8,7 +8,7 @@ use serde_json::json;
 use support::{TestApp, NS_A};
 
 fn path(ns: &str, resource: &str) -> String {
-    format!("/api/v1/namespaces/{ns}/{resource}")
+    format!("/api/v1/workspaces/{ns}/{resource}")
 }
 
 fn sha(c: char) -> String {

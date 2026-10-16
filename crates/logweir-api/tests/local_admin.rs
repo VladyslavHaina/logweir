@@ -1990,6 +1990,7 @@ impl FakeKube {
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         object["metadata"]["name"] = "sse".into();
         object["metadata"]["namespace"] = "team-a".into();
+        object["metadata"]["labels"][weirkeeper::workspace::LABEL] = "team-a".into();
         // Unsettled, as `operation_stream.rs` makes one: the stream stays open.
         object["status"]["phase"] = "Running".into();
         object["status"]["progress"]["stage"] = "Running".into();
@@ -2099,7 +2100,7 @@ fn an_event_stream_that_heartbeats_outlives_the_stall_deadline() {
         .unwrap();
     write!(
         stream,
-        "GET /api/v1/namespaces/team-a/operations/backup/sse/events HTTP/1.1\r\nHost: \
+        "GET /api/v1/workspaces/team-a/operations/backup/sse/events HTTP/1.1\r\nHost: \
          127.0.0.1:{port}\r\nAccept: text/event-stream\r\n\r\n"
     )
     .unwrap();
@@ -2171,7 +2172,7 @@ fn an_event_stream_that_heartbeats_outlives_the_stall_deadline() {
 /// key — and announces `length` body bytes.
 fn backup_post_head(port: u16, length: usize, key: &str) -> String {
     format!(
-        "POST /api/v1/namespaces/team-a/backups HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: \
+        "POST /api/v1/workspaces/team-a/backups HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: \
          http://127.0.0.1:{port}\r\nContent-Type: application/json\r\nIdempotency-Key: \
          {key}\r\nContent-Length: {length}\r\n\r\n"
     )

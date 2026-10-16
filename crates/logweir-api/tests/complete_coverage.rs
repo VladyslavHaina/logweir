@@ -237,7 +237,7 @@ async fn the_create_route_stores_the_coverage_request_and_refuses_a_bound_on_not
     body["completeMaxRecords"] = json!(1000);
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("coverage-complete-01"),
             &body.to_string(),
         )
@@ -276,7 +276,7 @@ async fn the_create_route_stores_the_coverage_request_and_refuses_a_bound_on_not
         }
         let refused = app
             .post(
-                &format!("/api/v1/namespaces/{NS_A}/restores"),
+                &format!("/api/v1/workspaces/{NS_A}/restores"),
                 Some(key),
                 &bad.to_string(),
             )
@@ -295,7 +295,7 @@ async fn the_create_route_stores_the_coverage_request_and_refuses_a_bound_on_not
 
     let plain = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("coverage-absent-0001"),
             &support::restore_body(&support::golden_plan()).to_string(),
         )

@@ -225,7 +225,7 @@ struct Requested {
 /// key and the approval name of several requests in one namespace apart.
 async fn request_as(app: &SharedApp, who: &Session, tag: &str, body: Value) -> TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/restores"),
+        &format!("/api/v1/workspaces/{NS_A}/restores"),
         &who.cookie,
         Some(&who.csrf),
         Some(&format!("p162-request-{tag}")),
@@ -256,7 +256,7 @@ async fn requested(app: &SharedApp, subject: &str, tag: &str) -> Requested {
 
 async fn view(app: &SharedApp, who: &Session, restore: &str) -> TestResponse {
     app.get(
-        &format!("/api/v1/namespaces/{NS_A}/restores/{restore}/approval-request"),
+        &format!("/api/v1/workspaces/{NS_A}/restores/{restore}/approval-request"),
         &who.cookie,
     )
     .await
@@ -274,7 +274,7 @@ async fn shown(app: &SharedApp, who: &Session, restore: &str) -> String {
 
 async fn click_with(app: &SharedApp, who: &Session, restore: &str, body: &Value) -> TestResponse {
     app.post(
-        &format!("/api/v1/namespaces/{NS_A}/restores/{restore}/console-approval"),
+        &format!("/api/v1/workspaces/{NS_A}/restores/{restore}/console-approval"),
         &who.cookie,
         Some(&who.csrf),
         None,
@@ -1648,7 +1648,7 @@ async fn a_cross_site_request_or_a_get_approves_nothing() {
     let sha = stored_sha(&app, &r.confirmation);
     let bob = signed_in(&app, "bob", &["approvers"]);
     let path = format!(
-        "/api/v1/namespaces/{NS_A}/restores/{}/console-approval",
+        "/api/v1/workspaces/{NS_A}/restores/{}/console-approval",
         r.restore
     );
     let body = json!({"confirmationSha256": sha}).to_string();
@@ -1773,7 +1773,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
         },
     );
     let policy = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/approval-policy"))
+        .get(&format!("/api/v1/workspaces/{NS_A}/approval-policy"))
         .await
         .json()["item"]
         .clone();
@@ -1781,7 +1781,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
     assert_eq!(policy["consoleApprovalAvailable"], false, "{policy}");
     let created = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            &format!("/api/v1/workspaces/{NS_A}/restores"),
             Some("p162-local-admin-01"),
             &restore_request("approval-la").to_string(),
         )
@@ -1801,7 +1801,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
     let r = requested(&shared, "alice", "la-click").await;
     let item = app
         .get(&format!(
-            "/api/v1/namespaces/{NS_A}/restores/{}/approval-request",
+            "/api/v1/workspaces/{NS_A}/restores/{}/approval-request",
             r.restore
         ))
         .await
@@ -1813,7 +1813,7 @@ async fn the_local_admin_console_neither_requests_nor_approves_a_two_person_rest
     let clicked = app
         .post(
             &format!(
-                "/api/v1/namespaces/{NS_A}/restores/{}/console-approval",
+                "/api/v1/workspaces/{NS_A}/restores/{}/console-approval",
                 r.restore
             ),
             None,
@@ -1866,7 +1866,7 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
         assert_eq!(approvals_posted(&app.app.fake), before, "{binding}");
         let policy = app
             .get(
-                &format!("/api/v1/namespaces/{NS_A}/approval-policy"),
+                &format!("/api/v1/workspaces/{NS_A}/approval-policy"),
                 &bob.cookie,
             )
             .await
@@ -1902,7 +1902,7 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
     let bob = signed_in(&app, "bob", &["approvers"]);
     let submitted = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/restores/{}/approval", r.restore),
+            &format!("/api/v1/workspaces/{NS_A}/restores/{}/approval", r.restore),
             &bob.cookie,
             Some(&bob.csrf),
             None,
@@ -1921,7 +1921,7 @@ async fn console_approval_exists_only_under_a_two_person_policy_and_takes_no_cou
     assert_eq!(record["failureCode"], "countersignature_not_accepted");
     let policy = app
         .get(
-            &format!("/api/v1/namespaces/{NS_A}/approval-policy"),
+            &format!("/api/v1/workspaces/{NS_A}/approval-policy"),
             &bob.cookie,
         )
         .await

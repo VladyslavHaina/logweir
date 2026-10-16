@@ -24,7 +24,7 @@ use crate::projection;
 use logweir_core::approval_policy::{ApprovalMode, ApprovalRoute};
 
 /// The list route identifier.
-pub const ROUTE_LIST: &str = "GET /api/v1/namespaces/{ns}/approvals";
+pub const ROUTE_LIST: &str = "GET /api/v1/workspaces/{ws}/approvals";
 
 /// `GET .../approvals`.
 pub async fn list(
@@ -90,7 +90,7 @@ pub async fn packet(
 }
 
 /// The policy route identifier.
-pub const ROUTE_POLICY: &str = "GET /api/v1/namespaces/{ns}/approval-policy";
+pub const ROUTE_POLICY: &str = "GET /api/v1/workspaces/{ws}/approval-policy";
 
 /// `GET .../approval-policy` — the namespace's effective approval policy
 /// (D0: "Approver: read effective policy").

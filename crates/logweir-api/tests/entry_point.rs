@@ -166,7 +166,7 @@ async fn a_direct_peer_is_refused_whatever_it_claims() {
     let cookie = app.session_cookie("u-v", &["lw-a-viewers"]);
     let response = get(
         &app,
-        &format!("/api/v1/namespaces/{NS_A}/backups"),
+        &format!("/api/v1/workspaces/{NS_A}/backups"),
         Some(POD_ELSEWHERE),
         &[
             ("cookie", &cookie),
@@ -254,7 +254,7 @@ async fn identity_headers_from_the_trusted_ingress_are_still_not_an_identity() {
     let app = app(true);
     let response = get(
         &app,
-        &format!("/api/v1/namespaces/{NS_A}/backups"),
+        &format!("/api/v1/workspaces/{NS_A}/backups"),
         Some(INGRESS),
         &[
             ("x-forwarded-proto", "https"),
@@ -412,7 +412,7 @@ async fn the_proxy_service_read_is_one_labelled_list_of_serving_addresses() {
     let (_log, _guard) = capture();
     let fake = FakeKube::new();
     seed_ingress(&fake, "10.1.0.7");
-    let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
+    let adapter = logweir_api::kube::KubeAdapter::new(fake.client(), support::INSTALL_NS);
     let addresses = adapter
         .list_service_endpoints(PROXY_NS, PROXY_SERVICE)
         .await
@@ -469,7 +469,7 @@ async fn the_ingress_is_trusted_through_its_service_and_follows_a_restart() {
         },
     );
     let fake = app.app.fake.clone();
-    let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
+    let adapter = logweir_api::kube::KubeAdapter::new(fake.client(), support::INSTALL_NS);
     let cookie = app.session_cookie("u-v", &["lw-a-viewers"]);
     let through = |peer: &'static str| {
         let cookie = cookie.clone();
@@ -540,7 +540,10 @@ async fn a_loop_whose_reads_fail_ages_the_set_out() {
                 .with_timing(every, max_age),
         );
         let task = tokio::spawn(
-            Arc::clone(&proxies).run(logweir_api::kube::KubeAdapter::new(fake.client())),
+            Arc::clone(&proxies).run(logweir_api::kube::KubeAdapter::new(
+                fake.client(),
+                support::INSTALL_NS,
+            )),
         );
         let ip: IpAddr = "10.1.0.7".parse().unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -596,7 +599,7 @@ async fn a_proxy_service_with_more_slices_than_one_page_is_refused() {
             ),
         );
     }
-    let adapter = logweir_api::kube::KubeAdapter::new(fake.client());
+    let adapter = logweir_api::kube::KubeAdapter::new(fake.client(), support::INSTALL_NS);
     assert_eq!(
         adapter
             .list_service_endpoints(PROXY_NS, PROXY_SERVICE)

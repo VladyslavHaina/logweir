@@ -138,7 +138,7 @@ pub struct SessionResponse {
     pub capabilities: Capabilities,
 }
 
-/// `GET /api/v1/namespaces`.
+/// `GET /api/v1/workspaces`.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct NamespaceListResponse {
@@ -312,7 +312,7 @@ impl ConnectionAuthRequest {
     }
 }
 
-/// `POST /api/v1/namespaces/{ns}/connections`.
+/// `POST /api/v1/workspaces/{ws}/connections`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateConnectionRequest {
@@ -470,7 +470,7 @@ pub struct RetentionRequest {
     pub keep_days: Option<i64>,
 }
 
-/// `POST /api/v1/namespaces/{ns}/schedules`.
+/// `POST /api/v1/workspaces/{ws}/schedules`.
 ///
 /// # It creates what the edit route can edit (PLAT-10.1)
 ///
@@ -576,7 +576,7 @@ pub struct CreateScheduleRequest {
     pub suspended: bool,
 }
 
-/// `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension`.
+/// `POST /api/v1/workspaces/{ws}/schedules/{name}:set-suspension`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SetSuspensionRequest {
@@ -1262,7 +1262,7 @@ pub struct TopicMappingRow {
     pub target: String,
 }
 
-/// `POST /api/v1/namespaces/{ns}/restores`.
+/// `POST /api/v1/workspaces/{ws}/restores`.
 ///
 /// `planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of
 /// exactly these bytes and stores them unchanged. It never parses or
@@ -2090,7 +2090,7 @@ pub struct ReadinessRequest {
     pub write_probe: Option<WriteProbeDto>,
 }
 
-/// `POST /api/v1/namespaces/{ns}/destinations`.
+/// `POST /api/v1/workspaces/{ws}/destinations`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CreateDestinationRequest {
@@ -3580,7 +3580,7 @@ pub struct RetryPolicy {
     pub delay_seconds: Option<i64>,
 }
 
-/// `PUT /api/v1/namespaces/{ns}/schedules/{name}` — the editable future policy
+/// `PUT /api/v1/workspaces/{ws}/schedules/{name}` — the editable future policy
 /// (D1 §5.1, §5.6).
 ///
 /// THE WHOLE POLICY, NOT A DIFF. Every mutable field is sent; a field omitted
@@ -3786,7 +3786,7 @@ pub struct ReadinessAcknowledgementRequest {
     pub state: AcknowledgedReadiness,
 }
 
-/// `POST /api/v1/namespaces/{ns}/backups` — "Back up now" and "Run first
+/// `POST /api/v1/workspaces/{ws}/backups` — "Back up now" and "Run first
 /// backup now" (D1 §8.2).
 ///
 /// TWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's
@@ -3845,7 +3845,7 @@ pub struct ScheduleContextView {
     pub active_runs: Vec<ActiveRunView>,
 }
 
-/// `POST /api/v1/namespaces/{ns}/backups`: the created run, and the schedule
+/// `POST /api/v1/workspaces/{ws}/backups`: the created run, and the schedule
 /// it came from.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
