@@ -35,7 +35,8 @@
 //!   `.kbak` decoder with the engine's two appended headers stripped
 //!   (`archived_fingerprints`). Two captures of an unchanged offset are equal
 //!   whatever the engine loses at capture (a `LogAppendTime` batch's append
-//!   time, a repeated header key). A live read is not (rows c17 and c18).
+//!   time). A live read is not (row c17). Since build 5 the engine keeps a
+//!   repeated header key, and a live read agrees (row c18).
 //! * The PRODUCT's own DescribeTopics read (PROD-01.4a, `ClusterReader::
 //!   topic_ids`) must return the same ID as the CLI every time the ground
 //!   truth is read, so every row also proves the product reads Kafka's ID.
@@ -62,8 +63,8 @@ use std::collections::BTreeMap;
 // ===========================================================================
 
 /// Log start offset and high watermark of one partition, read
-/// READ_UNCOMMITTED. The engine captures READ_UNCOMMITTED, so the marks it is
-/// compared with must be read the same way (row c11).
+/// READ_UNCOMMITTED in every capture: marks of two isolations compared across
+/// runs read an open transaction as a regression (row c11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Marks {
     log_start: i64,
@@ -1592,7 +1593,7 @@ mod live {
     }
 
     /// A SOURCE read at EXACTLY `offset`, READ_UNCOMMITTED: the variant the
-    /// decision rejects, kept to measure its false positives (c17, c18). The
+    /// decision rejects, kept to measure its false positives (c17). The
     /// first record returned counts only if it carries the requested offset.
     fn source_probe(topic: &str, partition: i32, offset: i64) -> Probe {
         let c = consumer(Isolation::ReadUncommitted);
@@ -2682,10 +2683,12 @@ mod live {
     }
 
     /// c11 (negative control): an open transaction during and after both
-    /// captures. READ_UNCOMMITTED marks agree with what the engine archived;
-    /// librdkafka's default READ_COMMITTED marks stop at the last stable
-    /// offset and read as a regression, which is why the rule requires the
-    /// former.
+    /// captures. The engine archives committed records only, up to the last
+    /// stable offset (build 5, PROD-00.3a), so the open transaction's records
+    /// are not in the archive and the capture agrees with itself under either
+    /// isolation. Across runs, READ_COMMITTED marks read against the previous
+    /// capture's READ_UNCOMMITTED ones stop at the last stable offset and read
+    /// as a regression, which is why the rule reads every mark the same way.
     #[test]
     fn c11_an_open_transaction_needs_read_uncommitted_marks() {
         let mut c = Case::start("c11");
@@ -2711,22 +2714,22 @@ mod live {
             .clone()
             .expect("archived");
         assert_eq!(
-            a.last_offset, 7,
-            "the engine archives the open transaction's records"
+            a.last_offset, 4,
+            "the engine archives committed records only: none of the open transaction's"
         );
         assert_eq!(
             run1.rc_after[&0].high_watermark, 5,
             "READ_COMMITTED stops at the LSO"
         );
-        // Within the run: READ_COMMITTED marks make the capture contradict
-        // itself.
+        // Within the run: the archive ends below the LSO, so READ_COMMITTED
+        // marks no longer contradict the capture.
         let mut rc_capture = run1.capture.clone();
         rc_capture.partitions[0].before = run1.rc_before[&0];
         rc_capture.partitions[0].after = run1.rc_after[&0];
         let rc_intra = intra_run(&rc_capture);
         assert!(
-            !rc_intra.is_empty(),
-            "READ_COMMITTED marks flag the capture"
+            rc_intra.is_empty(),
+            "a committed-only archive agrees with READ_COMMITTED marks: {rc_intra:?}"
         );
         c.note(
             "intra_run_read_committed",
@@ -2935,11 +2938,12 @@ mod live {
     }
 
     /// c18 (review H1): an unchanged topic whose tail records repeat a header
-    /// key. The engine's decoder keeps one entry per key (first position,
-    /// last value); librdkafka returns every header. Archive against archive
-    /// is `continuous`; a SOURCE read is a false `break`, pinned here.
+    /// key. Since build 5 (PROD-00.3e) the engine keeps every header in order,
+    /// as librdkafka returns them, so archive against archive is `continuous`
+    /// and a SOURCE read now agrees (it was a false `break` while the engine
+    /// kept one entry per key).
     #[test]
-    fn c18_a_repeated_header_key_breaks_a_source_read_but_not_the_rule() {
+    fn c18_a_repeated_header_key_is_kept_so_a_source_read_agrees() {
         let mut c = Case::start("c18");
         c.create(1, PLAIN);
         let mut records = recs(1, 10, "g1", now_ms() - 60_000);
@@ -2967,16 +2971,15 @@ mod live {
                 .map(|(k, _)| k.as_str())
                 .collect()
         };
-        assert_eq!(own, vec!["h", "x"], "the archive keeps one entry per key");
+        assert_eq!(
+            own,
+            vec!["h", "x", "h"],
+            "the archive keeps every header, in order"
+        );
         c.note("source_at_9", at9);
         c.note("archived_own_header_keys_at_9", json!(own));
         let m = c.classify(&run1, &run2);
-        assert_eq!(
-            m.source.verdict,
-            Verdict::Break,
-            "the rejected source read reports a false break here: {:?}",
-            m.source.signals
-        );
+        assert_source_agrees(&m);
         c.finish(&run1, &run2, &m, Verdict::Continuous);
         assert_modes(&m, Verdict::Continuous, Verdict::Continuous, &run1, &run2);
     }
