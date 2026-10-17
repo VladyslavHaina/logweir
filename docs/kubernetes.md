@@ -1519,6 +1519,11 @@ current interval slot serves it. An `Index` sync walks the day shards of
 `logweir/catalog/v1/log/` newest first, down to the archive's oldest day (at most
 3,660 shards). A `Full` rescan pages `logweir/catalog/v1/points/` and resumes
 after `status.cursor.rescanStartAfter`.
+The catalog lives at the bucket root, so it holds the points of every
+destination that shares the bucket; a sync counts and lists only the points
+this destination can restore, those whose manifest is
+`<prefix>/<set>/manifest.json` under its own prefix (an empty prefix keeps
+every point).
 
 | Bound | Value |
 |---|---|
