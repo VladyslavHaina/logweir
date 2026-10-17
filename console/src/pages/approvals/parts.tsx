@@ -43,6 +43,7 @@ import { Ident } from "../../components/Ident";
 import { When } from "../../components/When";
 import { ApiError } from "../../api/client";
 import { ErrorText, Prose } from "../../components/Prose";
+import { planTargetRegistry } from "../restores/words";
 
 export function Term({ term, children }: { term: string; children: ReactNode }) {
   return (
@@ -311,9 +312,10 @@ export function Instant({ value }: { value: string | null | undefined }) {
  * subsets number by number), the verification and where the evidence goes.
  * Never a slice: the topic list scrolls inside the card and a long name wraps.
  */
-export function ScopeCard({ scope }: { scope: ApprovalScope }) {
+export function ScopeCard({ scope, planBytes }: { scope: ApprovalScope; planBytes?: string | null }) {
   const original = scope.topics.some((t) => t.originalName);
   const t = scope.target;
+  const registry = planTargetRegistry(planBytes);
   return (
     <Card id="approval-scope">
       <CardHeader>
@@ -358,6 +360,27 @@ export function ScopeCard({ scope }: { scope: ApprovalScope }) {
           <Term term="Topic configuration">
             <span id="scope-topic-configuration">{topicConfigurationWords(t.topicConfiguration)}</span>
           </Term>
+          {/* DUI-61: the one write outside Kafka, from the plan bytes this page hashed. */}
+          {typeof planBytes === "string" && (
+            <Term term="Schema Registry">
+              <span id="scope-schema-registry" className="lw-break">
+                {registry ? (
+                  <>
+                    <code className="lw-mono">{registry.url}</code>
+                    {registry.username && (
+                      <>
+                        {" "}
+                        as <code className="lw-mono">{registry.username}</code>
+                      </>
+                    )}
+                    : the run imports into it the schemas the restored records reference, keeping their IDs.
+                  </>
+                ) : (
+                  "None named: the run writes nothing outside Kafka."
+                )}
+              </span>
+            </Term>
+          )}
           <Term term="Verification">
             {scope.verification.coverage} over <Instant value={scope.verification.windowStart} /> to <Instant value={scope.verification.windowEnd} />
           </Term>
