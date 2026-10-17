@@ -780,7 +780,11 @@ Each is exit 2 with the field named.
 - **The trusted entry point.** With `requireTrustedProxy: true`, a socket peer
   that is not a trusted proxy is `421` (audit `untrusted_entry_point`, note
   `peerNotTrusted`), and so is a trusted peer without exactly one
-  `X-Forwarded-Proto: https` (`forwardedProtoNotHttps`). The probes are exempt.
+  `X-Forwarded-Proto: https` (`forwardedProtoNotHttps`). While the
+  `trustedProxyService` endpoints could not be read for 30 s, a peer outside
+  `trustedProxyCidrs` is refused `503 kubernetes_unavailable` instead (note
+  `trustedProxyUnconfirmed`): the service cannot confirm its entry point right
+  now. The probes are exempt.
   The range must be the ingress controller's own pods: kube-proxy keeps a pod's
   source address through a ClusterIP.
 - **Readiness** starts false and turns true once Kubernetes answers and the

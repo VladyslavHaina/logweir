@@ -486,9 +486,21 @@ async fn the_ingress_is_trusted_through_its_service_and_follows_a_restart() {
     };
 
     assert!(!proxies.ready(), "not ready before the Service is read");
-    through("10.1.0.7")
-        .await
-        .assert_problem(421, "misdirected_request");
+    // DUI-53: an unread (or stale) set is still refused, but with its own
+    // cause: the service could not confirm its entry point, not "you came in
+    // the wrong way".
+    let unconfirmed = through("10.1.0.7").await;
+    unconfirmed.assert_problem(503, "kubernetes_unavailable");
+    assert!(
+        unconfirmed
+            .text()
+            .contains("could not confirm its entry point right now"),
+        "{}",
+        unconfirmed.text()
+    );
+    assert!(!unconfirmed.text().contains("trusted HTTPS entry point"));
+    let (_, notes) = log.record(&unconfirmed.header("x-request-id").unwrap());
+    assert_eq!(notes["entryPoint"], "trustedProxyUnconfirmed");
 
     seed_ingress(&fake, "10.1.0.7");
     assert_eq!(proxies.refresh(&adapter).await.unwrap(), Some(2));
@@ -496,8 +508,16 @@ async fn the_ingress_is_trusted_through_its_service_and_follows_a_restart() {
     let served = through("10.1.0.7").await;
     assert_eq!(served.status, 200, "{}", served.text());
 
+    // Control: with a fresh set, a real wrong-entry peer keeps the old cause.
     let neighbour = through("10.1.0.50").await;
     neighbour.assert_problem(421, "misdirected_request");
+    assert!(
+        neighbour
+            .text()
+            .contains("accepts requests only through its trusted HTTPS entry point"),
+        "{}",
+        neighbour.text()
+    );
     let (_, notes) = log.record(&neighbour.header("x-request-id").unwrap());
     assert_eq!(notes["entryPoint"], "peerNotTrusted");
     through("10.1.0.9")
