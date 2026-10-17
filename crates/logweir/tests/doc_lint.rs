@@ -2384,6 +2384,23 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         ("an interrupted restore", "`<bucket>/logweir/drills/*`"),
         // OD-23 (item 145): the verifier that reads the new blocks.
         ("format steps", "`verify_scorecard.py` 1.35.0"),
+        // DUI-51 (item 146): the key a catalog keeps a point by.
+        ("a catalog lists its prefix", "`<prefix>/<set>/manifest.json`"),
+        // D4 (item 147): the readers' new word.
+        ("registry captured", "`schema-dependent, registry captured`"),
+        // SEC-1 (item 148): the field the approver's line is read from.
+        ("the approver's registry", "`scope.target.schemaRegistry`"),
+        // DUI-57 (item 149): what every unsafe request now sends.
+        ("cancel and clean up", "`Content-Type: application/json`"),
+        // DUI-55 (item 150): the status field that keeps a verdict pending.
+        (
+            "a retried evidence read",
+            "`status.evidence.observation.retryAfter`",
+        ),
+        // DUI-53 (item 151): the audit note of an unconfirmed entry point.
+        ("sign-out and the entry point", "`trustedProxyUnconfirmed`"),
+        // DUI-66 (item 152): the rotation that wrote no Secret.
+        ("smaller console fixes", "No Secret was written"),
     ];
     assert_eq!(
         items.len(),
