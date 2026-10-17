@@ -29,11 +29,17 @@ export function setCsrfToken(token: string | null | undefined): void {
   csrfToken = token ?? "";
 }
 
-/** `X-CSRF-Token` on every unsafe request, and on nothing else. */
+/**
+ * `X-CSRF-Token` on every unsafe request, and on nothing else. And DUI-57: every unsafe
+ * request says `Content-Type: application/json`, which the API requires of each one,
+ * including the commands that carry no body (Cancel, Clean up, a check's or a
+ * discovery's cancel); openapi-fetch sets it only when there is a body.
+ */
 export const csrf: Middleware = {
   onRequest({ request }) {
-    if (!SAFE_METHODS.has(request.method) && csrfToken) {
-      request.headers.set("X-CSRF-Token", csrfToken);
+    if (!SAFE_METHODS.has(request.method)) {
+      if (csrfToken) request.headers.set("X-CSRF-Token", csrfToken);
+      if (!request.headers.has("Content-Type")) request.headers.set("Content-Type", "application/json");
     }
     return request;
   },

@@ -46,6 +46,21 @@ describe("the CSRF token", () => {
     expect(seen.every((r) => r.url.startsWith(`${BASE}/api/v1/`))).toBe(true);
   });
 
+  it("DUI-57: a command with no body (Cancel, Clean up, a check's or a discovery's cancel) still says Content-Type: application/json", async () => {
+    setCsrfToken("tok-123");
+    const { seen, client } = recording(() => json(200, { item: {}, requestId: "r" }));
+    const header = { Origin: BASE };
+    await client.POST("/api/v1/workspaces/{ws}/restores/{name}/cancel", { params: { path: { ws: "dev", name: "rst-a" }, header } });
+    await client.POST("/api/v1/workspaces/{ws}/restores/{name}/cleanup", { params: { path: { ws: "dev", name: "rst-a" }, header } });
+    await client.POST("/api/v1/workspaces/{ws}/preflights/{id}:cancel", { params: { path: { ws: "dev", id: "pf-a" }, header } });
+    await client.POST("/api/v1/workspaces/{ws}/topic-discoveries/{id}:cancel", { params: { path: { ws: "dev", id: "td-a" }, header } });
+    expect(seen).toHaveLength(4);
+    for (const r of seen) expect([r.url, r.headers.get("content-type")]).toEqual([r.url, "application/json"]);
+    // Control: a read carries none.
+    await client.GET("/api/v1/workspaces/{ws}/backups", { params: { path: { ws: "dev" } } });
+    expect(seen[4]!.headers.has("content-type")).toBe(false);
+  });
+
   it("is absent while the session has none (localAdmin)", async () => {
     setCsrfToken(null);
     const { seen, client } = recording(() => new Response(null, { status: 204 }));

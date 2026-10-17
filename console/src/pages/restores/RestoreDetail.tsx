@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Alert,
+  AlertActionCloseButton,
   Breadcrumb,
   BreadcrumbItem,
   Button,
@@ -98,7 +99,7 @@ import {
   restoreSchemasWords,
 } from "./words";
 import "./restores.css";
-import { Prose } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 const STAGES: { stage: OperationStage; title: string; desc: string }[] = [
   { stage: "admission", title: "Admitted", desc: "Plan checked and approved" },
@@ -460,7 +461,12 @@ function Detail({ ws, name }: { ws: string; name: string }) {
               {cleanupLine && <p id="restore-cleanup-state">{cleanupLine}</p>}
             </Alert>
           )}
-          {act.isError && <ErrorState error={act.error} onRetry={() => act.reset()} />}
+          {/* DUI-57: a refused Cancel or Clean up is the action's answer, not a page that failed to load. */}
+          {act.isError && (
+            <Alert variant="danger" isInline title={`${act.variables === "cleanup" ? "Clean up" : "Cancel"} was not done`} id="restore-action-refused" actionClose={<AlertActionCloseButton onClose={() => act.reset()} />}>
+              <ErrorText error={act.error} />
+            </Alert>
+          )}
           {failed && (
             <Alert variant="danger" isInline title={`This restore ${r.operation.state === "refused" ? "was refused" : "failed"}${r.operation.stateReason ? `: ${r.operation.stateReason}` : ""}`}>
               {refusalSentence(op) && <p className="lw-break">{refusalSentence(op)}</p>}
