@@ -1105,6 +1105,50 @@ fn read_only(mode: &str) -> bool {
     matches!(mode, "READONLY" | "READONLY_OVERRIDE")
 }
 
+/// The modes of the subjects an import would write, read before any write:
+/// each subject's own mode (`None` when it inherits the registry's). A
+/// subject that is, or inherits, `READONLY` or `READONLY_OVERRIDE` is
+/// [`ImportRefusal::ReadOnly`]. Reads only, so the restore's readiness check
+/// (`target.schemas`) asks the same question with the same rule (DUI-58).
+///
+/// # Errors
+///
+/// [`ImportRefusal::ReadOnly`], [`ImportRefusal::CannotKeepIds`] (the registry
+/// does not answer its mode API with a mode) or [`ImportRefusal::Unreachable`].
+pub fn writable_modes<'a>(
+    rest: &mut dyn Rest,
+    subjects: &[&'a str],
+) -> Result<BTreeMap<&'a str, Option<String>>, ImportRefusal> {
+    let mut before: BTreeMap<&str, Option<String>> = BTreeMap::new();
+    let Some(first) = subjects.first() else {
+        return Ok(before);
+    };
+    // The registry's own mode: IMPORT needs the mode API, so a registry that
+    // does not answer it with a mode cannot keep IDs.
+    let (status, body) = call(rest, "GET", "/mode", None)?;
+    let global = match (status, body.get("mode").and_then(Value::as_str)) {
+        (200, Some(mode)) => mode.to_string(),
+        _ => {
+            return Err(ImportRefusal::CannotKeepIds {
+                subject: (*first).to_string(),
+                detail: format!("GET /mode answered {status} {body}, not a mode"),
+            });
+        }
+    };
+    for subject in subjects {
+        let own = own_mode(rest, subject)?;
+        let mode = own.as_deref().unwrap_or(&global);
+        if read_only(mode) {
+            return Err(ImportRefusal::ReadOnly {
+                subject: (*subject).to_string(),
+                mode: mode.to_string(),
+            });
+        }
+        before.insert(subject, own);
+    }
+    Ok(before)
+}
+
 /// Register every [`Class::Import`] entry keeping its ID and version.
 ///
 /// First, before any write, each subject to import is read for its mode: one
@@ -1139,31 +1183,8 @@ pub fn import(
         return Ok(report);
     }
     // Every subject's mode, before any write.
-    // The registry's own mode: IMPORT needs the mode API, so a registry that
-    // does not answer it with a mode cannot keep IDs.
-    let (status, body) = call(rest, "GET", "/mode", None)?;
-    let global = match (status, body.get("mode").and_then(Value::as_str)) {
-        (200, Some(mode)) => mode.to_string(),
-        _ => {
-            let first = last.keys().next().expect("a subject to import");
-            return Err(ImportRefusal::CannotKeepIds {
-                subject: (*first).to_string(),
-                detail: format!("GET /mode answered {status} {body}, not a mode"),
-            });
-        }
-    };
-    let mut before: BTreeMap<&str, Option<String>> = BTreeMap::new();
-    for subject in last.keys() {
-        let own = own_mode(rest, subject)?;
-        let mode = own.as_deref().unwrap_or(&global);
-        if read_only(mode) {
-            return Err(ImportRefusal::ReadOnly {
-                subject: (*subject).to_string(),
-                mode: mode.to_string(),
-            });
-        }
-        before.insert(subject, own);
-    }
+    let subjects: Vec<&str> = last.keys().copied().collect();
+    let before = writable_modes(rest, &subjects)?;
     let mut importing: BTreeSet<&str> = BTreeSet::new();
     let mut not_restored: Vec<String> = Vec::new();
     let result = (|| {

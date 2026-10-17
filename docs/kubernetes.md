@@ -903,8 +903,10 @@ connection's own Secret. TLS trusts the public roots plus `auth.tlsCa` when set.
   archive-read grant reads `logweir/backups/` for it); a set with no claim
   imports nothing (`noSnapshot`).
 - **Checks:** `registry.reachable` (connection test and backup readiness,
-  advisory) and `target.schemas` (restore readiness, blocking) are listed only for
-  a connection that names a registry.
+  advisory) and `target.schemas` (restore readiness, blocking; it reads each
+  subject's mode with the run's rule, so a read-only one is
+  `SchemaRegistryReadOnly` before the run) are listed only for a connection that
+  names a registry.
 - The registry Secret carries the connection's `logweir-binding` (it covers the
   registry URL and username) and is projected as
   `LOGWEIR_{SOURCE,TARGET}_REGISTRY_PASSWORD`, beside

@@ -162,6 +162,7 @@ fn a_code_newer_than_the_oldest_controller_is_plan_gated_or_falls_back() {
         (CheckCode::SchemasImportable, NotAsked(REGISTRY)),
         (CheckCode::SchemaConflict, NotAsked(REGISTRY)),
         (CheckCode::SchemaSnapshotInvalid, NotAsked(REGISTRY)),
+        (CheckCode::SchemaRegistryReadOnly, NotAsked(REGISTRY)),
     ];
     let listed: std::collections::BTreeSet<CheckCode> = newer.iter().map(|(c, _)| *c).collect();
     assert_eq!(listed.len(), newer.len(), "a code is listed twice");

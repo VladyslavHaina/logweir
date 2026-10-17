@@ -515,7 +515,20 @@ pub fn target_schemas(
         .copied()
         .collect();
     let entries = sr::closure(snapshot, &needed);
-    match sr::classify(&mut client, &entries) {
+    // DUI-58: the run reads every subject's mode before it writes and refuses
+    // a read-only one; the preview asks the same question, with the same rule.
+    let classified = sr::classify(&mut client, &entries).and_then(|classes| {
+        let mut subjects: Vec<&str> = entries
+            .iter()
+            .zip(&classes)
+            .filter(|(_, c)| **c == sr::Class::Import)
+            .map(|(v, _)| v.subject.as_str())
+            .collect();
+        subjects.sort_unstable();
+        subjects.dedup();
+        sr::writable_modes(&mut client, &subjects).map(|_| classes)
+    });
+    match classified {
         Ok(classes) => {
             let import = classes.iter().filter(|c| **c == sr::Class::Import).count();
             ready(id, CheckCode::SchemasImportable, now).with_message(&format!(
@@ -531,6 +544,11 @@ pub fn target_schemas(
         Err(e @ sr::ImportRefusal::Conflict { .. }) => refuse(
             CheckState::NotReady,
             CheckCode::SchemaConflict,
+            e.to_string(),
+        ),
+        Err(e @ sr::ImportRefusal::ReadOnly { .. }) => refuse(
+            CheckState::NotReady,
+            CheckCode::SchemaRegistryReadOnly,
             e.to_string(),
         ),
         Err(e) => refuse(

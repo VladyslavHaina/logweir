@@ -843,3 +843,33 @@ fn a_referenced_subject_is_imported_whole() {
         .collect();
     assert!(got.contains(&("customer".to_string(), 2)), "{got:?}");
 }
+
+/// DUI-58: the readiness check's question, `writable_modes`, is the import's
+/// own rule: a read-only subject (its own mode or the registry's) is
+/// `SchemaRegistryReadOnly` and nothing is written; a writable one answers
+/// its own mode.
+#[test]
+fn dui58_the_mode_read_the_preview_shares_refuses_a_read_only_subject_and_writes_nothing() {
+    use logweir_core::schema_registry::writable_modes;
+    for (own, global) in [(Some("READONLY"), "READWRITE"), (None, "READONLY_OVERRIDE")] {
+        let mut target = Fake::new(Kind::KeepsIds);
+        target.global_mode = global.into();
+        if let Some(mode) = own {
+            target.modes.insert("customer".into(), mode.into());
+        }
+        let err = writable_modes(&mut target, &["customer"]).unwrap_err();
+        assert_eq!(
+            err.reason(),
+            logweir_core::schema_registry::READ_ONLY,
+            "{err}"
+        );
+        assert!(target.writes.is_empty(), "{:?}", target.writes);
+    }
+    // Control: writable, inherited or its own.
+    let mut target = Fake::new(Kind::KeepsIds);
+    target.modes.insert("customer".into(), "READWRITE".into());
+    let modes = writable_modes(&mut target, &["customer", "orders-value"]).unwrap();
+    assert_eq!(modes.get("customer"), Some(&Some("READWRITE".to_string())));
+    assert_eq!(modes.get("orders-value"), Some(&None));
+    assert!(target.writes.is_empty());
+}

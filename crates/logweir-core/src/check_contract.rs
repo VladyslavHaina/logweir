@@ -409,11 +409,13 @@ closed_vocabulary! {
         // PROD-03.1/03.2: the registry refused the connection's registry
         // credential; did not answer (unknown); a needed ID or subject-version
         // is held in the target with other content; the point's snapshot is
-        // not the one its receipt names.
+        // not the one its receipt names; a subject to import is, or inherits,
+        // read-only (the run's own `SchemaRegistryReadOnly`, DUI-58).
         RegistryUnauthorized => "RegistryUnauthorized",
         RegistryUnreachable => "RegistryUnreachable",
         SchemaConflict => "SchemaConflict",
         SchemaSnapshotInvalid => "SchemaSnapshotInvalid",
+        SchemaRegistryReadOnly => "SchemaRegistryReadOnly",
         // PROD-04.2 §3.8: the `Restore` a switchover readiness check names is
         // not there (or not that UID), or did not succeed with a verified
         // scorecard; its evidence or mapping did not verify (the message

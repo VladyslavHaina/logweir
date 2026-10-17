@@ -540,6 +540,11 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              of their subject-versions, with other content. Logweir never rewrites record bytes, \
              so restore into a registry that holds none of these schemas, or the source's own."
         }
+        CheckCode::SchemaRegistryReadOnly => {
+            "A subject this restore would import is read-only in the target registry (its own \
+             mode or the registry's), so the run would be refused before any write. Restore into \
+             a registry whose subjects accept writes, or have its administrator change the mode."
+        }
         CheckCode::SchemaSnapshotInvalid => {
             "The recovery point's schema snapshot is missing from the archive, is not the one \
              its signed receipt names, or comes from a receipt this restore cannot verify (a \
