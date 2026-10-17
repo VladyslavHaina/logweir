@@ -7,6 +7,7 @@ import { ApiError, LIST_PAGE_SIZE, LocalRefusal, api, call, createHeaders, listA
 import { keys, useBackup, useBackups, useDestinations } from "./queries";
 import { useCan } from "./session";
 import type { components } from "./schema";
+import { viewIsUsable } from "../pages/catalog/model";
 
 type S = components["schemas"];
 
@@ -142,8 +143,9 @@ export function useCatalog(ws: string, name: string) {
     enabled: useCan(ws, "catalogs"),
     queryFn: async ({ signal }) =>
       (await call(() => api.GET("/api/v1/workspaces/{ws}/catalogs/{name}", { params: { path: { ws, name } }, signal }))).item,
-    // DUI-54.2: a view not built yet (a just-connected catalog) or aged out is re-read until a sync builds it.
-    refetchInterval: (q) => (q.state.data?.viewExpired ? VIEW_MISSING_MS : false),
+    // DUI-54.2, DUI-65: a view that is not Ready (a just-connected catalog has no
+    // `viewExpiresAt`, so `viewExpired` is false) or aged out is re-read until a sync builds it.
+    refetchInterval: (q) => (q.state.data && (q.state.data.viewExpired || !viewIsUsable(q.state.data)) ? VIEW_MISSING_MS : false),
     retry: (count, error) => !notFound(error) && count < 2,
   });
 }
@@ -177,12 +179,15 @@ export function useNewestCatalogPoints(ws: string, catalogs: Catalog[] | undefin
   return results.flatMap((r, i) => (r.data ? [{ catalog: wanted[i]!.name, point: r.data }] : []));
 }
 
-/** One bounded page of the catalog's view at a time (200 points), the next only when asked for. */
-export function useCatalogPoints(ws: string, name: string, selectableOnly: boolean, enabled = true) {
+/**
+ * One bounded page of the catalog's view at a time (200 points), the next only when asked for.
+ * `syncedAt` keys the list (DUI-65): a sync that publishes a new view is read afresh.
+ */
+export function useCatalogPoints(ws: string, name: string, selectableOnly: boolean, syncedAt: string | null | undefined, enabled = true) {
   const readable = useCan(ws, "catalogs");
   return useInfiniteQuery({
     enabled: enabled && readable,
-    queryKey: ["points", ws, name, selectableOnly ? "selectable" : "all"],
+    queryKey: ["points", ws, name, selectableOnly ? "selectable" : "all", syncedAt ?? null],
     initialPageParam: undefined as string | undefined,
     queryFn: async ({ pageParam, signal }) =>
       call(() =>

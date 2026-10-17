@@ -1,0 +1,38 @@
+{
+  "item": {
+    "name": "primary",
+    "namespace": "logweir-system",
+    "uid": "catalog-primary-uid",
+    "generation": 1,
+    "createdAt": "2026-09-15T10:00:00Z",
+    "destinationRef": {
+      "name": "dest-a"
+    },
+    "intervalSeconds": 3600,
+    "mode": "Index",
+    "deepCheck": "ManifestDigest",
+    "viewLimit": 4,
+    "observedGeneration": 1,
+    "viewExpired": false,
+    "counts": {},
+    "truncated": true,
+    "viewPoints": 0,
+    "lastSync": {},
+    "conditions": [
+      {
+        "type": "Ready",
+        "status": "Unknown",
+        "reason": "NeverSynced",
+        "message": "no sync has published a view yet; the durable catalog in object storage is unaffected",
+        "lastTransitionTime": "2026-10-17T06:58:52Z"
+      },
+      {
+        "type": "Synced",
+        "status": "Unknown",
+        "reason": "SyncInProgress",
+        "message": "sync Job lwcat-primary-s1 was created",
+        "lastTransitionTime": "2026-10-17T06:58:52Z"
+      }
+    ]
+  }
+}
