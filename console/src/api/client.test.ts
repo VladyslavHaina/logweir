@@ -2,6 +2,7 @@
 // error state can show, every page of a list, the bounded session read, the sign-in hand-over.
 import { afterEach, describe, expect, it } from "vitest";
 import { ApiError, LocalRefusal, call, listAll, makeClient, outcomeUnknown, readSession, setCsrfToken, signInHref, signOut } from "./client";
+import csrfRefusal from "../../fixtures/console/problem-csrf.json";
 
 const BASE = "http://127.0.0.1:8484";
 
@@ -59,6 +60,53 @@ describe("the CSRF token", () => {
     // Control: a read carries none.
     await client.GET("/api/v1/workspaces/{ws}/backups", { params: { path: { ws: "dev" } } });
     expect(seen[4]!.headers.has("content-type")).toBe(false);
+  });
+
+  // DUI-63. The server below checks the token as the API does: an unsafe request must carry
+  // the CURRENT session's token, and a refusal is the API's own document (problem-csrf.json,
+  // which session_boundary.rs's DUI-63 row asserts the API sends).
+  function renewedSession(current: { token: string }, sessionToken = () => current.token) {
+    return recording((r) => {
+      if (r.method === "GET" && r.url.endsWith("/api/v1/session")) return json(200, { csrfToken: sessionToken() });
+      if (r.method !== "GET" && r.headers.get("x-csrf-token") !== current.token) return json(403, { ...csrfRefusal, requestId: "r" }, "application/problem+json");
+      return r.url.endsWith("/logout") ? new Response(null, { status: 204 }) : json(200, { item: {}, requestId: "r" });
+    });
+  }
+
+  it("DUI-63: after a sign-in in another tab, the first tab re-reads the token once and signs out", async () => {
+    setCsrfToken("tok-tab-one");
+    const { seen, client } = renewedSession({ token: "tok-renewed" });
+    await signOut(client);
+    expect(seen.map((r) => [r.method, r.url.replace(BASE, ""), r.headers.get("x-csrf-token")])).toEqual([
+      ["POST", "/api/v1/session/logout", "tok-tab-one"],
+      ["GET", "/api/v1/session", null],
+      ["POST", "/api/v1/session/logout", "tok-renewed"],
+    ]);
+    // Every unsafe request does the same, and the next one carries the new token at once.
+    setCsrfToken("tok-tab-one");
+    const other = renewedSession({ token: "tok-renewed" });
+    const cancel = () => other.client.POST("/api/v1/workspaces/{ws}/restores/{name}/cancel", { params: { path: { ws: "dev", name: "rst-a" }, header: { Origin: BASE } } });
+    expect((await cancel()).response.status).toBe(200);
+    expect((await cancel()).response.status).toBe(200);
+    expect(other.seen.map((r) => r.method)).toEqual(["POST", "GET", "POST", "POST"]);
+  });
+
+  it("DUI-63 control: a CSRF refusal the re-read cannot cure is the caller's, after one re-read", async () => {
+    setCsrfToken("tok-tab-one");
+    // The session still names the stale token: no second send.
+    const stale = renewedSession({ token: "tok-renewed" }, () => "tok-tab-one");
+    const error = await signOut(stale.client).catch((e) => e);
+    expect([error instanceof ApiError, error.status, error.code]).toEqual([true, 403, "forbidden"]);
+    expect(stale.seen.map((r) => r.method)).toEqual(["POST", "GET"]);
+    // A token the server still refuses: one retry, then the refusal.
+    setCsrfToken("tok-tab-one");
+    const refused = renewedSession({ token: "tok-server" }, () => "tok-other");
+    expect(await signOut(refused.client).catch((e) => e.status)).toBe(403);
+    expect(refused.seen.map((r) => r.method)).toEqual(["POST", "GET", "POST"]);
+    // Another 403 is never retried.
+    const forbidden = recording(() => problem(403, "workspace_forbidden", "team-z is not granted to you."));
+    await forbidden.client.POST("/api/v1/workspaces/{ws}/restores/{name}/cancel", { params: { path: { ws: "team-z", name: "rst-a" }, header: { Origin: BASE } } });
+    expect(forbidden.seen).toHaveLength(1);
   });
 
   it("is absent while the session has none (localAdmin)", async () => {

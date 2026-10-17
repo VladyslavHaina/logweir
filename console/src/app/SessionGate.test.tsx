@@ -8,6 +8,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { RouterProvider } from "@tanstack/react-router";
 import localAdmin from "../../fixtures/console/session.json";
 import viewer from "../../fixtures/console/session-viewer.json";
+import csrfRefusal from "../../fixtures/console/problem-csrf.json";
 import { ApiError, api, readSession } from "../api/client";
 import type { Session } from "../api/types";
 import { createConsoleRouter } from "../router";
@@ -157,6 +158,18 @@ describe("signed in", () => {
     expect(await screen.findByRole("heading", { name: "No workspace is granted to you" })).toBeTruthy();
     expect(screen.getByText("Dana Viewer")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
+  });
+
+  it("DUI-63: a refused sign-out is said, and the page stays as the signed-in person's", async () => {
+    read.mockResolvedValue({ ...viewer, workspaces: [] } as unknown as Session);
+    const post = vi.spyOn(api, "POST").mockResolvedValue({ response: new Response(null, { status: 403 }), error: { ...csrfRefusal, requestId: "r" } } as never);
+    renderAt("/");
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    const said = await screen.findByRole("alert");
+    expect(said.textContent).toMatch(/^Not signed out: the service refused \(Unsafe requests must carry the session's synchronizer token.*You are still signed in/);
+    expect(screen.getByRole("heading", { name: "No workspace is granted to you" })).toBeTruthy();
+    expect(post).toHaveBeenCalledTimes(1);
+    post.mockRestore();
   });
 });
 

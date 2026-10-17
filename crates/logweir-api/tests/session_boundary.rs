@@ -519,6 +519,47 @@ async fn logout_clears_the_session_and_needs_the_synchronizer_token() {
     assert!(!cleared.to_ascii_lowercase().contains("domain="));
 }
 
+/// **DUI-63: a session renewed in another tab refuses the first tab's token,
+/// and the token its own `GET /api/v1/session` names signs it out.**
+///
+/// The refusal is the one the console's client keys its single re-read on:
+/// its body, less the request id, is `console/fixtures/console/problem-csrf.json`,
+/// which the console's DUI-63 row answers with.
+#[tokio::test]
+async fn dui63_a_renewed_session_refuses_the_old_token_and_signs_out_with_its_own() {
+    let app = app();
+    let first = app.session_cookie_with("sid-tab-one".into(), "u-op", &["lw-a-operators"], 900);
+    let old = app.get("/api/v1/session", &first).await.json()["csrfToken"]
+        .as_str()
+        .expect("a token")
+        .to_string();
+    // Signing in again in another tab replaces the cookie: a new session id.
+    let renewed = app.session_cookie_with("sid-tab-two".into(), "u-op", &["lw-a-operators"], 900);
+
+    let refused = Raw::post("/api/v1/session/logout")
+        .header("cookie", &renewed)
+        .header("x-csrf-token", &old)
+        .send(&app)
+        .await;
+    refused.assert_problem(403, "forbidden");
+    assert!(refused.header("set-cookie").is_none());
+    let mut body = refused.json();
+    body.as_object_mut().expect("a problem").remove("requestId");
+    assert_eq!(body, support::fixture("console/problem-csrf.json"));
+
+    let token = app.get("/api/v1/session", &renewed).await.json()["csrfToken"]
+        .as_str()
+        .expect("a token")
+        .to_string();
+    assert_ne!(token, old, "a renewed session has a new token");
+    let done = Raw::post("/api/v1/session/logout")
+        .header("cookie", &renewed)
+        .header("x-csrf-token", &token)
+        .send(&app)
+        .await;
+    assert_eq!(done.status.as_u16(), 204);
+}
+
 /// **D0's "unauthenticated SSE is refused".**
 ///
 /// An anonymous caller never receives a `text/event-stream` body, the other
