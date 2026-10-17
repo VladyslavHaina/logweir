@@ -52,7 +52,8 @@ export function RotateAccess({
   ws: string;
   destination: Destination;
   onClose: () => void;
-  onRotated: (d: Destination) => void;
+  /** `wroteSecret`: a grant was entered as a new credential, so a new Secret was written (DUI-66). */
+  onRotated: (d: Destination, wroteSecret: boolean) => void;
   onReRead: () => void;
 }) {
   // The destination this dialog opened with, and its generation, until the operator re-reads
@@ -90,7 +91,7 @@ export function RotateAccess({
     }
     clearGrantSecrets(grantsForm, GRANT_ROLES);
     rotate.mutate(body, {
-      onSuccess: (item) => onRotated(item),
+      onSuccess: (item) => onRotated(item, GRANT_ROLES.some((r) => shown.grants[r].source === "new")),
       onError: (error) => {
         const placed = placeProblems(error, rotationField);
         const fields: Partial<Record<string, string>> = onScreen(placed.fields, shown.grants);

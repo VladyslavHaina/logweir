@@ -300,12 +300,19 @@ export function DestinationDetail() {
   return <DestinationPage key={`${ws}/${name}`} ws={ws} name={name} />;
 }
 
+/** DUI-66: the rotation alert says a Secret was written only when a grant was entered as a new credential. */
+export function rotatedWords(wroteSecret: boolean): string {
+  return wroteSecret
+    ? "A new credential was written to a new Secret bound to this destination. The superseded Secret is left in place; an administrator removes it with kubectl."
+    : "No Secret was written: the destination now names the Secrets and identities you chose. A Secret it no longer names is left in place; an administrator removes it with kubectl.";
+}
+
 function DestinationPage({ ws, name }: { ws: string; name: string }) {
   const grant = useGrant(ws);
   const readable = grant.can?.destinations !== false;
   const destination = useDestination(ws, name, readable);
   const [rotating, setRotating] = useState(false);
-  const [rotated, setRotated] = useState<number | null>(null);
+  const [rotated, setRotated] = useState<{ generation: number; wroteSecret: boolean } | null>(null);
   const breadcrumb = (
     <Breadcrumb className="lw-breadcrumb">
       <BreadcrumbItem render={() => <Link to="/$ws/destinations" params={{ ws }}>Destinations</Link>} />
@@ -354,8 +361,8 @@ function DestinationPage({ ws, name }: { ws: string; name: string }) {
       {(unjudged || rotated !== null) && (
         <PageSection>
           {rotated !== null && (
-            <Alert isInline variant="success" title={`Access rotated. The destination is now at generation ${rotated}.`} className="lw-gap-top">
-              A new credential was written to a new Secret bound to this destination. The superseded Secret is left in place; an administrator removes it with kubectl.
+            <Alert isInline variant="success" title={`Access rotated. The destination is now at generation ${rotated.generation}.`} className="lw-gap-top">
+              {rotatedWords(rotated.wroteSecret)}
             </Alert>
           )}
           {unjudged && <Alert isInline isPlain variant="info" title="Not judged yet">{NOT_JUDGED_SENTENCE}</Alert>}
@@ -383,9 +390,9 @@ function DestinationPage({ ws, name }: { ws: string; name: string }) {
           destination={d}
           onClose={() => setRotating(false)}
           onReRead={() => void destination.refetch()}
-          onRotated={(item) => {
+          onRotated={(item, wroteSecret) => {
             setRotating(false);
-            setRotated(item.generation);
+            setRotated({ generation: item.generation, wroteSecret });
           }}
         />
       )}
