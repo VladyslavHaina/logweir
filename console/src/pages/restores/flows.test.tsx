@@ -13,6 +13,7 @@ import type { components } from "../../api/schema";
 import { RestoreWizard, restoreSearch } from "./RestoreWizard";
 import { RestoreDetail } from "./RestoreDetail";
 import { readCatalogOffers } from "../../api/restores";
+import restoreDoc from "../../../fixtures/console/restore.json";
 
 type S = components["schemas"];
 
@@ -425,5 +426,34 @@ describe("the restore wizard", () => {
     renderAt("/team-a/restores/new?backup=orders-hourly-gone");
     await screen.findByText(/No Backup named orders-hourly-gone is in this workspace/);
     expect(screen.queryByText("Bound to")).toBeNull();
+  });
+});
+
+// Last in the file: the mock's runs move on with the wall clock, and a row that adds time
+// before the review rows lets an earlier row's topics exist under their default prefix.
+describe("DUI-64: Retry into new topics", () => {
+  // The retried run's point is one a listed Backup produced, so the wizard lists it only as
+  // that Backup's row (the catalog section leaves it out). Round 3's row checked the prefill
+  // function alone over an offers list that still held it.
+  it("ticks the visible row the retried point came from, and keeps the retried run's topics", async () => {
+    const { offers } = await readCatalogOffers("team-a");
+    const backups = (await (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/workspaces/team-a/backups"))).json()) as { items: S["Backup"][] };
+    const chosen = offers.find((o) => backups.items.some((b) => b.backupId === o.entry.backupId && b.topics.length > 1))!;
+    const backup = backups.items.find((b) => b.backupId === chosen.entry.backupId)!;
+    const kept = backup.topics[backup.topics.length - 1]!;
+    const plan = `name: "r"\nsource:\n  backup: "${backup.backupId}"\n  topics:\n    - "${kept}"\n  point:\n    point_id: "${chosen.entry.pointId}"\n    receipt_key: "k"\nrestore:\n  rate_limit_bytes_per_sec: 200000\n`;
+    const retried = { ...restoreDoc.item, name: "rst-retried", backupSetRef: backup.backupId, target: { ...restoreDoc.item.target, clusterRef: { name: "orders-dr" } }, planBytes: plan, oldTopics: [kept] };
+    net.override = (path, method) =>
+      method === "GET" && path === "/workspaces/team-a/restores/rst-retried" ? new Response(JSON.stringify({ item: retried, requestId: "r" }), { status: 200, headers: { "content-type": "application/json" } }) : null;
+    renderAt("/team-a/restores/new?retryOf=rst-retried");
+    await waitFor(async () => {
+      const ticked = (await screen.findAllByRole("radio", { checked: true })).filter((r) => r.getAttribute("name") === "recovery-point");
+      expect(ticked.map((r) => r.getAttribute("aria-label"))).toEqual([expect.stringMatching(new RegExp(`backup ${backup.name}$`))]);
+    });
+    expect((await screen.findAllByRole("radio", { checked: true })).filter((r) => r.getAttribute("name") === "point")).toEqual([]);
+    await screen.findByText("Bound to", {}, { timeout: 15_000 });
+    await next();
+    await screen.findByRole("heading", { name: "What to restore" });
+    for (const t of backup.topics) expect([t, (screen.getByLabelText(t) as HTMLInputElement).checked]).toEqual([t, t === kept]);
   });
 });

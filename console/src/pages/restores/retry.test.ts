@@ -15,20 +15,25 @@ const points = [
 ];
 const targets = [{ name: "conn-42n" }, { name: "conn-j3c" }];
 
-describe("DUI-59: what a retry keeps", () => {
-  it("the catalog point the plan was bound to, the target connection and the rate limit", () => {
-    expect(retryPrefill({ backupSetRef: "set-1", target: { clusterRef: { name: "conn-j3c" } }, planBytes: bound }, points, offers, targets)).toEqual({
+describe("DUI-59, DUI-64: what a retry keeps", () => {
+  it("the catalog point the plan was bound to when no Backup lists its set, its topics, the target connection and the rate limit", () => {
+    expect(retryPrefill({ backupSetRef: "set-9", target: { clusterRef: { name: "conn-j3c" } }, planBytes: bound, oldTopics: ["bulk"] }, points, offers, targets)).toEqual({
       pointKey: `catalog/pv05-dev-catalog/${POINT}`,
       target: "conn-j3c",
       rateLimit: "0.2",
+      topics: ["bulk"],
     });
   });
-  it("a Backup-bound plan keeps its Backup; no limit and a target no longer listed stay empty (the control)", () => {
+  it("DUI-64: a point a listed Backup produced is that Backup's row, the one the wizard shows", () => {
+    expect(retryPrefill({ backupSetRef: "set-1", target: { clusterRef: { name: "conn-j3c" } }, planBytes: bound }, points, offers, targets).pointKey).toBe("backup/uid-1");
+  });
+  it("a Backup-bound plan keeps its Backup; no limit, no topics and a target no longer listed stay empty (the control)", () => {
     const plain = `name: "r"\nsource:\n  backup: "set-1"\n`;
     expect(retryPrefill({ backupSetRef: "set-1", target: { clusterRef: { name: "gone" } }, planBytes: plain }, points, offers, targets)).toEqual({
       pointKey: "backup/uid-1",
       target: "",
       rateLimit: "",
+      topics: [],
     });
   });
 });

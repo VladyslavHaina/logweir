@@ -160,23 +160,25 @@ const BLANK: WizardValues = {
 const FOLLOW_DEADLINE_MS = 12 * 60_000;
 
 /**
- * DUI-59: what a retry keeps of the run it retries: the same recovery point (its catalog
- * point when the plan was bound to one, otherwise the Backup of its set), the same target
- * connection and the same byte-rate limit. Only the prefix is new (`freshTargetPrefix`).
+ * DUI-59, DUI-64: what a retry keeps of the run it retries: the same recovery point, the
+ * same topics (`oldTopics`, the source topics its plan named), the same target connection
+ * and the same byte-rate limit. Only the prefix is new (`freshTargetPrefix`). The point is
+ * the row the wizard shows for it: the Backup of its set when one is listed (a catalog point
+ * a Backup produced is listed only as that Backup's row), otherwise its catalog point.
  */
 export function retryPrefill(
-  retried: { backupSetRef: string; target: { clusterRef: { name: string } }; planBytes?: string | null },
+  retried: { backupSetRef: string; target: { clusterRef: { name: string } }; planBytes?: string | null; oldTopics?: string[] },
   points: { uid: string; backupId?: string | null }[],
   offers: Offer[],
   targets: { name: string }[],
-): { pointKey: string; target: string; rateLimit: string } {
+): { pointKey: string; target: string; rateLimit: string; topics: string[] } {
   const pointId = /^\s+point_id:\s*"?(lwp1-[0-9a-f]{32})"?\s*$/m.exec(retried.planBytes ?? "")?.[1];
   const offer = pointId ? offers.find((o) => o.entry.pointId === pointId) : undefined;
   const backup = points.find((b) => b.backupId === retried.backupSetRef);
-  const pointKey = offer ? offerKeyOf(offer) : backup ? `backup/${backup.uid}` : "";
+  const pointKey = backup ? `backup/${backup.uid}` : offer ? offerKeyOf(offer) : "";
   const target = targets.some((t) => t.name === retried.target.clusterRef.name) ? retried.target.clusterRef.name : "";
   const rate = planRateLimit(retried.planBytes);
-  return { pointKey, target, rateLimit: rate === null ? "" : String(rate / 1_000_000) };
+  return { pointKey, target, rateLimit: rate === null ? "" : String(rate / 1_000_000), topics: retried.oldTopics ?? [] };
 }
 
 export function RestoreWizard() {
@@ -296,12 +298,15 @@ function WizardBody({
   // DUI-59: a retry starts from the retried run's point, target and rate limit, once they are read.
   const retried = useRestore(ws, retryOf);
   const prefilled = useRef(false);
+  // DUI-64: the retried run's topics, applied when its point is seeded below.
+  const retryTopics = useRef<{ pointKey: string; topics: string[] } | null>(null);
   useEffect(() => {
     if (!retryOf || prefilled.current || !retried.data || offers.isPending) return;
     prefilled.current = true;
     const fill = retryPrefill(retried.data, recoveryPoints(backups), offers.data?.offers ?? [], targets);
     if (fill.target) form.setValue("target", fill.target);
     if (fill.rateLimit) form.setValue("rateLimit", fill.rateLimit);
+    if (fill.pointKey && fill.topics.length > 0) retryTopics.current = { pointKey: fill.pointKey, topics: fill.topics };
     if (fill.pointKey) form.setValue("pointKey", fill.pointKey, { shouldValidate: true });
   }, [retryOf, retried.data, offers.isPending, offers.data, backups, targets, form]);
 
@@ -330,11 +335,14 @@ function WizardBody({
     seeded.current = point.key;
     const listed = point.catalog?.entry.topics ?? [];
     const end = endInstant(point);
+    // DUI-64: a retry keeps the retried run's topics, those this point still holds.
+    const kept = retryTopics.current?.pointKey === values.pointKey ? retryTopics.current.topics : null;
+    const topics = point.topics?.filter((t) => !kept || kept.includes(t)) ?? [];
     form.reset({
       ...form.getValues(),
       pointKey: values.pointKey,
-      topics: point.topics?.slice() ?? [],
-      topicsText: point.topics === null && listed.length > 0 && !point.catalog?.entry.topicsOmitted ? listed.map((t) => t.name).join(", ") : "",
+      topics,
+      topicsText: point.topics === null && listed.length > 0 && !point.catalog?.entry.topicsOmitted ? (kept ?? listed.map((t) => t.name)).join(", ") : "",
       timeMode: "end",
       pointInTime: end,
       prefix: defaultPrefixFor(end, retryOf),

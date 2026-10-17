@@ -245,13 +245,13 @@ export const QUEUED_RUN_SENTENCE =
   "Queued: this manual restore waits for a slot in the workspace's manual-restore pool and starts, in creation order, when one finishes. Nothing has been created for it yet. The queue does not extend its approval: a restore still waiting when the approval expires is refused and must be confirmed again.";
 
 export const RETRY_IDENTITY_SENTENCE =
-  "It starts from the retried run's recovery point, target connection and byte-rate limit, each of which you may change. The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
+  "It starts from the retried run's recovery point, topics, target connection and byte-rate limit, each of which you may change. The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
 
 export const RETRY_OLD_RUN_SENTENCE =
   "The failed restore is not touched: its object, its evidence and the topics it had already created stay as they are. Resume is not implemented; this is a new run from the beginning.";
 
 export const RETRY_FRESH_TARGET_SENTENCE =
-  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retry into new topics opens the wizard for a NEW restore, starting from this run's point, target and byte-rate limit, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
+  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retry into new topics opens the wizard for a NEW restore, starting from this run's point, topics, target and byte-rate limit, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
 
 export const ORIGINAL_NAME_SENTENCE =
   "Each topic is recreated under its own name, a new generation of the name, instead of beside it under a prefix. Only into topics that do not exist: the runner refuses if a name exists, refuses while a broker auto-creates topics (unless the target is a different cluster from the archive's source), and refuses when a declarative owner manages a name. It needs its own approval subject, originalName. Stop every producer of these names first.";
