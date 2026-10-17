@@ -29,7 +29,7 @@ publication: items 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42,
 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61,
 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100,
-101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144 and 145. Items continue the next entry's numbering. The candidate
+101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151 and 152. Items continue the next entry's numbering. The candidate
 cut from this entry is `v0.2.0-rc.2`; its record follows
 [the release checklist](tag1-checklist.md) as the next entry's does. Item 90
 landed after the `v0.2.0-rc.2` tag and is not in that candidate; the
@@ -38,10 +38,12 @@ landed after the `v0.2.0` tag and are in the `v0.3.0` release, whose record
 is below. Items 102 to 129 landed after the `v0.3.0` tag and are in the
 `v0.4.0` release, whose record is below. Items 130 to 136 landed after the
 `v0.4.0` tag and are in the `v0.4.1` release, whose record is below. Items
-137 to 145 landed after the `v0.4.1` tag and are in the `v0.5.0` release, not
-yet tagged: OD-23's one namespace per install with workspaces inside it, the
-Schema Registry, engine build 5 and an honest interrupted restore. `v0.5.0` is
-a fresh install, never an upgrade in place (item 137).
+137 to 152 landed after the `v0.4.1` tag and are in the `v0.5.0` release, not
+yet tagged, whose record is below: OD-23's one namespace per install with
+workspaces inside it, the Schema Registry, engine build 5 and an honest
+interrupted restore (items 137 to 145), and the fixes of the PoC and its deep
+UI pass (items 146 to 152). `v0.5.0` is a fresh install, never an upgrade in
+place (item 137).
 
 ### Candidate record
 
@@ -67,6 +69,104 @@ pass.
 | `ui/` bundle, file by file | the output of the next entry's command, which the release asset `ui-files.sha256` also carries |
 | Kubernetes exercises run on this candidate | PROD-14.1 on docker-desktop (arm64, Kubernetes 1.34, Helm 4.0.1), shared mode with Traefik, Dex and cert-manager, MinIO storage: the disconnected recovery from the kit (5 min 37 s, at `22dc6147`); a fresh install to the first verified restore in 4 min 22 s (at `22dc6147`); the upgrade to this publication (`96e601f0`, Helm revision 6) with every fix re-checked live, including FX-15's retention refusal and the console's visual-pass fixes |
 | Checks deliberately deferred, each with its reason | item 76's bundle-to-chart walk (`v0.2.0-rc.1` ships no `logweir.yaml` to walk from; it stays `[UNVERIFIED]`); cosmetic console findings of the visual pass and its re-check (catalog rows at 1024 px, a large integer's display, four wording slips), recorded for v1.1 |
+
+### `v0.5.0`: the release after `v0.4.1`
+
+OD-23's batch, the simplest form that works, built together and proven once on
+a fresh PoC install in one namespace with four workspaces, then by clicks as
+seven validation users, then by the upgrade to the fix build. It is not an upgrade
+of `v0.4.1` (the next record): **an install of 0.4.x moves by a fresh install
+only, never `helm upgrade` (item 137)**. It adds items 137 to 152:
+
+- **One namespace per install, workspaces inside it (items 137 to 141,
+  PROD-19.1):** one Helm release in one namespace, the `workspaces` list and
+  the label `logweir.dev/workspace` on every object; references never cross a
+  workspace; console roles, the approval mode, pools and rate limits per
+  workspace; a credential Secret carries its workspace's label; an approval
+  names its workspace (authorization document 2.3.0); the product API moves to
+  `/api/v1/workspaces/{ws}/…` (`1.0.0-alpha.4`). Whoever can read Secrets,
+  create Pods or Jobs, or name a Secret in the namespace is an administrator of
+  every workspace (item 139).
+- **Schema Registry (item 142, PROD-03.1 and 03.2):** a backup captures the
+  source's registry beside its receipt, and a restore from a catalog point
+  imports the schemas its records need, keeping their IDs; a restore planned
+  from a Backup whose set captured a registry is refused `SchemaSnapshotInvalid`.
+- **Engine build 5 (item 143):** committed-only capture, an idempotent
+  restore, repeated header keys and `restore.rate_limit_bytes_per_sec`.
+- **An honest interrupted restore (item 144, PROD-07.2):** Cancel, `Interrupted`,
+  a signed reconcile, *Clean up partial topics* and *Retry into new topics*;
+  nothing is resumed.
+- **Format steps (item 145):** receipt 1.9.0, scorecard 1.13.0 and 2.5.0,
+  catalog point 1.8.0, authorization document 2.3.0, `verify_scorecard.py`
+  1.35.0; every 0.4.x archive stays readable and importable into any workspace.
+- **The PoC's and the deep UI pass's fixes (items 146 to 152, and in place in
+  items 137 and 142):** `--skip-crds` after the CRD apply, the two cluster
+  objects an uninstall leaves, and a key-for-key archive import (item 137); a
+  catalog lists only what its destination can restore (item 146); both
+  readers say "registry captured" (item 147); the approval pages name the
+  workspace and the registry the runner will write into (item 148); Cancel,
+  Clean up and Retry work from the console (item 149); a retried evidence read
+  stays pending (item 150); sign-out after a sign-in in another tab (item 151);
+  and smaller console fixes (item 152). None of them adds an action.
+- **Required actions, in order (a fresh install only; 0.4.x is not upgraded in
+  place, item 137):**
+  1. Export trust with the kit and keep the bucket; let runs finish and TTL
+     clones settle (item 137, steps 1 and 2).
+  2. Write the values file anew: `workspaces`, the renamed values, none of the
+     removed ones (item 137).
+  3. `helm uninstall` the old release, then delete
+     `TrustPolicy/logweir-installation` and
+     `ClusterRole/logweir-identity-singleton` (item 137, step 3).
+  4. Apply this release's CRDs server-side by hand, then install into one
+     namespace with `--skip-crds` (item 137, steps 4 and 5).
+  5. Import trust; in each workspace add connections (naming each registry,
+     item 142), destinations and schedules, and connect a catalog; an old
+     archive is copied key for key behind a destination with its old prefix
+     (items 137 and 146).
+  6. Label every credential Secret you create with `kubectl` with its
+     workspace, give each workspace its own archive credentials, and hand out
+     `logweir-viewer` for `kubectl` reads (item 139).
+  7. Widen each destination's `archiveRead` grant to `<bucket>/logweir/drills/*`
+     (item 144), and let each target registry's user set a subject's mode
+     (item 142).
+  8. Make pending requests and approvals again (item 140); move API scripts to
+     the workspace paths and audit readers to `workspace` (item 141).
+  9. Upgrade every verifier (`verify_scorecard.py` 1.35.0 or this release's
+     `logweir`, items 145 and 147); a standalone CLI install takes engine build
+     5 (item 143).
+  10. Delete the old namespaces when done (item 137, step 7).
+- **Rollback:** none in place, in either direction: a 0.4.x chart's schema
+  refuses `workspaces`, and a 0.4.x reader refuses every approval this release
+  signs (item 140). Go back by item 137's steps with the older chart (export
+  trust, `helm uninstall`, the older CRDs, install, import trust, connect the
+  catalogs) and make pending requests again; the bucket and every document
+  this release wrote stay readable (item 145), and an older chart's CRD prunes
+  `spec.schemaRegistry` (item 142). Items 146 to 152 add no rollback step: they
+  write no new stored field except item 150's runner facts, which the
+  `Restore` CRD already carries.
+
+### Candidate record, `v0.5.0`
+
+Filled as the next record is: before the tag from the release dry run; the
+release run, chart and archive rows after the tag. `TBD` is a row not filled
+yet, not a pass.
+
+| What | Value |
+|---|---|
+| Candidate commit (the tagged commit) | TBD |
+| Version tag | TBD |
+| Publication commit (`release.json` `.images.publication`) | TBD |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | TBD |
+| Release dry run (`release.yml` dispatched at the publication commit) | TBD |
+| Release run (`release.yml` on the tag) and release drill | TBD |
+| Runner image digest (`logweir`; amd64 and arm64) | TBD |
+| Controller image digest (`weirkeeper`; amd64 and arm64) | TBD |
+| Console image digest (`logweir-console`; amd64 and arm64) | TBD |
+| Identity bootstrap image (`identity.bootstrapImage`; `release.json` `.images.bootstrap`) | TBD |
+| Chart (`logweir-chart`, from the tag run's `release.json` `.chart`) | TBD |
+| CLI archives (three, from the tag run's `release.json` `.archives`) | TBD |
+| Kubernetes exercises run on this candidate | the PoC on docker-desktop (arm64), shared mode with Traefik, Dex and cert-manager, MinIO storage, and the orchestrator's fixtures (Karapace 6.2.3 beside the source Kafka, Redpanda v26.2.4 with basic auth beside the target, seeded schema-dependent, transactional and bulk topics), on builds of `main` before the publication commit: `poc-v05` (build `sha-3bf3165c`, 2026-10-16), the fresh install over the 0.4.1 PoC into namespace `logweir` with workspaces `dev`, `tst`, `stg` and `prd` (Helm revision 1), 34 of 35 command-line and `kubectl` rows passed and P8 passed with the key-for-key copy, finding D1 to D4; `deep-v05-1` and `deep-v05-2` (the same build, 2026-10-17), every flow by clicks under seven validation users, finding DUI-51 to DUI-62; `poc-v05r` (build `sha-b0a0b868`, 2026-10-17), the upgrade to the fix build (Helm revision 5, then 6 with the validation users removed), every fix of D1 to D4 and DUI-51 to DUI-62 re-checked by clicks, finding DUI-63 to DUI-68; `poc-v05r2` (build `sha-0815482b`, 2026-10-17), the upgrade to the round-4 build (Helm revision 7; 8 with three validation users, 9 with them removed; Dex revisions 14 and 15), the CRDs unchanged and the render diff only labels and image tags, `cosign verify` for all four images, all eleven round-4 rows (DUI-63 to DUI-67, DUI-68.1 to 68.6) passed by clicks with DUI-62.3 and DUI-55, and no new defect; the PoC stays at `sha-0815482b`, pinned by `133f135c`. The publication commit itself is not yet installed |
+| Checks deliberately deferred, each with its reason | incremental backup and the rest of v2 (Deferred by OD-23: only the batch's rows were built); the switchover review (not run on this fixture: its Kafka 3.7.1 source serves ListGroups v0 to v4, so no backup records a consumer position); the retention hold of an `Interrupted` restore's point (`ActiveRestore`; the PoC has no RetentionPolicy, so no retention view reports it; item 144); DUI-53's `503` (not forced: it needs the API's Kubernetes reads to fail); DUI-55's retry branch (not forced: every evidence read of `poc-v05r` and `poc-v05r2` succeeded at its first attempt, so no verdict read "tries again at"; the page's follow to Verified passed); DUI-62.5's "Read the check again" (not forced: the re-sign-in DUI-63 needs renews the session the first tab shares); DUI-66's new-credential control (it needs a real archive key typed); DUI-68.1's title break and DUI-68.5's menu placement have no committed row (jsdom has no layout): a Chromium script against the built console and `poc-v05r2`'s clicks hold them; the 15-minute session cap (`sessionMaxAgeSeconds` at most 900: a longer or sliding session is the owner's security decision, DUI-62.12) |
 
 ### `v0.4.1`: the release after `v0.4.0`
 
@@ -1352,7 +1452,7 @@ and `Delete` on the scratch prefix
 a scratch restore signs `pass` and leaves its topics, saying so. Take a
 decommissioned address out of a `KafkaCluster`'s `bootstrapServers`.
 **Scope:** unit rows per row and code, librdkafka's mock cluster (one and three brokers), the store classifier on a loopback responder, a guard over the published tables, and compose rows (`e2e/tests/compat_contract.rs`) on each supported line, Redpanda, SeaweedFS and the ACL profile; CI runs the 3.7.1 row.
-[UNVERIFIED — no controller has rendered a capability plan to a check Job on a cluster yet; the PoC upgrade that carries this item runs a Backup and a Restore Preflight.]
+**Scope (PoC):** `deep-v05-1` (build `sha-3bf3165c`, 2026-10-17), by clicks on the v0.5 PoC: the controller's check Job for a connection test on the PoC's Kafka 3.7.1 source answered the capability rows, the blocking ones Ready and the advisory `connection.groupTypes` not ready (row 8; the source serves ListGroups v0 to v4, `GroupTypesNotListed`, row 31); the restore readiness checks of the same pass ended Ready (rows 23 and 26).
 **Rollback:** roll the controller and the runner back together. Under an older
 controller this runner answers no capability row and reports an unreported
 bound as `BrokerConfigsNotReadable`, a code the older controller reads; an
@@ -3551,7 +3651,7 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 7. Delete the old namespaces when done.
 
 **Scope:** `chart_lint_one_namespace_per_install` (every namespaced object of every render is in the release namespace, except the two opt-in Roles: Strimzi's and the trusted proxy's), `chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned`, `manifest_lint::the_shipped_roles_are_exactly_as_specified` (the three write roles absent from every render), `check-chart.sh` (each of the ten removed or renamed values refused by name, with a control), `weirkeeper/tests/one_namespace.rs` (no `Api::all` on a namespaced kind; every controller watches the install namespace), `linkage::weirkeeper_refuses_to_start_without_its_namespace_and_workspaces`, `cli_exit_codes` (`identity distribute` is gone) and `deploy/poc/validate.sh` (one namespace, four workspaces).
-[UNVERIFIED — no cluster has installed this chart yet; the batch's one fresh PoC install, namespace `logweir` with workspaces `dev`, `tst`, `stg` and `prd`, runs it.]
+**Scope (PoC):** `poc-v05` (build `sha-3bf3165c`, 2026-10-16), on the cluster that held the 0.4.1 PoC (Helm revision 41): trust exported and the bucket mirrored, `helm uninstall`, the old `TrustPolicy/logweir-installation` and `ClusterRole/logweir-identity-singleton` deleted, the CRDs applied server-side, then a fresh install into namespace `logweir` with workspaces `dev`, `tst`, `stg` and `prd` (Helm revision 1); the hook made `logweir-installation` (`DEFAULT true`, 2 keys, `LOADED true`), and `cosign verify` passed for all four images. P1: every instance-labelled object (49) is in `logweir`, beside the trusted proxy's opt-in Role and RoleBinding in `traefik`; the controller logs one namespace and the four workspaces; `can-i create jobs -n default` and `can-i list backups --all-namespaces` answer `no`. The Roles are `logweir-viewer`, `weirkeeper` and `logweir-api`, with `logweir-trust-admin`, and no `logweir-operator`, `-approver` or `-retention-admin` exists (w1-3); `deploy/poc/validate.sh` rc 0. The install command without `--skip-crds` failed there (`conflict … .spec.names.categories, .spec.names.shortNames`), so step 5 now names it; `poc-v05r` (build `sha-b0a0b868`, 2026-10-17) ran step 5 as written on the same cluster: rc 0 (Helm revision 6), the CRD diff empty. P8 (step 6): the old bucket copied key for key into `poc-stg` behind a `stg` destination with the old prefix lists 432 points `VerifiedHistorical` once the old signers are imported `Retired`, and a `stg` restore of an old nightly point ended `Succeeded`, Valid; a copy under `legacy/` listed none, so step 6 now copies key for key (`poc-v05r`'s D2 row: 433 of 433). The chart's refusal while the singleton names the old namespace was not observed: the ClusterRole was deleted first.
 **Rollback:** none in place, in either direction: a 0.4.x chart's schema refuses `workspaces`, and a 0.4.x reader refuses every approval this release signs (item 140). Go back by the same seven steps with the older chart; archives and evidence written by this release stay readable (item 145).
 
 #### 138. Workspaces: one label on every object, references never cross, and roles, approval mode, pools and rate limits per workspace (PROD-19.1)
@@ -3566,7 +3666,7 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 
 **Do:** set `workspaces` and bind each workspace's roles and approval mode. Add a workspace with a longer list in a `helm upgrade`; remove one only when it holds no objects; a workspace cannot be renamed (make a new one and connect a catalog). With `kubectl`, label everything you create (`kubectl get backups -l logweir.dev/workspace=prd`, or `-L logweir.dev/workspace` for all).
 **Scope:** `weirkeeper/tests/workspace_gate.rs` (unlabelled and unlisted objects, every spec reference per kind, the transitive `Preflight` and `Switchover` refusals, a deleting `Restore`, a finished run kept, labels on schedule-made Backups and Jobs, each with a same-workspace control; mutants on the follow, the deletion hold and the finished-run guard killed), `manual_run_pool.rs::a_prd_restore_is_admitted_while_dev_is_full`, `logweir-api/tests/workspaces.rs` (lists across pages, the 404, the per-path 422 table, the 409, the borrowed `resourceVersion` on every patch, the owner-bound result document; with controls and three mutants), the renamed `role_matrix` and `pagination` rows, and the console's switcher rows in `SessionGate.test.tsx` (two mutants).
-[UNVERIFIED — no live install has run the workspace boundary; the batch's fresh PoC install runs record rows P2 to P9 by clicks and `kubectl`.]
+**Scope (PoC):** `poc-v05` (build `sha-3bf3165c`, 2026-10-16), by `kubectl` and the API: an unlabelled object `WorkspaceUnknown` and a cross-workspace reference `WorkspaceMismatch`, with no Job (w2-1, w2-2, and P6, whose `prd`-target control waits for approval); the transitive `Preflight` refusal (int-1); a relabelled Approval `WorkspaceMismatch` (w2-5); a third `dev` restore queued `ConcurrencyLimited` while a `stg` one ran (w2-6); every Backup and Job labelled (w2-7); another workspace's object `404`, a `dev` schedule naming a `prd` source `422`, a shared destination name `409` and a borrowed `resourceVersion` `404` (w0, w3-1 to w3-4); every audit record naming `workspace` (w3-6); `logweir-viewer` listing all four workspaces and refused Secrets (P9); `tst` dropped from the list and put back, its verified Backup unchanged (M1). By clicks, `deep-v05-1` (same build, 2026-10-17): the switcher lists exactly a person's workspaces, a typed link into an ungranted workspace shows the no-role page and another workspace's object `404` (rows 1 to 6); P2 in `dev` and `prd` (connections, a destination, checks, discovery, a schedule, *Back up now* → Verified, and the shared name refused; rows 8 to 17; `tst` and `stg` were not set up by clicks); P3 (rows 1, 4, 6 and 26), P4 (rows 18 to 20) and P5 as a `stg` one-person restore (row 21); the 38 objects and 30 Jobs made by clicks all labelled (row 33).
 **Rollback:** with item 137.
 
 #### 139. A credential Secret carries its workspace's label; whoever can read Secrets, create Pods or Jobs, or name a Secret in the namespace is an administrator (PROD-19.1) — required action
@@ -3579,7 +3679,7 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 - In an install with more than one workspace, give each workspace its own archive credentials, never the demo `logweir-s3`.
 
 **Scope:** `workspace_gate.rs` (a credential in another workspace and in none, a destination naming `logweir-signing-key` refused, the registry Secret refused through its connection and a Backup, each with a control; the Secret check skipped is killed), `chart_lint_no_key_secret_carries_a_workspace_label`, `manifest_lint::weirkeeper_reads_secret_metadata_only` (exactly `get secrets`, and only `get_metadata_opt` on an `Api<Secret>`), `linkage::the_controller_never_reads_a_secret`.
-[UNVERIFIED — no live controller has refused a Secret by its label yet; the batch's fresh PoC install applies a destination naming `logweir-signing-key` and reads the controller's `can-i` answers.]
+**Scope (PoC):** `poc-v05` (build `sha-3bf3165c`, 2026-10-16): a `dev` BackupDestination naming `logweir-signing-key` is `WorkspaceMismatch` ("Secret `logweir-signing-key` is in no workspace"), and a `dev` Backup naming it the same, with no Job (extra (a), w2-3); a `dev` connection whose registry Secret is labelled `prd` is refused with no probe Job, and a `dev`-labelled control probes (int-2); the controller's `can-i get secrets` answers `yes` and `list secrets` `no` (int-3); the install's key Secrets carry no workspace label, `logweir-s3` is `dev` and every console-written Secret carries its workspace (w1-4); `dev`'s MinIO reader is refused on `poc-prd` (extra (b)).
 **Rollback:** with item 137.
 
 #### 140. An approval names its workspace: the authorization document is 2.3.0 (PROD-19.1) — required action
@@ -3587,16 +3687,16 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 **Changed.** The authorization document v2 gains `subject.workspace` (format 2.3.0; [approval-documents.md](formats/approval-documents.md)), and `subject.namespace` always holds the release namespace. The console writes the workspace into every request and approval, and the approver sees it. Every reader of this release requires it and compares it with the subject's label, beside name and UID: the `Approval` controller and the runner refuse a document for another workspace, or with none, `AuthorizationSubjectMismatch`, and `Restore` admission `ApprovalSubjectMismatch`. An `Approval` labelled other than its `Restore` or `Switchover` is `WorkspaceMismatch`, and is never judged under the other workspace's approval mode. So an approval made in `dev` never authorises a run in `prd`, even when both share a policy and someone relabels the object. The restore runner gets the workspace as `LOGWEIR_EXECUTION_SUBJECT_WORKSPACE`, and `logweir switchover run` takes `--workspace`.
 **Do:** nothing on a fresh install. Requests and approvals made under 0.4.x are not carried over: make them again. A script that writes authorization documents writes 2.3.0 with `subject.workspace`.
 **Scope:** `logweir-core`'s `each_binding_field_is_checked` and `an_older_document_reader_refuses_the_workspace`; `logweir/tests/authorization_v2.rs` (`approved-for-another-workspace` refused by both readers; a 2.2.0 document refused; the matching workspace accepted); `weirkeeper/tests/approval_policy.rs::an_approval_is_judged_in_its_subjects_workspace_and_never_another` (one-person `dev`, two-person `prd`); `restore_policy.rs`; the switchover's `admission_refuses_by_name`; `logweir-api/tests/console_approval.rs` (the signed subject names the install namespace and the workspace, and the same bytes against a relabelled `Restore` are refused). Mutants on `same(approval, restore)` and the core comparison were killed.
-[UNVERIFIED — no PoC approval has signed format 2.3.0 yet; the batch's fresh PoC install runs record rows P4 and P7, a two-person `prd` approval and a `dev` approval copied into `prd`.]
+**Scope (PoC):** `poc-v05` P7 (build `sha-3bf3165c`, 2026-10-16): `dev`'s verified Approval (format 2.3.0, `subject.namespace: logweir`, `subject.workspace: dev`), copied into an Approval labelled `prd` and named by a `prd` Restore, is `Verified=False`, `AuthorizationSubjectMismatch` ("names workspace dev"), and the Restore has no Job. `deep-v05-1` P4 (same build, 2026-10-17), by clicks: `v-alice`'s two-person `prd` request offers her no approval ("You cannot approve your own request"); `v-bob` approves; the Approval is format 2.3.0 with `subject.workspace: prd` and two different subjects, and the restore ends `Succeeded`, Valid; an approver in `stg` only sees no `prd` request (rows 18 to 20). The page's own workspace line passed in `poc-v05r` (item 148).
 **Rollback:** a reader before this release refuses every 2.3.0 document (an unknown field: the safer verdict, OD-7), so approvals made under this release do not survive a return to 0.4.x.
 
 #### 141. The product API is addressed by workspace; its OpenAPI document is `1.0.0-alpha.4` (PROD-19.1, PROD-03.1, PROD-07.2)
 
-**Changed.** `info.version` moves from `1.0.0-alpha.3` to `1.0.0-alpha.4`, still pre-release ([stability.md](stability.md)). 65 operations (63 before) and 307 component schemas (302 before):
+**Changed.** `info.version` moves from `1.0.0-alpha.3` to `1.0.0-alpha.4`, still pre-release ([stability.md](stability.md)). 65 operations (63 before) and 308 component schemas (302 before):
 - **Breaking:** every product route moves from `/api/v1/namespaces/{ns}/…` to `/api/v1/workspaces/{ws}/…`, with the same suffixes, and `GET /api/v1/namespaces` is `GET /api/v1/workspaces` (`WorkspaceListResponse` and `WorkspaceGrant` replace `NamespaceListResponse` and `NamespaceGrant`).
 - **Breaking:** `SessionResponse.namespaces` is `workspaces`; `ApprovalPolicyView`, `ApprovalRequestView` and `SwitchoverApprovalRequestView` carry a required `workspace` in place of `namespace`; the problem code `namespace_forbidden` is `workspace_forbidden`.
 - Added: `POST …/restores/{name}/cancel` and `POST …/restores/{name}/cleanup`, `Restore.interruption` (`RestoreInterruptionView`) and the operation state `interrupted` (item 144).
-- Added: `CreateConnectionRequest.schemaRegistry` and `Connection.schemaRegistry` (`SchemaRegistryRequest`, `SchemaRegistryView`), `PointView.schemaRegistry` (`PointSchemaRegistryView`) and `RestoreCoverageView.schemas` (`RestoreSchemasView`) (item 142).
+- Added: `CreateConnectionRequest.schemaRegistry` and `Connection.schemaRegistry` (`SchemaRegistryRequest`, `SchemaRegistryView`), `PointView.schemaRegistry` (`PointSchemaRegistryView`) and `RestoreCoverageView.schemas` (`RestoreSchemasView`) (item 142), and `ScopeTargetView.schemaRegistry` (`ScopeRegistryView`), the target registry an approver sees (item 148).
 - Unchanged: a view's `namespace` member stays, and now always names the install's namespace.
 
 Outside the document: the audit record's `namespace` field is `workspace`, and its `routeAccess` values are `workspaced` and `anyWorkspace` ([audit-log.md](audit-log.md)).
@@ -3615,7 +3715,7 @@ Outside the document: the audit record's `namespace` field is `workspace`, and i
 
 **Do:** name the registry when you create each connection. The target registry's user must be allowed to set a subject's mode (on Redpanda, a superuser). A Secret you create with `kubectl` holds `registry-password`, the connection's binding and the workspace label (item 139). Upgrade the verifiers that will read the new blocks (item 145).
 **Scope:** `logweir-core/tests/schema_registry.rs` (19 rows: capture and its four reasons, closure, conflicts, registries that cannot keep IDs, a partial import continued, the mode rows, every unknown answer refused before any write), receipt arms 46 to 49, `weirkeeper/tests/schema_registry_connection.rs`, `logweir-api/tests/connection_registry.rs`, the catalog's 1.8.0 row and 11 mutants, all killed. Live, `e2e/tests/schema_registry.rs` SR-1 to SR-10 on compose (Kafka 4.3.1, the `registry` profile: Karapace as source, a Redpanda v26.2.4 registry with basic auth as target): Avro with a reference, Protobuf with an import, JSON and RecordNameStrategy decoded after the restore, each refusal with no topic and nothing registered, and both readers printing the same lines; the two check rows answered from the live registries. Confluent Schema Registry 8.0.0 kept IDs in the design's prototype only; no Confluent row runs in CI.
-[UNVERIFIED — no cluster has captured or imported a registry yet; the batch's fresh PoC install runs OD-23-core's steps 1 to 4 and a read-only subject's refusal.]
+**Scope (PoC):** `poc-v05` (build `sha-3bf3165c`, 2026-10-16), with Karapace 6.2.3 as the source registry and Redpanda v26.2.4 with basic auth as the target (fixtures): the `sr-*` backup's receipt is 1.9.0, `captured: true`, 6 subjects and 7 versions, its snapshot beside it with the receipt's sha256 (b2-4); the readiness check reads "7 will be imported with their source IDs" (b2-5); the catalog-point restore imported 7, the target answers IDs 4 to 10 with the source's schemas, every subject's mode is back, and a decoding consumer prints the source values of Avro with a reference, Protobuf with an import, JSON and RecordNameStrategy (b2-6); again into a new prefix, 0 imported and 7 already present (b2-7); a plan without the target registry is `ConnectionPlanMismatch` with no Job (b2-8); a `READONLY` target subject refuses the run, exit 3, with no topic created and no schema written (b2-9). By clicks, `deep-v05-2` (same build, 2026-10-17), rows 1 to 13: OD-23-core's step 1 (Ready, Ready, and a wrong registry password as an advisory `RegistryUnauthorized` beside a Kafka pass), no password in any page or response, "Captured: 7 subjects, 8 versions" on the catalog point, the import, the second import and the read-only refusal. `poc-v05r` (build `sha-b0a0b868`, 2026-10-17): a restore planned from the Backup is held at readiness and refused `SchemaSnapshotInvalid` with no target topic and an empty target registry, while the same set as a catalog point imports 8 (D3); the readiness check refuses a `READONLY` subject (DUI-58); the backup page reads "Schema Registry: Captured: 7 subjects, 8 versions" once a catalog synced the run (DUI-56).
 **Rollback:** with item 137. An older reader ignores the new blocks (item 145); an older chart's CRD prunes `spec.schemaRegistry`.
 
 #### 143. The engine is build `0.23.3+logweir.5`: committed-only capture, idempotent restore, repeated header keys, a byte-rate limit (PROD-00.3a, 00.3d, 00.3e, 00.3h)
@@ -3629,7 +3729,7 @@ Outside the document: the audit record's `namespace` field is `workspace`, and i
 
 **Do:** roll the controller and runner images together, as for item 35. A standalone CLI install replaces its engine with build 5 and exports `LOGWEIR_ENGINE_VERSION=0.23.3+logweir.5` and `LOGWEIR_ENGINE_DIGEST=sha256:9ebf8c668541b8e03f3f8ac3f57beb5d20b92a4cb1e526e71eaf0c02b2c7bc15` ([quickstart.md](quickstart.md)).
 **Scope:** the engine's unit oracles (400 passed; the seven patch oracles); on compose (Kafka 4.3.1, `faultproxy` profile), on build 5 built natively, with build 4 as each control: the transactional row (7 committed records archived, restored with no override; build 4 archives the markers), the lost-acknowledgement row (0 duplicates; build 4: 1,000), the shapes row (repeated keys kept; build 4 collapses them) and the byte-rate row (0.97 of the limit; build 4: 8.98 times it); `record_semantics` 13 passed with the contract asserted; `topic_identity`'s c11 and c18 rewritten to what build 5 archives and run live; the rendered document without a checkpoint (item 144's IR-4). [support-matrix.md](support-matrix.md) lists the build.
-[UNVERIFIED — no runner image built from this commit has run a backup or a restore yet; the batch's fresh PoC install runs a transactional topic, a byte-rate limited restore and the engine identity.]
+**Scope (PoC):** `poc-v05` (build `sha-3bf3165c`, 2026-10-16): the runner image's engine identity reads `0.23.3+logweir.5` and its digest, and every receipt and scorecard of the pass names the same (b1-1; `logweir doctor` was not run: it needs a plan); the transactional topic's backup recorded its 6 committed records, and its restore, with no `allow_transaction_markers`, holds only those, with no aborted record and no marker (b1-2); a restore limited to 2,000,000 B/s took 33.17 s for 60,540,000 bytes, against 5.99 s unlimited, and the engine document carries the limit (b1-3); a running restore pod holds no checkpoint file (b1-4). By clicks, `deep-v05-2` (same build, 2026-10-17), rows 14 to 16: the committed-only restore, the limit in the wizard, the review and the plan, and a fixture's repeated header keys restored, every copy in order.
 **Rollback:** with item 137. Documents build 5 signed stay valid and name their engine; an older engine ignores the rate limit and archives transaction markers again.
 
 #### 144. A restore can be cancelled; one stopped part-way is `Interrupted`, reconciled and cleaned up, never resumed (PROD-07.2)
@@ -3642,7 +3742,8 @@ Outside the document: the audit record's `namespace` field is `workspace`, and i
 
 **Do:** widen each destination's `archiveRead` grant to read `s3:GetObject` on `<bucket>/logweir/drills/*` at the evidence location ([install.md §3.11](install.md#311-object-store-permissions-per-destination-role)); without it a reconcile fails `EvidenceUnreadable`. The chart grants the console `patch` on `restores` (annotations only; `spec` stays sealed).
 **Scope:** `logweir-engine-oso/tests/engine_stop.rs` (SIGTERM forwarded, SIGKILL after the grace); `reconcile.rs`'s rows (the record read only under its signature, kept by recorded ID, names outside the plan never kept, a left-out topic never a pass, another run's record refused); `weirkeeper/tests/restore_interruption.rs` (13 rows: cancel before and during, `Interrupted` on exit, lost pod, OOMKill and panic, the reconcile and its three attempts, one reconcile Job across a restart, the hold and its release, the pool slot); `logweir-api/tests/restore_interruption.rs`; `restore_cleanup.rs` (an original-name topic left; an ordinary run's scorecard deletes nothing); with their mutants killed. Live, `e2e/tests/interrupted_restore.rs` on compose (Kafka 4.3.1, OSO's engine through the docker shim): cancel with no engine left, reconcile counts equal to the targets' end offsets under both readers, a recreated topic left by Clean up, a retry, a run stopped after its engine reconciled to a pass with no second restore, a left-out topic `partial`, and a SIGKILLed runner; `stopped_restore` (FX-23) stays green. On macOS's docker-engine mode a SIGKILLed runner can leave its engine container running; the Linux `PR_SET_PDEATHSIG` half has no live row.
-[UNVERIFIED — no controller on a cluster has cancelled, reconciled or cleaned up a restore yet; the batch's fresh PoC install runs OD-23-core's steps 6 and 7 by clicks and one runner pod deleted.]
+**Scope (PoC):** `poc-v05` (build `sha-3bf3165c`, 2026-10-16): a running restore whose pod was deleted is `Interrupted`, cause `RunnerStopped`, with a `Done` reconcile and a Valid scorecard whose per-partition counts equal the target's end offsets, and it stays `Interrupted` (b3-5); through the API, two cancels write one annotation, the restore reads `Stopping`, then `Interrupted`, `Cancelled`, with no pod left, the reconcile names the topic deleted meanwhile as left out, and Clean up deleted only the other (M-2). By clicks, `deep-v05-2` (same build, 2026-10-17): the deleted pod's restore page and its signed counts (row 18), and *Retry into new topics* opening the wizard with a new prefix (row 20); Cancel and *Clean up partial topics* answered 415 from that console (DUI-57). `poc-v05r` (build `sha-b0a0b868`, 2026-10-17) ran both by clicks: `Stopping`, `Interrupted` "It was cancelled by …", and "The partial topics were removed", the topic gone (item 149).
+[UNVERIFIED — the recovery point's hold (`ActiveRestore`) has not been seen live: the PoC has no RetentionPolicy, so no retention view reported it; `restore_interruption.rs` holds the hold and its release.]
 **Rollback:** with item 137. Signed scorecards of reconciles stay valid; the targets record is internal and read by nothing else.
 
 #### 145. Format steps: backup receipt 1.9.0, scorecard 1.13.0 and 2.5.0, catalog point 1.8.0, authorization document 2.3.0 (OD-23)
@@ -3657,14 +3758,104 @@ Outside the document: the audit record's `namespace` field is `workspace`, and i
 The schemas `logweir-backup-receipt-1.9.0.json`, `logweir-drill-scorecard-1.13.0.json`, `-2.5.0.json` and `logweir-catalog-point-1.8.0.json` are new; their predecessors are frozen. `verify_scorecard.py` is 1.35.0. Switchover records and the bucket layout are unchanged, and nothing signed names a namespace, so every archive and its evidence from 0.4.x stays readable, verifiable and importable into any workspace.
 **Do:** upgrade every verifier (`verify_scorecard.py` 1.35.0, `logweir` from this release) before it reads a receipt's `registry:` line or a scorecard's `schemas:` line. A reader built before these steps accepts a 1.9.0 receipt, a 1.13.0 scorecard and a 1.8.0 point and ignores the new block; it refuses every 2.3.0 authorization document (item 140).
 **Scope:** the schema-drift rows for each new schema, `check-verifier-parity.sh` (the registry line on every accepted receipt, three accepted and seven refused scorecards for SC-1 to SC-3), the receipt corpus, `two_reader_parity` and `orchestrator.rs::a_partition_subset_that_imports_no_schemas_signs_a_version_that_defines_the_block`. What an older reader does was measured on 2026-10-16 with `v0.4.1`'s two readers (`verify_scorecard.py` 1.34.0 and the `logweir` of runner image `sha-4bb185d5`): both accept the corpus's two 1.9.0 receipts, three signed 1.13.0 and 2.5.0 scorecards and a signed 1.8.0 catalog point, exit 0, and print none of the new lines. The rules those results rest on are held on every build by `backup_receipt.rs::a_block_a_later_minor_adds_is_ignored_by_a_reader_that_does_not_know_it`, `scorecard_golden.rs::a_block_a_later_minor_adds_inside_target_is_ignored`, `catalog::an_unknown_field_inside_major_1_is_ignored` and, for the refusal of 2.3.0, `approval_policy::tests::an_older_document_reader_refuses_the_workspace`; each format page's older-reader table has the row.
-[UNVERIFIED — no PoC run has signed these formats yet; the batch's fresh PoC install reads its receipts and scorecards with both readers.]
+**Scope (PoC):** `poc-v05` (build `sha-3bf3165c`, 2026-10-16): `logweir drill verify` from the runner image and `verify_scorecard.py` 1.35.0 both exit 0 on the pass's 1.9.0 receipt (with its `registry:` line), the old install's 1.8.0 receipt under its retired signer, a 1.13.0 import scorecard (with its `schemas:` line) and a reconcile's scorecard; P7 read a signed 2.3.0 authorization document (item 140). `poc-v05r` (build `sha-b0a0b868`, 2026-10-17): both readers print the same lines for that receipt (item 147).
 **Rollback:** with item 137. Documents already written stay valid under this release's readers.
+
+#### 146. A recovery catalog lists only the points its destination can restore; a sync that found none is `Ready`; a new catalog's page follows its first sync (DUI-51, DUI-54.2, DUI-65, DUI-67)
+
+**Changed.**
+- **Before:** a catalog over a destination with a prefix listed and counted every point in the bucket, and offered *Restore this point* for points under another prefix, which the readiness check then refused.
+- **Now:** the runner's catalog walk (Index and Full) keeps a point only when its manifest is `<prefix>/<set>/manifest.json`, the key a restore through that destination reads; `total`, `available`, the histogram and the list agree. A destination at the bucket root still lists every point. A point under another prefix is not read past its record; a point whose record gave no facts is listed as before.
+- **A sync that found no point** is `Ready=True`, `ViewReady`, with 0 points, no longer `Ready=Unknown`, `NeverSynced`; only a catalog with no page list at all is `NeverSynced`.
+- **The console's catalog page** re-reads the catalog every 5 s while its `Ready` condition is not True or its view aged out, lists the points of the first view without a reload, and stops once `Ready`. Its advice no longer says "Sync the catalog": the next sync builds the view, on the catalog's interval or when an administrator sets `spec.syncRequest` with `kubectl`.
+
+**Do:** nothing on a fresh install. An earlier install's archive is listed by a destination with its old prefix after a key-for-key copy (item 137, step 6); a copy under another prefix lists nothing.
+**Scope:** `check_cli::dui51_a_catalog_lists_only_the_points_its_destinations_prefix_serves` (each mode, and the prefixes `poc`, `poc/v51` and the bucket root; a mutant serving every prefix fails it), `live::a_catalog_sync_walks_a_real_archive_and_writes_nothing` on compose MinIO, `recovery_catalog_controller.rs::dui67_a_sync_that_found_no_point_is_ready_with_zero_points` (control: no page list is `NeverSynced`; the old rule fails it), `d3_reads.rs::dui65_a_catalog_that_never_synced_answers_ready_unknown` (the API's answer is the console's fixture `catalog-never-synced.json`), and the console's hook and page rows over that fixture (mutants on the poll rule and on the point list's key fail them).
+**Scope (PoC):** `poc-v05r` (build `sha-b0a0b868`, 2026-10-17), DUI-51: after the first sync on the new runner, `v51-dev-catalog` (prefix `poc/v51`) reads "1 of 1 points available" and its point reaches a Ready readiness check; `pv05-dev-catalog` (prefix `poc`) no longer lists the `poc/v51` point, and the imported `pv05-stg-catalog` keeps 433 of 433.
+**Scope (PoC):** `poc-v05r2` (build `sha-0815482b`, 2026-10-17), DUI-65: a new `tst` catalog's page, opened from *Connect an archive*, read "Not ready" and then, 5 s after the catalog turned `Ready`, "1 of 1 points available" with its point listed and no navigation, and the reads stopped; DUI-67: `pv05-stg-legacy` is `Ready=True`, `ViewReady`, beside `Synced` "the newest 0 of 0 points", and its page reads "0 of 0 points available at the last sync".
+**Rollback:** an older runner lists every point in the bucket again at the next sync, and an older controller reads an empty view as `NeverSynced`. Nothing stored changes.
+
+#### 147. Both readers say "registry captured" for a schema-dependent topic whose receipt captured the registry (D4)
+
+**Changed.** `logweir drill verify` and `verify_scorecard.py` print a receipt's schema-dependent topic as `schema-dependent, registry captured` when its `schema_registry` block says `captured: true`, and `registry not captured` otherwise. Before, a 1.9.0 receipt that captured the registry printed `registry not captured` beside its own `registry:` line. [backup-receipt.md](formats/backup-receipt.md) lists both words. `verify_scorecard.py` stays 1.35.0, first released in this release (item 145).
+**Do:** a script that reads these lines reads both words.
+**Scope:** `cli_verify::a_schema_dependent_topic_says_registry_captured_when_the_receipt_captured_it` and its `test_verify_scorecard` twin (control: the not-captured block; each fails on the old code); `check-verifier-parity.sh`, which requires the same line from both readers and one accepted corpus case with a captured registry and a schema-dependent topic (`receipt_1_9_schema_dependent_registry_captured.json`).
+**Scope (PoC):** `poc-v05r` (build `sha-b0a0b868`, 2026-10-17): both readers exit 0 on `poc-v05`'s `sr-*` receipt (1.9.0), and every `sr-*` line reads `schema-dependent, registry captured;`, the same in both; the corpus's `receipt_1_5_with_schema_dependency.json` reads `registry not captured` in both.
+**Rollback:** an older reader prints `registry not captured` again; no document changes.
+
+#### 148. The approval pages name the workspace and the target Schema Registry, as the runner's parser reads the plan (DUI-52, DUI-61, SEC-1, DUI-68.6)
+
+**Changed.**
+- **The workspace:** the two-person restore approval page has a **Workspace** line, and the switchover approval page reads "In workspace X", both from the request's own `workspace` field.
+- **The registry:** the approval scope, built from the plan by the runner's own parser, carries the target registry, and the API publishes it as `scope.target.schemaRegistry` (`ScopeRegistryView`: `url`, and `username` when the plan names one; item 141). The two-person page's **Schema Registry** line shows that field: the URL and the user, and that the run imports there the schemas its records reference, keeping their IDs; a plan with none reads "None named: the run writes nothing outside Kafka". No approval page parses plan bytes any more: a crafted plan could have shown the approver one registry while the runner wrote into another.
+- **The requester's review** in the restore wizard has the same line, in the same words, from the target connection's `schemaRegistry`, which the plan's `target.schema_registry` is written from.
+
+**Do:** nothing.
+**Scope:** `approval_scope::tests::sec1_the_scope_names_the_registry_the_runners_parser_reads` (a decoy inside a quoted username, and an anchor and alias, read as the parser reads them; controls: an ordinary block and none), `console_approval.rs::sec1_the_approver_is_shown_the_registry_the_runner_reads` through the create and approval-request routes, the console's approval rows (plan bytes naming a decoy, and the page shows only the scope's registry; the two workspace rows) and the wizard's 68.6 row with its no-registry control.
+**Scope (PoC):** `poc-v05r` (build `sha-b0a0b868`, 2026-10-17), by clicks as `v-alice` and `v-bob` in `prd`: the request reads "Workspace prd" (DUI-52), and "Schema Registry: http://logweir-poc-registry-target.logweir.svc:8081 as logweir: the run imports into it …", with "None named …" for a target without one (DUI-61, SEC-1); both approvals `Verified` and the registry restore `Succeeded`.
+**Scope (PoC):** `poc-v05r2` (build `sha-0815482b`, 2026-10-17), DUI-68.6: as `v-alice` in `prd`, the review of a restore into a target connection with the registry reads "Schema Registry: http://logweir-poc-registry-target.logweir.svc:8081 as logweir: the run imports into it the schemas the restored records reference, keeping their IDs."; control: a `dev` target without one reads "None named: the run writes nothing outside Kafka."
+[UNVERIFIED — the switchover approval page's "In workspace" line has not been seen on the PoC: no backup on this fixture records consumer positions, so no switchover was requested; the console row holds it.]
+**Rollback:** an older API and console, one image, drop the lines and the field.
+
+#### 149. Cancel, *Clean up partial topics* and *Retry into new topics* work from the console (DUI-57, DUI-59, DUI-64, DUI-62.7, DUI-68.2, DUI-68.3)
+
+**Changed.**
+- **Commands with no body reach the API:** the console sends `Content-Type: application/json` on every unsafe request. Before, the API refused a restore's Cancel and Clean up, a readiness check's cancel and a topic discovery's cancel with `415`. A refused Cancel or Clean up now reads "Cancel was not done" or "Clean up was not done" in place, not a page-level "Couldn't load this".
+- **Retry into new topics** starts from the retried run: its recovery point's own row ticked (the Backup's, when a listed Backup produced the point; otherwise the catalog point's), the topics it restored, its target connection while that is listed, and its byte-rate limit. Only the prefix is new. Both buttons, the wizard's title and its banner say "Retry into new topics".
+- **Words:** a cancelled readiness check reads "This check was cancelled. Run it again."; an interrupted restore names who cancelled it, shortened as in the user menu, with the whole subject in its title.
+
+**Do:** nothing.
+**Scope:** `client.test.ts` (the four body-less commands carry the content type; control: a GET carries none; the mutant without the header fails), `restores/retry.test.ts` (a point-bound plan gives its catalog point, target and limit; a Backup-bound plan its Backup), `restores/flows.test.tsx`'s DUI-64 row (exactly the Backup's row and the kept topic ticked; mutants on the offer order and on the kept topics fail it), `restores/model.test.ts` over the API's `preflight-cancelled.json`, and `pages/dui68.test.tsx`'s subject row with its controls.
+**Scope (PoC):** `poc-v05r` (build `sha-b0a0b868`, 2026-10-17), by clicks as `v-dev-op`: Cancel → `Stopping` → `Interrupted` "It was cancelled by …", with the annotation `logweir.dev/cancel-requested-by`; *Clean up partial topics* → "The partial topics were removed", the topic gone from the target; a readiness check and a topic discovery cancelled (their phase `Cancelled`); a refused run's button reads "Retry into new topics"; the retry prefilled the target connection and 0.2 MB/s.
+**Scope (PoC):** `poc-v05r2` (build `sha-0815482b`, 2026-10-17), by clicks as `v-dev-op`: a catalog-bound Backup restored with one topic unticked at 0.2 MB/s, cancelled, then *Retry into new topics*: that Backup's row ticked and visible, no other point ticked, only the kept topic ticked, 0.2 and the target prefilled (DUI-64); a cancelled readiness check reads "This check was cancelled. Run it again." (Preflight `Cancelled`, DUI-68.2); "It was cancelled by …000000000502@local.", the whole subject in the title (DUI-68.3).
+**Rollback:** an older console image; nothing is stored.
+
+#### 150. A backup whose evidence read the controller will retry stays pending; a refused restore shows its finished runner (DUI-55, DUI-68.4)
+
+**Changed.**
+- **Pending, not final:** the API reads a `NotAttempted` evidence verdict as `verification.state: pending` while `status.evidence.observation.retryAfter` says the controller tries again, and its `detail` says when ("the controller tries again at …"); the event stream stays open. With the attempts spent it is `notAttempted`, as before; restores read the same way ([api.md](api.md)). The console follows a pending verdict for 30 minutes (was 5), past the controller's retries at +1, +5 and +15 min, so a backup page no longer stays "Not verified" after the controller verified it.
+- **A refused restore's runner:** the exit-code path writes the facts of the pod it read into `status.progress.runner` (`podPhase: Failed`, `containerState: Terminated`, no waiting reason). Before, a `Pending`, `ContainerCreating` snapshot from before the pod started stayed beside `Failed`, `GuardRefused`. The crash path and Backups are unchanged.
+
+**Do:** an API client that treats `notAttempted` as final reads `pending` while a retry is scheduled.
+**Scope:** `status_mapping.rs::dui55_a_not_attempted_verdict_with_a_retry_scheduled_is_pending` (control: no `retryAfter` is `notAttempted` and settled; the mutant without the guard fails), `backups/verdict.test.ts`'s pending sentence, and `restore_controller::dui68_4_a_refused_restores_runner_snapshot_is_the_finished_pods` (the mutant without the refresh fails).
+**Scope (PoC):** `poc-v05r2` (build `sha-0815482b`, 2026-10-17): a refused restore's `status.progress.runner` reads `podPhase: Failed`, `containerState: Terminated`, no waiting reason (DUI-68.4); a backup page followed "Pending: evidence-fetch Job … (attempt 1 of 4)" to Verified with no reload (DUI-55).
+[UNVERIFIED — the retry branch has not been seen live: in `poc-v05r` and `poc-v05r2` every evidence read succeeded at its first attempt, so no verdict read "tries again at"; `status_mapping.rs` holds it.]
+**Rollback:** an older API reads `notAttempted` at once again, and an older controller keeps the earlier snapshot. Nothing stored changes.
+
+#### 151. Sign-out after a sign-in in another tab works, and an entry point the API cannot confirm is said as such (DUI-63, DUI-54.6, DUI-62.12, DUI-53)
+
+**Changed.**
+- **A stale CSRF token:** after a sign-in in another tab, the first tab's next change (Sign out, Cancel, Rotate access, …) is refused `403` for its old token. The console now re-reads `GET /api/v1/session` once, keeps the new token and sends the request again. A sign-out the service refuses is said ("Not signed out: the service refused (…). You are still signed in; …") and the page stays; before, the `403` was silent and the person stayed signed in.
+- **Sign out** loads `/ui/` with no workspace in the address, so the next sign-in lands in that person's first workspace; a renewed session offers "Sign in again in a new tab" again at its next warning.
+- **The entry point:** while the API cannot read its trusted proxy Service's endpoints, a peer outside the static CIDRs is refused `503 kubernetes_unavailable`, "This service could not confirm its entry point right now: it could not read its trusted proxy from Kubernetes. Try again in a moment.", audit note `trustedProxyUnconfirmed` ([api.md](api.md)). Before, it read `421` "accepts requests only through its trusted HTTPS entry point", a wrong cause. It still fails closed, and a wrong-entry peer while the set is fresh keeps the `421`.
+
+**Do:** nothing. A session still lasts at most 15 minutes (`sessionMaxAgeSeconds`, 60 to 900): a stateless session cannot be revoked, so a longer one is the owner's decision.
+**Scope:** `session_boundary.rs::dui63_a_renewed_session_refuses_the_old_token_and_signs_out_with_its_own`, `client.test.ts` (a sign-out and a cancel resent once with the new token; a stale re-read or a token still refused fails visibly after one re-read; a `workspace_forbidden` `403` is never resent; the mutant without the resend fails), `SessionGate.test.tsx` (a refused sign-out is said), `pages/dui54.test.tsx` (sign-out's address), and `entry_point::the_ingress_is_trusted_through_its_service_and_follows_a_restart` (`503` before the first read, `421` with a fresh set; the mutant without the stale branch fails).
+**Scope (PoC):** `poc-v05r` (build `sha-b0a0b868`, 2026-10-17): Sign out → `/ui/` with no hash, and `v-alice` then lands on `#/prd`; after "Sign in again in a new tab", the next warning offered the link again.
+**Scope (PoC):** `poc-v05r2` (build `sha-0815482b`, 2026-10-17), DUI-63: after a sign-in in a second tab, Sign out in the first tab reached the sign-in page with one click; the API log shows `POST /session/logout` `403`, `GET /session` `200`, `POST …/logout` `204`, and the audit deny, then allow.
+[UNVERIFIED — the `503` for an unconfirmed entry point has not been seen live: no PoC pass's API logs held a failed trusted-proxy read, and it cannot be forced without touching the cluster; `entry_point.rs` holds it.]
+**Rollback:** an older API and console, one image.
+
+#### 152. Smaller console and check fixes (DUI-54, DUI-60, DUI-62, DUI-66, DUI-68.1, DUI-68.5)
+
+**Changed.**
+- **Rotate access** says "A new credential was written to a new Secret…" only when a grant was entered as a new credential, and otherwise "No Secret was written: the destination now names the Secrets and identities you chose. …"; a superseded Secret is "left in place; an administrator removes it with kubectl".
+- **The restore wizard:** the record-semantics sentence says what engine build 5 does (committed records only; an older archive with markers refused unless the plan allows them; every copy of a repeated header key kept, in order; a point in time that would skip an out-of-order record refused before anything is written); a scratch run's review says how long a clone is kept; a chosen Backup point is never behind "Show more"; a catalog point whose topic layout is whole gets checkboxes; a readiness read that failed offers "Read the check again"; the first progress step reads "Admission: the plan is checked and, where the policy asks, approved"; a finished timeline starts with its newest entry.
+- **The checks' words (the runner):** `WriteNotProbed` no longer claims the destination has no write probe; `RegistryUnauthorized`'s remedy no longer shows "[redacted]"; `registry.reachable` says "answered without a credential" for a connection with no registry user, and a connection check's scope reads "the connection, as User:…"; an absent last test says none was run or its result expired.
+- **Elsewhere:** a clone's Clean-up line ("Not run yet: it runs at expiry. …"); Dex local users told apart in the user menu (`…<last 12 of the user id>@<connector>`); no annotation footnote on Destinations; Trust hides namespace rows that name nothing; spacing between grants; a schedule created suspended says no run starts until it is resumed; a restore's name breaks into two halves at 390 px; the Overview's *Back up now* menu opens leftwards, inside the window.
+
+**Do:** nothing.
+**Scope:** `just console` (41 files, 629 tests), among them `pages/dui54.test.tsx`, `pages/dui62.test.ts`, `pages/dui68.test.tsx` (the title's one `<wbr>`), `restores/flows.test.tsx` (the semantics sentence never says "keep one copy") and `destinations/AddDestination.test.tsx` (an existing-Secret rotation reports no Secret written; the mutant forcing the flag fails); `check_cli::dui62_every_remedy_survives_the_redactor_unchanged`. jsdom has no layout, so the title's break and the menu's placement were measured in Chromium on the built console (390, 1440 and 1492 px), against the old build as the control.
+**Scope (PoC):** `poc-v05r` (build `sha-b0a0b868`, 2026-10-17), by clicks in Light and Dark at 1440 and 390 px: the rotate wording's second half, the readiness remedy, the clone's review and Clean-up lines, sign-out, the user menu, the Destinations list, Trust and the grant spacing; the semantics sentence; the registry remedies and the no-credential sentence; the chosen point, the topic checkboxes, the retry label, the timeline, the Admission step, "Authentication" whole at 390 px and the expired test. The suspended schedule's sentence was seen only as its control (the suspend click missed), and a failed readiness read was not forced.
+**Scope (PoC):** `poc-v05r2` (build `sha-0815482b`, 2026-10-17), by clicks: Rotate access to a Secret the destination already names reads "No Secret was written: …", and the Secret list is unchanged (DUI-66); a restore's name at 390 px, Light and Dark, breaks as "rst-6k2hl5qxoto / edpfdymvoymb3zh" and is one line at 1440 px (DUI-68.1); the Overview's *Back up now* menu opens leftwards, its right edge at the button's (DUI-68.5); a schedule created suspended says no run starts until it is resumed (DUI-62.3).
+[UNVERIFIED — Rotate access with a new credential (DUI-66's control) and "Read the check again" after a failed readiness read (DUI-62.5) have not been seen on this build: the first needs a real archive key typed, and the second a check that outlives its session; the console rows hold both.]
+**Rollback:** an older console and runner image; nothing is stored.
 
 ### Required operator actions after `v0.2.0-rc.1`
 
 In addition to the next entry's six, in its order.
 
-**From 0.4.x to 0.5.0 (items 137 to 145) there is no `helm upgrade`:** an
+**From 0.4.x to 0.5.0 (items 137 to 152) there is no `helm upgrade`:** an
 install of 0.4.x or older moves by a fresh install, and the blocks below apply
 only within a release line.
 - **Install afresh by item 137's seven steps:** export trust, keep the bucket,
@@ -3837,7 +4028,7 @@ An upgrade from `v0.2.0-rc.1` (publication `2c277dc1`) crosses items 28, 29, 30,
 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50,
 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70,
 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97,
-98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144 and 145, in the order of the next
+98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151 and 152, in the order of the next
 entry's upgrade path. What each item changes, and what it needs beyond the actions above:
 
 | Item | Changes | Needs |
@@ -3960,8 +4151,15 @@ entry's upgrade path. What each item changes, and what it needs beyond the actio
 | 143 | the engine in the runner image (`0.23.3+logweir.5`), the plan (`restore.rate_limit_bytes_per_sec`), the restore document (no checkpoint) | the controller and runner images rolled together |
 | 144 | the runner (stop, targets record, `restore reconcile`), the controller (`Interrupted`, reconcile and cleanup Jobs), the `Restore` CRD (`status.interruption`), the API and the chart (`patch restores`), the console | `archiveRead` widened to `logweir/drills/*` |
 | 145 | the signed formats (receipt 1.9.0, scorecard 1.13.0 and 2.5.0, catalog point 1.8.0, authorization 2.3.0) and `verify_scorecard.py` 1.35.0 | verifiers upgraded before they read the new lines |
+| 146 | the runner (the catalog walk keeps its prefix's points), the controller (an empty view is `Ready`) and the console | nothing; a catalog's view follows at its next sync |
+| 147 | both readers' per-topic line (`logweir drill verify`, `verify_scorecard.py` 1.35.0) | nothing |
+| 148 | the approval scope and the API (`scope.target.schemaRegistry`) and the console, one image | nothing |
+| 149 | the console | nothing |
+| 150 | the API (a retried evidence read is `pending`), the console and the controller (a refused restore's runner facts) | nothing |
+| 151 | the API (the `503` while the trusted proxy is unconfirmed) and the console, one image | nothing |
+| 152 | the console and the runner (the checks' remedies) | nothing |
 
-**Items 137 to 145 have no in-place rollback.** To leave `v0.5.0` for 0.4.x,
+**Items 137 to 152 have no in-place rollback.** To leave `v0.5.0` for 0.4.x,
 use item 137's steps in reverse: export trust, `helm uninstall`, apply the
 older chart's CRDs, install it, import trust and connect catalogs again. The
 bucket and every document written stay readable (item 145), but a 0.4.x reader

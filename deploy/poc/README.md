@@ -42,9 +42,10 @@ publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 together by `images.yml`, or a release that promotes one unchanged (its tag and
 chart version; versions.env, *A RELEASE PIN*). The profile needs a build that
 carries the chart-gap fixes below (every publication since main `86a554e6`):
-`LOGWEIR_COMMIT` names main `b0a0b868` (2026-10-17, PR #74: the fresh-PoC and
-deep UI fixes), the `sha-` publication of run 39007743073, upgraded in place
-from main `3bf3165c` (OD-23: one namespace with workspaces, installed fresh),
+`LOGWEIR_COMMIT` names main `0815482b` (2026-10-17, PR #75: the PoC re-check's
+fixes), the `sha-` publication of run 39022824166, upgraded in place from main
+`b0a0b868` (PR #74) and before it `3bf3165c` (OD-23: one namespace with
+workspaces, installed fresh),
 and versions.env's comment records every pin before it, among them the releases
 `v0.4.1` and `v0.4.0`. The first long-lived pin, main `fdb48cd8` (CI run 36183088296,
 2026-09-25), carried the
