@@ -153,11 +153,11 @@ yet, not a pass.
 
 | What | Value |
 |---|---|
-| Candidate commit (the tagged commit) | TBD |
-| Version tag | TBD |
-| Publication commit (`release.json` `.images.publication`) | TBD |
-| CI run (`ci.yml`) for the publication commit, its `publish` job green | TBD |
-| Release dry run (`release.yml` dispatched at the publication commit) | TBD |
+| Candidate commit (the tagged commit) | the commit that adds this record, on `claude/rel-v050` (merged into `main` afterwards); it differs from the publication commit only under `docs/` |
+| Version tag | `v0.5.0`, approved by the owner on 2026-10-17 ("skip everything and deploy the tag"); a full GitHub Release |
+| Publication commit (`release.json` `.images.publication`) | `8218ae27308a424601b4c2fa0998fbba1129bba7` |
+| CI run (`ci.yml`) for the publication commit, its `publish` job green | [39040875862](https://github.com/VladyslavHaina/logweir/actions/runs/39040875862): every job green, including the seven `e2e` shards and `publish` (console-dist, build amd64, build arm64, promote, sign); `console` skipped by change detection (no console change since `0815482b`, whose run [39022824166](https://github.com/VladyslavHaina/logweir/actions/runs/39022824166) passed it) |
+| Release dry run (`release.yml` dispatched at the publication commit) | not run, at the owner's direction (2026-10-17); the tag run's own `tests` job runs the full `ci.yml` before anything is published |
 | Release run (`release.yml` on the tag) and release drill | TBD |
 | Runner image digest (`logweir`; amd64 and arm64) | TBD |
 | Controller image digest (`weirkeeper`; amd64 and arm64) | TBD |
