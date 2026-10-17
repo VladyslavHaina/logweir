@@ -541,9 +541,11 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              so restore into a registry that holds none of these schemas, or the source's own."
         }
         CheckCode::SchemaSnapshotInvalid => {
-            "The recovery point's schema snapshot is missing from the archive or is not the one \
-             its signed receipt names. Restore another point, or restore into a connection \
-             without a registry (the schemas are then not imported)."
+            "The recovery point's schema snapshot is missing from the archive, is not the one \
+             its signed receipt names, or comes from a receipt this restore cannot verify (a \
+             plan from a Backup with no catalog point). Plan the restore from a catalog point, \
+             restore another point, or restore into a connection without a registry (the \
+             schemas are then not imported)."
         }
         // -- switchoverReadiness (PROD-04.2 §3.8) --------------------------
         CheckCode::RestoreEvidenceRefused => switchover::EVIDENCE_REMEDY,

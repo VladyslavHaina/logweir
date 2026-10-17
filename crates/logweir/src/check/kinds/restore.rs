@@ -197,7 +197,7 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
                     deadline.slice(2),
                 )
                 .map_err(|f| f.message);
-            (bound_receipt, bound_snapshot) = unbound_schemas(&req.backup_id, access);
+            bound_snapshot = unbound_schemas(&req.backup_id, access);
         }
         checks.push(super::capability::target_schemas(
             &req.target,
@@ -617,17 +617,16 @@ fn captured_snapshot(
     )
 }
 
-/// PoC D3: the receipt and snapshot of the set a plan bound to no point
-/// restores, read as the run reads them
-/// ([`crate::drill::schema_import::receipt_of_set`]). A failed read is a
-/// snapshot that could not be read, never "none was captured".
+/// PoC D3: `target.schemas` for a plan bound to no point, with the run's
+/// verdict: refused (`SchemaSnapshotInvalid`,
+/// [`crate::drill::schema_import::unverifiable`]) when its set's receipt says
+/// the registry was captured, since that receipt cannot be verified; `None`
+/// (the run imports nothing, `noSnapshot`) when there is no such receipt. A
+/// failed read is a snapshot that could not be read, never "none captured".
 fn unbound_schemas(
     backup_id: &str,
     access: Result<Box<dyn ObjectAccess>, String>,
-) -> (
-    Option<BackupReceipt>,
-    Option<Result<logweir_core::schema_registry::Snapshot, String>>,
-) {
+) -> Option<Result<logweir_core::schema_registry::Snapshot, String>> {
     let unread = |why: String| {
         Some(Err(format!(
             "{}: the receipt of backup set {backup_id} could not be read: {why}",
@@ -636,17 +635,16 @@ fn unbound_schemas(
     };
     let access = match access {
         Ok(access) => access,
-        Err(why) => return (None, unread(why)),
+        Err(why) => return unread(why),
     };
     match crate::drill::schema_import::receipt_of_set(backup_id, |key: &str, cap| {
         access.get(key, cap)
     }) {
-        Ok(Some(receipt)) => {
-            let snapshot = captured_snapshot(&receipt, access.as_ref());
-            (Some(receipt), snapshot)
-        }
-        Ok(None) => (None, None),
-        Err(e) => (None, unread(e.to_string())),
+        Ok(receipt) => receipt
+            .and_then(|r| r.schema_registry)
+            .filter(|r| r.captured)
+            .map(|_| Err(crate::drill::schema_import::unverifiable(backup_id))),
+        Err(e) => unread(e.to_string()),
     }
 }
 
@@ -1801,19 +1799,20 @@ mod tests {
     use super::*;
     use crate::drill::schema_import::tests::{archive, SET};
 
-    /// PoC D3: the preview of a plan bound to no point reads the snapshot its
-    /// set's own receipt names, as the run does, so `target.schemas` says what
-    /// will be imported. Control: without the claim that names the run there
-    /// is nothing to read, and a handle that could not be opened is a snapshot
+    /// PoC D3: the preview of a plan bound to no point gives the run's
+    /// verdict: `SchemaSnapshotInvalid` when its set captured a registry
+    /// (the receipt cannot be verified). Controls: without the claim there is
+    /// nothing to refuse, and a handle that could not be opened is a snapshot
     /// that could not be read, never "none captured".
     #[test]
-    fn the_preview_of_a_plan_bound_to_no_point_reads_its_sets_snapshot() {
-        let (receipt, snapshot) = unbound_schemas(SET, Ok(Box::new(archive(true))));
-        assert_eq!(receipt.map(|r| r.backup_id).as_deref(), Some(SET));
-        assert!(matches!(snapshot, Some(Ok(_))), "{snapshot:?}");
-        let (receipt, snapshot) = unbound_schemas(SET, Ok(Box::new(archive(false))));
-        assert!(receipt.is_none() && snapshot.is_none());
-        let (_, snapshot) = unbound_schemas(SET, Err("AccessDenied".into()));
+    fn the_preview_of_a_plan_bound_to_no_point_refuses_an_unverifiable_snapshot() {
+        let snapshot = unbound_schemas(SET, Ok(Box::new(archive(true))));
+        assert!(
+            matches!(&snapshot, Some(Err(e)) if e.contains("cannot verify the receipt")),
+            "{snapshot:?}"
+        );
+        assert!(unbound_schemas(SET, Ok(Box::new(archive(false)))).is_none());
+        let snapshot = unbound_schemas(SET, Err("AccessDenied".into()));
         assert!(
             matches!(&snapshot, Some(Err(e)) if e.contains("could not be read: AccessDenied")),
             "{snapshot:?}"
@@ -1822,7 +1821,7 @@ mod tests {
         let src = include_str!("restore.rs");
         let body = src.split("pub fn run(").nth(1).expect("run's body");
         let call = body
-            .find("(bound_receipt, bound_snapshot) = unbound_schemas(&req.backup_id, access);")
+            .find("bound_snapshot = unbound_schemas(&req.backup_id, access);")
             .expect("run reads the unbound set's schemas");
         assert!(
             call < body

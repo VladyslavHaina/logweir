@@ -56,9 +56,10 @@ fn refused(message: String) -> DrillError {
 /// The receipt of a set a plan names by id alone (no `source.point`): the
 /// set's execution claim names the run that wrote it, and its receipt sits
 /// beside the claim. `None` when there is no claim or receipt to read (an
-/// older archive), or they do not name this set. Read, NOT verified: such a
-/// plan restores a set nobody re-verifies, and its schemas are as trusted as
-/// its records (PoC D3). The runner and the restore preflight both read it.
+/// older archive), or they do not name this set. Read, NOT verified: neither
+/// the runner of such a plan nor a check Job holds an evidence keyring, so it
+/// is used only to REFUSE an import ([`unverifiable`]), never to make one.
+/// The runner and the restore preflight both read it.
 ///
 /// # Errors
 ///
@@ -95,11 +96,28 @@ pub fn receipt_of_set(
     )
 }
 
+/// PoC D3: why a plan bound to no point is refused when its set captured a
+/// registry. Its receipt cannot be verified here (only a point-bound plan
+/// carries the evidence keyring), and importing on an unverified receipt
+/// would let whoever can write the bucket choose what is registered, under
+/// which IDs, on the target. The named reason is `SchemaSnapshotInvalid`.
+#[must_use]
+pub fn unverifiable(backup_id: &str) -> String {
+    format!(
+        "{SNAPSHOT_INVALID}: backup set {backup_id} captured a schema registry, and a restore \
+         bound to no recovery point cannot verify the receipt that names the snapshot, so \
+         nothing is imported from it. Plan the restore from the set's catalog point (connect \
+         a recovery catalog over its destination), or choose a target connection without a \
+         registry; no target topic was created"
+    )
+}
+
 /// Decide, and read the snapshot when this run imports. A target connection
 /// without a registry is not refused (a drill into a scratch cluster needs
 /// none): the scorecard says the schemas were not imported. A plan bound to
 /// a point takes the registry block from the verified receipt; one bound to
-/// none, from [`receipt_of_set`] of the set it restores (`set_backup_id`).
+/// none is refused when [`receipt_of_set`] of the set it restores
+/// (`set_backup_id`) says the registry was captured ([`unverifiable`]).
 ///
 /// # Errors
 ///
@@ -111,24 +129,25 @@ pub fn prepare(
     set_backup_id: &str,
     archive: &Store,
 ) -> Result<Prepared, DrillError> {
-    let unbound = match bound {
-        None if spec.target.schema_registry.is_some() => {
-            receipt_of_set(set_backup_id, |key: &str, cap| {
-                archive.get_capped(key, cap).map(|(bytes, _)| bytes)
-            })
-            .map_err(|e| {
-                DrillError::Operational(format!(
-                    "the receipt of backup set {set_backup_id} could not be read: {e}; no \
-                     target topic was created"
-                ))
-            })?
+    if bound.is_none() && spec.target.schema_registry.is_some() {
+        let receipt = receipt_of_set(set_backup_id, |key: &str, cap| {
+            archive.get_capped(key, cap).map(|(bytes, _)| bytes)
+        })
+        .map_err(|e| {
+            DrillError::Operational(format!(
+                "the receipt of backup set {set_backup_id} could not be read: {e}; no target \
+                 topic was created"
+            ))
+        })?;
+        if receipt
             .and_then(|r| r.schema_registry)
+            .is_some_and(|r| r.captured)
+        {
+            return Err(refused(unverifiable(set_backup_id)));
         }
-        _ => None,
-    };
+    }
     let captured = bound
         .and_then(|b| b.schema_registry.as_ref())
-        .or(unbound.as_ref())
         .filter(|r| r.captured);
     let (target, block) = match (spec.target.schema_registry.as_ref(), captured) {
         (None, None) => return Ok(Prepared::Nothing),
@@ -247,13 +266,43 @@ pub(crate) mod tests {
     }
 
     /// PoC D3: a plan bound to no point (a restore planned from a Backup)
-    /// imports what its set's own receipt captured. Control: the same archive
-    /// without the claim that names the run says `noSnapshot`, as every such
-    /// plan did before.
+    /// whose set captured a registry is REFUSED, `SchemaSnapshotInvalid`,
+    /// before anything is imported: its receipt cannot be verified, so it
+    /// never decides what is registered. Controls: without the claim that
+    /// names the run, and for another set id, the run goes on with
+    /// `noSnapshot`, as every such plan did before.
     #[test]
-    fn a_plan_bound_to_no_point_imports_what_its_sets_receipt_captured() {
+    fn a_plan_bound_to_no_point_never_imports_from_an_unverified_receipt() {
         let plan = plan_into_a_registry();
-        match prepare(&plan, None, SET, &archive(true)).expect("prepared") {
+        match prepare(&plan, None, SET, &archive(true)) {
+            Err(DrillError::Guard(GuardRefusal(m))) => {
+                assert!(m.starts_with(SNAPSHOT_INVALID), "{m}");
+                assert!(m.contains("cannot verify the receipt"), "{m}");
+                assert!(m.contains("no target topic was created"), "{m}");
+            }
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+        // Control: the same set bound to its point, whose receipt the binding
+        // verified, imports from the same snapshot.
+        let store = archive(true);
+        let keys = crate::backup::phase_run::receipt_keys(SET, "run-1");
+        let (bytes, _) = store
+            .get_capped(
+                &keys.receipt_key,
+                logweir_engine_oso::storage::caps::SIGNED_DOCUMENT,
+            )
+            .expect("the receipt");
+        let verified: logweir_core::backup_receipt::BackupReceipt =
+            serde_json::from_slice(&bytes).unwrap();
+        let bound = BoundSet {
+            point_id: "lwp1-00000000000000000000000000000000".into(),
+            backup_id: SET.into(),
+            manifest_key: verified.archive.manifest_key.clone(),
+            manifest_sha256: verified.archive.manifest_sha256.clone(),
+            manifest_version_id: None,
+            schema_registry: verified.schema_registry,
+        };
+        match prepare(&plan, Some(&bound), SET, &store).expect("prepared") {
             Prepared::Import(p) => assert_eq!(p.target.url, "http://target:8081"),
             other => panic!("expected an import, got {other:?}"),
         }

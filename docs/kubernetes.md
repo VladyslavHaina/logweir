@@ -893,12 +893,15 @@ connection's own Secret. TLS trusts the public roots plus `auth.tlsCa` when set.
   allowed to set a subject's mode (on Redpanda, a superuser). Any registry
   answer other than the one that means "not there" refuses the run. The plan's
   `target.schema_registry` must equal the target connection's
-  (`ConnectionPlanMismatch`). The snapshot comes from the receipt: the bound
-  point's, verified, for a plan with `source.point`; for a plan bound to no
-  point (a restore planned from a Backup), the receipt its set's
-  `execution.claim.json` names, read but not re-verified, like that set's
-  records. A set with neither (an older archive) imports nothing (`noSnapshot`).
-  The archive-read grant must read `logweir/backups/` for that.
+  (`ConnectionPlanMismatch`). The snapshot comes only from a verified receipt:
+  the bound point's (`source.point`). A plan bound to no point (a restore
+  planned from a Backup with no catalog row) whose set captured a registry is
+  refused `SchemaSnapshotInvalid` before any topic is created, because its
+  receipt cannot be verified there: plan it from the set's catalog point, or
+  restore into a connection without a registry. The runner and `target.schemas`
+  find that out from the receipt its set's `execution.claim.json` names (the
+  archive-read grant reads `logweir/backups/` for it); a set with no claim
+  imports nothing (`noSnapshot`).
 - **Checks:** `registry.reachable` (connection test and backup readiness,
   advisory) and `target.schemas` (restore readiness, blocking) are listed only for
   a connection that names a registry.
