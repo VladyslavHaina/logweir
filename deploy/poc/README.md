@@ -308,9 +308,15 @@ From a checkout, the same three commands with `-f charts/logweir/crds/` and
 `ls charts/logweir/crds`. `--force-conflicts` is required: Helm owns the fields
 of the CRDs it made, so without it the apply is refused.
 
+Then install with `--skip-crds`: the CRDs are already this chart's. Without it,
+Helm 4 applies `crds/` server-side again on a cluster where they exist, and the
+apply above made `kubectl` the owner of some of their fields, so the install
+fails with `failed to install CRD crds/approvals.yaml: conflict … with
+"kubectl": .spec.names.categories, .spec.names.shortNames`:
+
 ```bash
 helm upgrade --install logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" \
-  --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" \
+  --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" --skip-crds \
   -f deploy/poc/logweir.values.yaml --wait --timeout 15m
 ```
 
@@ -325,7 +331,7 @@ chart; `--set` gives it the images the published chart would have carried:
 
 ```bash
 helm upgrade --install logweir ./charts/logweir --kube-context "$CTX" -n "$LOGWEIR_NAMESPACE" \
-  -f deploy/poc/logweir.values.yaml \
+  --skip-crds -f deploy/poc/logweir.values.yaml \
   --set "controllerImage=docker.io/vladyslavhaina/weirkeeper:$LOGWEIR_TAG" \
   --set "runnerImage=docker.io/vladyslavhaina/logweir:$LOGWEIR_TAG" \
   --set "api.console.image=docker.io/vladyslavhaina/logweir-console:$LOGWEIR_TAG" \
@@ -396,7 +402,7 @@ kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" wait --for=condition=complete \
 | MinIO user | secret key | the grant it fills |
 |---|---|---|
 | `logweir-poc-<ws>-writer` | `poc-secrets/minio-<ws>-writer` | `<ws>`'s destination: `archiveWrite` (and `evidenceWrite`, which falls back to it) |
-| `logweir-poc-<ws>-reader` | `poc-secrets/minio-<ws>-reader` | `<ws>`'s destination: `archiveRead` (widened to the catalog-sync row, and `legacy/`) |
+| `logweir-poc-<ws>-reader` | `poc-secrets/minio-<ws>-reader` | `<ws>`'s destination: `archiveRead` (widened to the catalog-sync row) |
 | `logweir-poc-<ws>-evidence` | `poc-secrets/minio-<ws>-evidence` | `<ws>`'s destination: `evidenceRead` (with the `s3:ListBucket` that makes "absent" mean absent) |
 | `logweir-poc-evidence` | `poc-secrets/minio-evidence` | the controller's `logweir-evidence-ro` only: `kafka-backups/logweir/*` |
 
@@ -416,7 +422,9 @@ kill "$pf"
 
 ## 8. Trust
 
-**A fresh install needs no step here.** Its identity hook generated the signer
+**A fresh install needs no step here** (on a cluster that held an earlier
+install, once the old `TrustPolicy` is deleted: *Import an earlier install's
+archive*, step 2). Its identity hook generated the signer
 and the console's confirmation key and created the default `TrustPolicy`
 `logweir-installation` with both ([docs/install.md](../../docs/install.md),
 *5f*), which governs `logweir` and so every workspace in it:
@@ -690,19 +698,59 @@ the CRDs stay.
 
 ## Import an earlier install's archive
 
-An install of 0.4.x or older is not upgraded; its archive is imported. Before
-removing the old release, copy its archive into the new MinIO, into the bucket of the workspace that
-will hold the old points (`stg` here): `mc mirror` from the old bucket and
-prefix to `poc-stg/legacy/<old prefix>` (`stg`'s reader reads `legacy/`), and
-export the old signer
-as *Recover onto a clean installation with the kit* says
-([docs/install.md](../../docs/install.md#recover-onto-a-clean-installation-with-the-kit)).
-In the new install, add the old signer's `EvidenceSigning` entry, with its own
-`notBefore`, to `logweir-installation` as historical (step 8). Then, in the
-workspace `stg`: a destination over bucket `poc-stg`, prefix `legacy/<old
-prefix>`, with `stg`'s reader grant, and a catalog over it. The catalog lists the old points, and a restore of one
-ends verified. A catalog in another workspace that names that destination is
-refused: references never cross workspaces.
+An install of 0.4.x or older is not upgraded; its archive is imported, KEY FOR
+KEY. A point's catalog record and receipt name bucket-relative keys
+(`<old prefix>/<set>/manifest.json`, `logweir/backups/<set>/…`), a catalog
+reads the bucket's fixed `logweir/catalog/v1/`, and a restore reads a set at
+the prefix it was written under. A copy under any other prefix (`legacy/…`,
+say) lists no point, or lists them `Missing`, and a restore of one is refused
+`PointBindingSetMismatch`.
+
+1. **Before removing the old release**, export its trust as *Recover onto a
+   clean installation with the kit* says
+   ([docs/install.md](../../docs/install.md#recover-onto-a-clean-installation-with-the-kit)),
+   and copy its bucket to disk (the old MinIO's PVC goes with the uninstall),
+   as [docs/install.md](../../docs/install.md#keep-the-demo-archive-across-an-uninstall)
+   says: `mc mirror old/kafka-backups ./archive/kafka-backups`.
+2. **Uninstall the old release, then delete the two cluster-scoped objects it
+   leaves**, both exported in step 1: `helm uninstall` keeps
+   `TrustPolicy/logweir-installation`, and the fresh install's hook makes trust
+   only on a cluster with no `TrustPolicy` (step 8); and it keeps
+   `ClusterRole/logweir-identity-singleton`, which names the OLD release
+   namespace, so the new chart refuses to install ("cluster installation
+   identity is already claimed"). A policy that records a `KeyCompromise`
+   revocation needs its finalizer removed first
+   ([docs/install.md](../../docs/install.md), *Uninstall, and what it leaves behind*).
+
+   ```bash
+   kubectl --context "$CTX" delete trustpolicy logweir-installation
+   kubectl --context "$CTX" delete clusterrole logweir-identity-singleton
+   ```
+
+3. **Install** by steps 1 to 7.
+4. **Copy the old bucket's two trees into the bucket of the workspace that will
+   hold the old points** (`stg` here), under the same keys: the archive prefix
+   (`poc/` in an earlier PoC) and `logweir/`. Through a port-forward to the new
+   MinIO, with its root credential (`minio.rootUser`), as an operator, never
+   given to Logweir:
+
+   ```bash
+   kubectl --context "$CTX" -n "$LOGWEIR_NAMESPACE" port-forward svc/logweir-minio 9000:9000 &
+   pf=$!
+   mc alias set new http://127.0.0.1:9000     # prompts for minio.rootUser and its password
+   mc mirror ./archive/kafka-backups/poc new/poc-stg/poc
+   mc mirror ./archive/kafka-backups/logweir new/poc-stg/logweir
+   kill "$pf"
+   ```
+
+5. **Trust:** add the old signer's `EvidenceSigning` entry, with its own
+   `notBefore`, to `logweir-installation` as historical (step 8).
+6. **In the workspace `stg`:** a destination over bucket `poc-stg` with the OLD
+   prefix (`poc`) and `stg`'s grants, and a catalog over it. The catalog lists
+   the old points `VerifiedHistorical`, and a restore of one ends verified. New
+   backups through that destination land beside them. A catalog in another
+   workspace that names that destination is refused: references never cross
+   workspaces.
 
 ## Uninstall
 

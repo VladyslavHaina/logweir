@@ -1039,13 +1039,23 @@ in your secret store:
 
 **0.4.x to 0.5.0 has no in-place upgrade** (OD-23). Export trust as in
 *Recover onto a clean installation with the kit*, keep the bucket, `helm
-uninstall` the old release (one install per cluster), **apply the 0.5.0
-chart's CRDs server-side** (the first command of the block below, then its
-wait loop), install 0.5.0 into one namespace with `workspaces`, import trust,
-and then in each workspace add connections, destinations and schedules and
-connect a catalog to see the old points. Delete the old namespaces when done.
-Every archive stays readable and verifiable: nothing in the bucket names a
-namespace.
+uninstall` the old release (one install per cluster), then delete the two
+cluster-scoped objects it leaves, both covered by the export:
+`TrustPolicy/logweir-installation` (the fresh install's hook makes trust only
+on a cluster with no `TrustPolicy`) and `ClusterRole/logweir-identity-singleton`
+(it names the old release namespace, and the chart refuses another). **Apply
+the 0.5.0 chart's CRDs server-side** (the first command of the block below,
+then its wait loop), install 0.5.0 into one namespace with `workspaces` **and
+`--skip-crds`** (Helm 4 otherwise applies `crds/` server-side over the fields
+the `kubectl` apply now owns and fails with a conflict on `.spec.names`),
+import trust, and then in each workspace add connections, destinations and
+schedules and connect a catalog to see the old points. Delete the old
+namespaces when done. Every archive stays readable and verifiable: nothing in
+the bucket names a namespace. Copy an old bucket into a workspace's bucket
+key for key, under the same prefix and `logweir/`: points and receipts name
+bucket-relative keys, and a restore reads a set at the prefix it was written
+under ([deploy/poc/README.md](../deploy/poc/README.md), *Import an earlier
+install's archive*).
 
 **Why the CRDs go first on a fresh install too:** `helm uninstall` leaves the
 CRDs, and `helm install` creates a CRD from `crds/` only when none exists, so

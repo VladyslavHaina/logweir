@@ -3544,10 +3544,10 @@ Empty renders nothing: the API keeps its defaults, `[openid, profile, email, gro
 **Do:** install afresh; there is no `helm upgrade` from 0.4.x ([install.md](install.md#upgrade-crds-before-upgrading-the-controller), [kubernetes.md](kubernetes.md#upgrade)):
 1. Export trust as in [*Recover onto a clean installation with the kit*](install.md#recover-onto-a-clean-installation-with-the-kit) and keep the bucket.
 2. Let runs finish, and let every TTL clone settle (item 91): after the uninstall nothing reconciles the old namespaces.
-3. `helm uninstall` the old release (one install per cluster).
+3. `helm uninstall` the old release (one install per cluster), then delete `TrustPolicy/logweir-installation` and `ClusterRole/logweir-identity-singleton`, which it leaves and step 1 exported: the fresh install's hook makes trust only on a cluster with no `TrustPolicy`, and the chart refuses to install while the singleton names the old release namespace.
 4. Apply this release's CRDs (`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`): `helm uninstall` leaves the old ones, and `helm install` does not replace a CRD that exists, so without this step items 142 and 144's fields are pruned.
-5. Install 0.5.0 into one namespace with `workspaces`, the renamed values and none of the removed ones.
-6. Import trust; then, in each workspace, add connections, destinations and schedules, and connect a catalog to list the old points (item 145: nothing in the bucket names a namespace).
+5. Install 0.5.0 into one namespace with `workspaces`, the renamed values and none of the removed ones, with `--skip-crds`: Helm 4 otherwise applies `crds/` server-side again and fails on the fields step 4 gave to `kubectl` (`conflict … .spec.names.categories, .spec.names.shortNames`).
+6. Import trust; then, in each workspace, add connections, destinations and schedules, and connect a catalog to list the old points (item 145: nothing in the bucket names a namespace). An old bucket copied into a workspace's bucket keeps its keys: the same archive prefix and `logweir/`, and a destination with the old prefix ([deploy/poc/README.md](../deploy/poc/README.md), *Import an earlier install's archive*).
 7. Delete the old namespaces when done.
 
 **Scope:** `chart_lint_one_namespace_per_install` (every namespaced object of every render is in the release namespace, except the two opt-in Roles: Strimzi's and the trusted proxy's), `chart_lint_every_grant_reaching_the_api_and_controller_accounts_is_pinned`, `manifest_lint::the_shipped_roles_are_exactly_as_specified` (the three write roles absent from every render), `check-chart.sh` (each of the ten removed or renamed values refused by name, with a control), `weirkeeper/tests/one_namespace.rs` (no `Api::all` on a namespaced kind; every controller watches the install namespace), `linkage::weirkeeper_refuses_to_start_without_its_namespace_and_workspaces`, `cli_exit_codes` (`identity distribute` is gone) and `deploy/poc/validate.sh` (one namespace, four workspaces).
@@ -3668,9 +3668,11 @@ In addition to the next entry's six, in its order.
 install of 0.4.x or older moves by a fresh install, and the blocks below apply
 only within a release line.
 - **Install afresh by item 137's seven steps:** export trust, keep the bucket,
-  let runs and TTL clones settle, `helm uninstall`, apply this release's CRDs
-  by hand (`helm install` keeps the old ones), install into one namespace with
-  `workspaces`, import trust, and connect a catalog in each workspace.
+  let runs and TTL clones settle, `helm uninstall`, delete the old
+  `TrustPolicy/logweir-installation` and `ClusterRole/logweir-identity-singleton`,
+  apply this release's CRDs by hand (`helm install` keeps the old ones),
+  install into one namespace with `workspaces` and `--skip-crds`, import trust,
+  and connect a catalog in each workspace.
 - **Write the values file anew** (item 137): drop `kubernetes.namespace`,
   `kubernetes.connectionsNamespace`, `controller.watchNamespaces`,
   `identity.authorizedRunnerNamespaces` and `api.namespaces`; rename

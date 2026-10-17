@@ -3329,11 +3329,14 @@ mismatch, and image pruning can remove it.
 **0.4.x to 0.5.0 has no in-place upgrade** (OD-23: one namespace per install,
 workspaces inside it). Export trust as in [*Recover onto a clean installation
 with the kit*](install.md#recover-onto-a-clean-installation-with-the-kit), keep
-the bucket, `helm uninstall` the old release (one install per cluster), apply
+the bucket, `helm uninstall` the old release (one install per cluster), delete
+the `TrustPolicy/logweir-installation` and `ClusterRole/logweir-identity-singleton`
+it leaves (exported with the trust; the fresh install makes its own), apply
 the 0.5.0 chart's CRDs server-side
 (`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`, then
 wait for them to be established), install 0.5.0 into one namespace with
-`workspaces`, import trust, and then in each
+`workspaces` and `--skip-crds` (Helm 4 would apply `crds/` again and fail on
+the fields `kubectl` now owns), import trust, and then in each
 workspace add connections, destinations and schedules and connect a catalog to
 see the old points. Delete the old namespaces when done. Every archive stays
 readable and verifiable: nothing in the bucket names a namespace. The CRDs go
