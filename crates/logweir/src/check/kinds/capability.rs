@@ -450,9 +450,15 @@ fn registry_answers(
 pub fn registry_reachable(connection: &ConnectionPlan, now: DateTime<Utc>) -> CheckOutcome {
     let id = CheckId::RegistryReachable;
     match registry_answers(connection) {
+        // DUI-62.2: a registry with no user is asked with no credential.
         Ok((_, plan)) => ready(id, CheckCode::RegistryAnswered, now).with_message(&format!(
-            "the Schema Registry at {} answered with this connection's registry credential",
-            plan.url
+            "the Schema Registry at {} answered {}",
+            plan.url,
+            if plan.username.is_some() {
+                "with this connection's registry credential"
+            } else {
+                "without a credential (this connection names no registry user)"
+            }
         )),
         Err((state, code, message)) => catalogue::outcome(id, state, code, now)
             .with_message(&message)

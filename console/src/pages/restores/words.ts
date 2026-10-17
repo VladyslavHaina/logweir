@@ -251,7 +251,7 @@ export const RETRY_OLD_RUN_SENTENCE =
   "The failed restore is not touched: its object, its evidence and the topics it had already created stay as they are. Resume is not implemented; this is a new run from the beginning.";
 
 export const RETRY_FRESH_TARGET_SENTENCE =
-  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retrying opens the wizard for a NEW restore of a point you choose, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
+  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retry into new topics opens the wizard for a NEW restore, starting from this run's point, target and byte-rate limit, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
 
 export const ORIGINAL_NAME_SENTENCE =
   "Each topic is recreated under its own name, a new generation of the name, instead of beside it under a prefix. Only into topics that do not exist: the runner refuses if a name exists, refuses while a broker auto-creates topics (unless the target is a different cluster from the archive's source), and refuses when a declarative owner manages a name. It needs its own approval subject, originalName. Stop every producer of these names first.";

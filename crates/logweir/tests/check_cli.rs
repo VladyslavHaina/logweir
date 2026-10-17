@@ -7702,6 +7702,21 @@ fn the_only_write_in_the_check_runner_is_create_only() {
     );
 }
 
+/// DUI-62.1: every remedy reaches the person as written. A remedy passes the
+/// redaction chokepoint (`with_remedy`), and one that read like a credential
+/// pair ("registry-password key") was shown with "[redacted]" in it.
+#[test]
+fn dui62_every_remedy_survives_the_redactor_unchanged() {
+    let mut changed: Vec<String> = Vec::new();
+    for code in CheckCode::ALL {
+        let remedy = kinds::remedy_for(*code);
+        if logweir_core::check_contract::redact(remedy) != remedy {
+            changed.push(format!("{code}: {remedy}"));
+        }
+    }
+    assert!(changed.is_empty(), "redacted remedies: {changed:#?}");
+}
+
 /// Every row the runner can emit has a catalogue entry — so `expiresAt` and
 /// `gating` are properties of the ROW and not of the call site.
 #[test]

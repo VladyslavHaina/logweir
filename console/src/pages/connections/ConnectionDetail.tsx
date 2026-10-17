@@ -90,7 +90,7 @@ function Settings({ c }: { c: Connection }) {
         <CardTitle component="h2">Settings</CardTitle>
       </CardHeader>
       <CardBody>
-        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "10ch", md: "16ch" }}>
+        <DescriptionList isCompact isHorizontal horizontalTermWidthModifier={{ default: "15ch", md: "16ch" }}>
           <Term term="Role">{c.role}</Term>
           <Term term="Bootstrap servers">
             <span className="lw-break">{c.bootstrapServers.join(", ")}</span>

@@ -125,12 +125,14 @@ export function PointStep({
 }) {
   const narrow = useNarrow();
   const [query, setQuery] = useState("");
-  const [limit, setLimit] = useState(SHOWN);
+  const [shownLimit, setLimit] = useState(SHOWN);
   const matching = useMemo(() => points.filter((b) => matchesQuery(pointHaystack(b), query)), [points, query]);
   // DUI-41.4: a catalog point chosen before the wizard opened (Recovery catalog → Restore this
   // point) is shown as chosen: its section opens, it is listed even past the first 50, and it
   // is brought into view once.
   const pointKey = useWatch({ control, name: "pointKey" }) as string;
+  // DUI-62.4: a chosen Backup (Backup → Restore this point, a retry) is never hidden behind "Show more".
+  const limit = Math.max(shownLimit, matching.findIndex((b) => pointKeyOf(b) === pointKey) + 1);
   const chosenOffer = pointKey.startsWith("catalog/") ? offers.find((o) => offerKeyOf(o) === pointKey) : undefined;
   const [offersOpen, setOffersOpen] = useState(pointKey.startsWith("catalog/"));
   const listedOffers = chosenOffer && !offers.slice(0, 50).includes(chosenOffer) ? [chosenOffer, ...offers.slice(0, 49)] : offers.slice(0, 50);
@@ -151,7 +153,7 @@ export function PointStep({
     <>
       <Title headingLevel="h2" size="xl">Which recovery point?</Title>
       {retryOf && (
-        <Alert variant="info" isInline title={`Retrying ${retryOf} to a fresh target`} className="lw-gap-top lw-gap-bottom" id="retry-banner">
+        <Alert variant="info" isInline title={`Retrying ${retryOf} into new topics`} className="lw-gap-top lw-gap-bottom" id="retry-banner">
           <p>This is a NEW restore. {RETRY_IDENTITY_SENTENCE}</p>
           <p>{RETRY_OLD_RUN_SENTENCE}</p>
         </Alert>
@@ -796,6 +798,7 @@ export function CheckStep({
   connection,
   onStart,
   onCancel,
+  onReread,
   topicPreview,
 }: {
   readiness: ReadinessState;
@@ -806,6 +809,8 @@ export function CheckStep({
   connection: Connection | null;
   onStart: () => void;
   onCancel: () => void;
+  /** DUI-62.5: read a check this page lost track of (a session that ended) again. */
+  onReread?: () => void;
   /** The topic configuration preview (theme A), once the check is done. */
   topicPreview?: ReactNode;
 }) {
@@ -845,6 +850,14 @@ export function CheckStep({
           {readiness.error !== null && readiness.error !== undefined && (
             <Alert variant="danger" isInline title="The check could not be started or read">
               <ErrorText error={readiness.error} />
+              {r && !r.terminal && onReread && (
+                <div className="lw-gap-top">
+                  After signing in again, read this check again: its verdict is kept by the service.{" "}
+                  <Button variant="link" isInline onClick={onReread} id="readiness-reread">
+                    Read the check again
+                  </Button>
+                </div>
+              )}
             </Alert>
           )}
           {r && refusal && !running && (

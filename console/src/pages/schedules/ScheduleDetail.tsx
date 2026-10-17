@@ -547,7 +547,11 @@ export function ScheduleDetail() {
               title={flash === "created" ? `Schedule ${s.name} created` : `Policy saved as revision g${s.generation}`}
               actionClose={<AlertActionCloseButton onClose={() => setFlash(undefined)} />}
             >
-              {flash === "created" ? "Its first run starts at the next slot below, or use Back up now." : "Runs already created keep the revision they copied."}
+              {flash === "created"
+                ? s.suspended
+                  ? "It was created suspended, so no run starts until it is resumed; Back up now still takes one."
+                  : "Its first run starts at the next slot below, or use Back up now."
+                : "Runs already created keep the revision they copied."}
             </Alert>
           )}
           {suspension.isError && (

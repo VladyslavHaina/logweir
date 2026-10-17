@@ -95,7 +95,7 @@ describe("a readiness check", () => {
     expect(screen.getByText("Stale: not health")).toBeTruthy();
     cleanup();
     render(<LastTestLine test={null} noun="access test" subject="destination" />);
-    expect(text()).toContain("No access test is recorded for this destination");
+    expect(text()).toContain("No access test of this destination is on record now");
   });
 });
 

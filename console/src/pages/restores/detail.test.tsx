@@ -157,7 +157,7 @@ describe("a restore's page", () => {
     await screen.findByText("Complete coverage did not cover this restore");
     expect(screen.getAllByText("Not covered").length).toBeGreaterThan(0);
     expect(screen.queryByText("Restored and verified")).toBeNull();
-    expect(screen.getByRole("button", { name: /Retry to a fresh target/ })).toBeTruthy();
+    expect(screen.getByRole("button", { name: /Retry into new topics/ })).toBeTruthy();
   });
   it("DUI-16: a finished restore whose target sets no timestamp bound (Long.MAX) renders, and says so", async () => {
     const r = R(subsetRestore);
@@ -170,7 +170,7 @@ describe("a restore's page", () => {
     showRestore(R(subsetRestore), O(subsetOperation));
     await screen.findByText("Restored and verified");
     expect(screen.getAllByText(/partial: partitions 0, 2 of topic orders/).length).toBeGreaterThan(0);
-    expect(screen.queryByRole("button", { name: /Retry to a fresh target/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Retry into new topics/ })).toBeNull();
   });
   it("DUI-48.2: a complete restore's counts never read \"sampled\"; a sampled one's do (the control)", async () => {
     const completion = { recordsExpected: 398, recordsRestored: 398, recordsSampled: 398, recordsSampledMatching: 398, integrityLevel: "byte-fingerprint", newTopics: [] };

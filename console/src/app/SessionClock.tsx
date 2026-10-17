@@ -159,6 +159,9 @@ export function SessionClock({
       document.removeEventListener("visibilitychange", back);
     };
   }, [signingIn]);
+  // DUI-62.12: a renewed session (a new expiry) ends any sign-in this page opened, so the
+  // next warning offers the link again even if no focus event reached this tab.
+  useEffect(() => setSigningIn(false), [session.expiresAt]);
   const firstActor = useRef({ id: session.actor.id, name: session.actor.displayName || shortSubject(session.actor.subject) });
   const otherActor = session.actor.id !== firstActor.current.id;
 

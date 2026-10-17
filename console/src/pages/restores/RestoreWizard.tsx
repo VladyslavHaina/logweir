@@ -189,7 +189,7 @@ export function RestoreWizard() {
 
   const header = (
     <PageHeader
-      title={search.retryOf ? "Retry a restore to a fresh target" : "Restore a recovery point"}
+      title={search.retryOf ? "Retry a restore into new topics" : "Restore a recovery point"}
       description="Five steps. Nothing is created until the last one."
       breadcrumb={
         <Breadcrumb className="lw-breadcrumb">
@@ -438,6 +438,14 @@ function WizardBody({
       setReadiness((r) => ({ ...r, starting: false, error }));
     }
   };
+  // DUI-62.5: follow the same check again, from now, after a read that failed (a session that ended).
+  const rereadCheck = () => {
+    const id = readiness.result?.id;
+    if (!id) return;
+    const run = (following.current += 1);
+    setReadiness((r) => ({ ...r, error: null, stoppedAt: null }));
+    follow(id, readiness.boundHash, Date.now(), run);
+  };
   const cancelCheck = async () => {
     const id = readiness.result?.id;
     if (!id) return;
@@ -600,7 +608,7 @@ function WizardBody({
           )}
         </WizardStep>
         <WizardStep name="Readiness check" id="check" isDisabled={!point}>
-          <CheckStep readiness={readiness} refusal={stepRefusal} canCheck={canCheck} hash={hash} planProblem={planProblem} connection={connection} onStart={() => void startCheck()} onCancel={() => void cancelCheck()} topicPreview={topicPreview} />
+          <CheckStep readiness={readiness} refusal={stepRefusal} canCheck={canCheck} hash={hash} planProblem={planProblem} connection={connection} onStart={() => void startCheck()} onCancel={() => void cancelCheck()} onReread={rereadCheck} topicPreview={topicPreview} />
         </WizardStep>
         <WizardStep name="Review and create" id="review" isDisabled={!point}>
           {point && fields && replication && (

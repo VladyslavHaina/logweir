@@ -526,9 +526,9 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
         // -- Schema Registry (PROD-03.1/03.2) ------------------------------
         CheckCode::RegistryUnauthorized => {
             "The registry refused the connection's registry username and password. A connection \
-             is immutable: create a new one with the right credential (or rotate the password in \
-             its Secret's registry-password key). A backup still runs and records the registry \
-             as not captured."
+             is immutable: create a new one with the right credential (an administrator can \
+             instead change it in the connection's Secret with kubectl). A backup still runs and \
+             records the registry as not captured."
         }
         CheckCode::RegistryUnreachable => {
             "Check that the registry URL resolves from the install's namespace, that egress \
