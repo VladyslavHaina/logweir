@@ -14318,6 +14318,24 @@
           }
         }
       },
+      "ScopeRegistryView": {
+        "description": "PROD-03.2: the target Schema Registry a plan names, as a second person approves it.",
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "description": "`http://` or `https://`, no userinfo.",
+            "type": "string"
+          },
+          "username": {
+            "description": "The basic-auth username, when the plan names one.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "ScopeSourceView": {
         "description": "PROD-16.2: where a restore's records come from.",
         "type": "object",
@@ -14429,6 +14447,11 @@
             "description": "`target.default_replication_factor`: the factor of every topic the run creates, except with `topic_configuration`, where a topic the point records a factor for is created at that factor, bounded by the target's brokers, and only one without gets this.",
             "type": "integer",
             "format": "int16"
+          },
+          "schemaRegistry": {
+            "description": "PROD-03.2: `target.schema_registry`, as the runner's plan type reads it: the registry the run imports the restored records' schemas into, keeping their IDs, the one write outside Kafka. Absent: the plan names none.",
+            "$ref": "#/components/schemas/ScopeRegistryView",
+            "nullable": true
           },
           "teardown": {
             "description": "`target.teardown`: what happens to a SCRATCH run's targets afterwards (`delete`: the topics the run created are deleted; a `newTopic` restore deletes nothing whatever it says).",

@@ -457,6 +457,12 @@ fn scope_view(scope: &ApprovalScope) -> ApprovalScopeView {
                     }),
                 }
             }),
+            schema_registry: scope.target.schema_registry.as_ref().map(|r| {
+                crate::contract::ScopeRegistryView {
+                    url: r.url.clone(),
+                    username: r.username.clone(),
+                }
+            }),
         },
         topics: scope
             .topics

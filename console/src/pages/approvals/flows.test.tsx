@@ -201,15 +201,21 @@ describe("two-person: the second person's page", () => {
     expect(posts()[0]!.key).toBeNull();
   });
 
-  it("DUI-61: names the Schema Registry the plan writes into; a plan with none says the run writes nothing outside Kafka", async () => {
-    const plan = `${PLAN}target:\n  bootstrap_servers:\n    - "kafka-0.target:9092"\n  schema_registry:\n    url: "http://registry-target:8081"\n    username: "logweir"\nrestore:\n  point_in_time: "2026-09-07T14:05:00Z"\n`;
-    serve({ policy: TWO_PERSON, restore: await restore({ planBytes: plan, planHash: await sha256(plan) }), request: { ...pending(), planHash: await sha256(plan) } });
+  it("DUI-61, SEC-1: names the Schema Registry from the server's reading of the plan, never from the plan text", async () => {
+    // The plan bytes name another registry in a shape a hand-rolled reader would take; the
+    // page shows only what the API's scope says the runner's parser read.
+    const plan = `${PLAN}target:\n  schema_registry:\n    url: "http://decoy:8081"\n`;
+    const base = pending() as { scope: { target: Record<string, unknown> } } & Record<string, unknown>;
+    const withRegistry = { ...base, scope: { ...base.scope, target: { ...base.scope.target, schemaRegistry: { url: "http://registry-target:8081", username: "logweir" } } } };
+    serve({ policy: TWO_PERSON, restore: await restore({ planBytes: plan, planHash: await sha256(plan) }), request: withRegistry });
     renderAt("/team-a/approvals/restore-x");
     await screen.findByRole("button", { name: "Approve" });
     expect(document.getElementById("scope-schema-registry")!.textContent).toBe(
       "http://registry-target:8081 as logweir: the run imports into it the schemas the restored records reference, keeping their IDs.",
     );
+    expect(document.body.textContent).not.toContain("decoy");
     cleanup();
+    // Control: a scope with no registry.
     serve({ policy: TWO_PERSON });
     renderAt("/team-a/approvals/restore-x");
     await screen.findByRole("button", { name: "Approve" });

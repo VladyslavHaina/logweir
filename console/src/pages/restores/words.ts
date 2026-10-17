@@ -372,34 +372,6 @@ export function planBlockValue(planBytes: string | null | undefined, block: stri
   return null;
 }
 
-/**
- * DUI-61: the plan's `target.schema_registry` (block or flow style), the one place a
- * restore writes outside Kafka; `null` when the plan names none.
- */
-export function planTargetRegistry(planBytes: string | null | undefined): { url: string; username: string | null } | null {
-  if (!planBytes) return null;
-  const lines = planBytes.split("\n").map((raw) => withoutComment(raw.replace(/\r$/, "")));
-  const value = (text: string) => (/^"([^"]*)"/.exec(text) ?? /^'([^']*)'/.exec(text) ?? /^([^,}\s]*)/.exec(text))![1]!;
-  const start = lines.findIndex((l) => /^target\s*:\s*$/.test(l));
-  if (start < 0) return null;
-  for (let i = start + 1; i < lines.length && !/^\S/.test(lines[i]!); i += 1) {
-    const head = /^(\s+)schema_registry\s*:\s*(.*)$/.exec(lines[i]!);
-    if (!head) continue;
-    let text = head[2]!.trim();
-    if (!text.startsWith("{")) {
-      const lead = head[1]!.length;
-      const body: string[] = [];
-      for (let j = i + 1; j < lines.length && (!lines[j]!.trim() || /^\s*/.exec(lines[j]!)![0].length > lead); j += 1) body.push(lines[j]!.trim());
-      text = body.join(", ");
-    }
-    const url = /(?:^|[{,\s])url\s*:\s*(.*)$/.exec(text);
-    if (!url) return null;
-    const user = /(?:^|[{,\s])username\s*:\s*(.*)$/.exec(text);
-    return { url: value(url[1]!.trim()), username: user ? value(user[1]!.trim()) : null };
-  }
-  return null;
-}
-
 export function planTimeBasis(planBytes: string | null | undefined): string {
   return planBlockValue(planBytes, "restore", "time_basis") === "producerTime" ? "producerTime" : "";
 }

@@ -488,7 +488,7 @@ function SubjectPage({ ws, name, claim }: { ws: string; name: string; claim: Rou
         {request && request.state !== "notConfirmed" && typeof request.requester === "string" && (
           <StackItem>
             {scope ? (
-              <ScopeCard scope={scope} planBytes={typeof restore.planBytes === "string" && !hashDisagrees ? restore.planBytes : undefined} />
+              <ScopeCard scope={scope} />
             ) : (
               <Refusal title="What this request approves cannot be shown in full" id="scope-incomplete">
                 <Prose text={request.scopeSentence || "What this request approves could not be shown in full, so it cannot be approved here."} />

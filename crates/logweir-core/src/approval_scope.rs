@@ -177,6 +177,20 @@ pub struct ScopeTarget {
     /// settings are applied after a passing verdict. Absent: created as
     /// always.
     pub topic_configuration: Option<ScopeTopicConfiguration>,
+    /// **PROD-03.2, SEC-1.** `target.schema_registry`, as the runner's plan
+    /// type reads it: the registry the run imports schemas into, the one
+    /// thing a restore writes outside Kafka. Absent: the plan names none and
+    /// nothing is written outside Kafka.
+    pub schema_registry: Option<ScopeRegistry>,
+}
+
+/// The target Schema Registry a plan names, as a second person approves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeRegistry {
+    /// `http://` or `https://`, no userinfo.
+    pub url: String,
+    /// The basic-auth username, when the plan names one.
+    pub username: Option<String>,
 }
 
 /// The plan's configuration choice, as a second person approves it.
@@ -852,6 +866,20 @@ pub fn plan_scope(plan_bytes: &[u8]) -> Result<PlanScope, ScopeIncomplete> {
                 .as_ref()
                 .map(|block| topic_configuration_scope(block, count))
                 .transpose()?,
+            schema_registry: plan
+                .target
+                .schema_registry
+                .as_ref()
+                .map(|r| {
+                    Ok::<_, ScopeIncomplete>(ScopeRegistry {
+                        url: shown(&r.url, "the target's Schema Registry URL")?,
+                        username: shown_opt(
+                            r.username.as_deref(),
+                            "the target's Schema Registry username",
+                        )?,
+                    })
+                })
+                .transpose()?,
         },
         topics,
         verification: ScopeVerification {
@@ -1215,6 +1243,51 @@ mod tests {
             approver: None,
             approved_at: None,
         }
+    }
+
+    /// **SEC-1: the target registry a second person is shown is the one the
+    /// runner's plan type reads**, whatever text would fool a line reader: a
+    /// quoted username holding ", url: …", and an anchor whose alias is the
+    /// URL. Control: an ordinary block, and a plan that names none.
+    #[test]
+    fn sec1_the_scope_names_the_registry_the_runners_parser_reads() {
+        let registry = |block: &str| {
+            let text = plan_with(
+                &["orders".to_string()],
+                &format!("{PREFIXED}{block}"),
+                AT,
+                "kafka-backups",
+            );
+            approval_scope(&request(&text, None), text.as_bytes())
+                .expect("complete")
+                .target
+                .schema_registry
+        };
+        let real = |user: Option<&str>| ScopeRegistry {
+            url: "https://real:8081".into(),
+            username: user.map(str::to_string),
+        };
+        assert_eq!(
+            registry(
+                "  schema_registry: {username: \"a, url: http://decoy:8081\", url: \"https://real:8081\"}\n"
+            ),
+            Some(real(Some("a, url: http://decoy:8081")))
+        );
+        assert_eq!(registry(""), None, "a plan that names none");
+        assert_eq!(
+            registry("  schema_registry:\n    url: &u \"https://real:8081\"\n    username: *u\n"),
+            Some(ScopeRegistry {
+                url: "https://real:8081".into(),
+                username: Some("https://real:8081".into()),
+            })
+        );
+        // Control: the console's own block style.
+        assert_eq!(
+            registry(
+                "  schema_registry:\n    url: \"https://real:8081\"\n    username: \"logweir\"\n"
+            ),
+            Some(real(Some("logweir")))
+        );
     }
 
     /// **The scope is every fact of the request and of the plan it hashes.**
