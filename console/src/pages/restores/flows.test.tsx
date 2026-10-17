@@ -189,6 +189,10 @@ describe("the restore wizard", () => {
     renderAt("/team-a/restores/new");
     await toReview();
     expect(document.getElementById("review-afterwards")).toBeNull();
+    // DUI-60: since engine build 5 every copy of a repeated header key is restored.
+    const semantics = document.getElementById("restore-semantics")!.textContent!;
+    expect(semantics).toContain("repeated header keys keep every copy in order");
+    expect(semantics).not.toContain("keep one copy");
   });
 
   it("theme A's D3: a create refused for a taken approval name shows the API's sentence, and that nothing was created", async () => {
