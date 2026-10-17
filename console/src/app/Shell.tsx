@@ -55,7 +55,7 @@ import MoonIcon from "@patternfly/react-icons/dist/esm/icons/moon-icon";
 import FlaskIcon from "@patternfly/react-icons/dist/esm/icons/flask-icon";
 import SignOutAltIcon from "@patternfly/react-icons/dist/esm/icons/sign-out-alt-icon";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
-import { MOCK, leaveAfterSignOut, signOut } from "../api/client";
+import { MOCK, signOutAndLeave, signOutRefusedWords } from "../api/client";
 import { grantOf, useSessionDoc, type Flag } from "../api/session";
 import { Logo } from "./Logo";
 import { useTheme, type ThemeChoice } from "./theme";
@@ -160,6 +160,7 @@ function initials(name: string): string {
 function UserMenu({ ws }: { ws: string }) {
   const [open, setOpen] = useState(false);
   const [leaving, setLeaving] = useState(false);
+  const [refused, setRefused] = useState<unknown>(null);
   const session = useSessionDoc();
   const { choice, setChoice } = useTheme();
   const actor = session.actor;
@@ -246,11 +247,15 @@ function UserMenu({ ws }: { ws: string }) {
             <DropdownItem
               icon={<SignOutAltIcon />}
               isDisabled={MOCK || leaving}
-              description={MOCK ? "Not in the prototype" : undefined}
+              description={MOCK ? "Not in the prototype" : refused ? signOutRefusedWords(refused) : undefined}
               onClick={() => {
                 setLeaving(true);
-                // Whatever the answer, reload at the root: the next session read shows the sign-in page.
-                void signOut().finally(() => leaveAfterSignOut());
+                setRefused(null);
+                // DUI-63: reload at the root only once the session has ended; a refusal is said here.
+                void signOutAndLeave((e) => {
+                  setLeaving(false);
+                  setRefused(e);
+                });
               }}
             >
               Sign out

@@ -681,6 +681,8 @@ export function readinessRefusal(result: Preflight | null, boundHash: string, ha
     return `The readiness check no longer applies to the inputs it was run against${reasons ? ` (${reasons})` : ""}. Run it again.`;
   }
   if (!result.terminal) return "The readiness check has not finished.";
+  // DUI-68.2: a cancelled check says so, not "finished without becoming applicable".
+  if (result.state === "cancelled") return "This check was cancelled. Run it again.";
   if (!result.applicable) return "The readiness check finished without becoming applicable to its inputs. Run it again.";
   if (result.state !== "ready" && !readyButForDraftApproval(result)) {
     const blocking = result.checks.filter(isBlockingRow).filter((c) => c.state !== "ready");

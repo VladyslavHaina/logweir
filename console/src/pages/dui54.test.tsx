@@ -14,6 +14,7 @@ import { session } from "../mock/data";
 import { dexSubject, shortSubject } from "../app/subject";
 import { namesNamespaces } from "./trust/Trust";
 import catalogFixture from "../../fixtures/console/catalog.json";
+import neverSynced from "../../fixtures/console/catalog-never-synced.json";
 
 vi.setConfig({ testTimeout: 40_000 });
 
@@ -26,13 +27,14 @@ function answer(data: unknown) {
   return { data, error: undefined, response: new Response(null, { status: 200 }) } as never;
 }
 
-describe("DUI-54.2: a catalog whose view is not built yet is re-read until a sync builds it", () => {
-  it("reads again while viewExpired, and stops once the view is there", async () => {
+describe("DUI-54.2, DUI-65: a catalog whose view is not built yet is re-read until a sync builds it", () => {
+  // DUI-65: the never-synced answer is the API's own (d3_reads.rs's DUI-65 row asserts it):
+  // `viewExpired` false, `Ready` Unknown. Round 2's row invented `viewExpired: true` for it.
+  it("reads again while the API says Ready Unknown, and stops once the view is Ready", async () => {
     let reads = 0;
     vi.spyOn(api, "GET").mockImplementation((() => {
       reads += 1;
-      const built = reads >= 2;
-      return Promise.resolve(answer({ item: { ...catalogFixture.item, viewExpired: !built, syncedAt: built ? "2026-10-16T00:52:00Z" : null }, requestId: "r" }));
+      return Promise.resolve(answer({ ...(reads >= 2 ? catalogFixture : neverSynced), requestId: "r" }));
     }) as never);
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const wrapper = ({ children }: { children: ReactNode }) => (
@@ -41,9 +43,10 @@ describe("DUI-54.2: a catalog whose view is not built yet is re-read until a syn
       </QueryClientProvider>
     );
     const { result } = renderHook(() => useCatalog("team-a", "primary"), { wrapper });
-    await waitFor(() => expect(result.current.data?.viewExpired).toBe(true));
-    await waitFor(() => expect(result.current.data?.viewExpired).toBe(false), { timeout: 12_000 });
-    // Control: a built view is not polled.
+    await waitFor(() => expect(result.current.data?.conditions?.[0]?.reason).toBe("NeverSynced"));
+    expect(result.current.data?.viewExpired).toBe(false);
+    await waitFor(() => expect(result.current.data?.conditions?.[0]?.reason).toBe("ViewReady"), { timeout: 12_000 });
+    // Control: a Ready view is not polled.
     await new Promise((r) => setTimeout(r, 6000));
     expect(reads).toBe(2);
   });

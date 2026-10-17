@@ -90,6 +90,9 @@ function BackUpNow({ ws, schedules }: { ws: string; schedules: Schedule[] }) {
       <Dropdown
         isOpen={open}
         onOpenChange={setOpen}
+        // DUI-68.5: the menu opens leftwards from the button at the header's right, and stays
+        // inside the viewport where the header wraps (it touched the right edge at 1492 px).
+        popperProps={{ position: "end", preventOverflow: true }}
         toggle={(ref) => (
           <MenuToggle ref={ref} onClick={() => setOpen(!open)} isExpanded={open} isDisabled={schedules.length === 0 || backUp.isPending}>
             Back up now

@@ -645,6 +645,50 @@ async fn a_point_cursor_is_bound_to_the_view_generation() {
     assert!(!generation.is_empty());
 }
 
+/// **DUI-65: a catalog that never synced answers `Ready` not True, which is
+/// what the console re-reads on.** It has no `viewExpiresAt`, so `viewExpired`
+/// is false: the round-2 console polled on that flag alone and never re-read
+/// a new catalog. The answer, less the request id, is
+/// `console/fixtures/console/catalog-never-synced.json`, which the console's
+/// DUI-65 rows serve. The status is the one the controller's first pass writes.
+#[tokio::test]
+async fn dui65_a_catalog_that_never_synced_answers_ready_unknown() {
+    let fake = seeded();
+    let mut catalog = fixture("recovery-catalog.json");
+    catalog["status"] = json!({
+        "observedGeneration": 1,
+        "lastSyncJob": {"name": "lwcat-primary-s1"},
+        "conditions": [
+            {"type": "Ready", "status": "Unknown", "reason": "NeverSynced",
+             "message": "no sync has published a view yet; the durable catalog in object storage is unaffected",
+             "observedGeneration": 1, "lastTransitionTime": "2026-10-17T06:58:52Z"},
+            {"type": "Synced", "status": "Unknown", "reason": "SyncInProgress",
+             "message": "sync Job lwcat-primary-s1 was created",
+             "observedGeneration": 1, "lastTransitionTime": "2026-10-17T06:58:52Z"}
+        ]
+    });
+    fake.seed("recoverycatalogs", NS_A, catalog);
+    let app = TestApp::with(fake, Options::default());
+    let mut v = app
+        .get("/api/v1/workspaces/team-a/catalogs/primary")
+        .await
+        .json();
+    v.as_object_mut().expect("an object").remove("requestId");
+    // The fake's counter, not a fact about the catalog.
+    v["item"]
+        .as_object_mut()
+        .expect("an item")
+        .remove("resourceVersion");
+    assert_eq!(v["item"]["viewExpired"], false);
+    assert_eq!(v["item"]["conditions"][0]["type"], "Ready");
+    assert_eq!(v["item"]["conditions"][0]["status"], "Unknown");
+    assert_eq!(
+        v,
+        support::fixture("console/catalog-never-synced.json"),
+        "{v}"
+    );
+}
+
 /// **An expired view answers an empty list that SAYS it is empty because the
 /// window aged out.**
 #[tokio::test]

@@ -7287,9 +7287,14 @@ async fn finish_job(
             status.insert("topicConfiguration".to_string(), configured);
         }
     }
-    let terminal = diagnostics::apply_finished(
-        finished,
-        restore.status.as_ref().and_then(|s| s.progress.as_ref()),
+    let terminal = diagnostics::with_final_runner(
+        diagnostics::apply_finished(
+            finished,
+            restore.status.as_ref().and_then(|s| s.progress.as_ref()),
+            now,
+        ),
+        job,
+        pod,
         now,
     );
     // PROD-07.2: a run that signed nothing after it created its targets is

@@ -1753,6 +1753,49 @@ pub async fn repair_ttl(
     Ok(true)
 }
 
+/// DUI-68.4: a finished run's `progress.runner`, read again from the pod whose
+/// exit code was just read. Every key is written, `null` where the pod no longer
+/// says it, so the merge patch replaces an earlier pass's snapshot (`Pending`,
+/// `ContainerCreating`) instead of keeping it beside a terminal phase.
+#[must_use]
+pub fn with_final_runner(base: Value, job: &Job, pod: &Pod, now: DateTime<Utc>) -> Value {
+    let facts = Facts {
+        job,
+        pod: Some(pod),
+        events: &[],
+        contested: 0,
+        runner_phase: None,
+        now,
+    };
+    let Ok(Value::Object(mut runner)) =
+        serde_json::to_value(runner_facts(&facts, runner_container(pod)))
+    else {
+        return base;
+    };
+    for key in [
+        "jobName",
+        "podName",
+        "podPhase",
+        "scheduled",
+        "containerState",
+        "waitingReason",
+        "startedAt",
+    ] {
+        runner.entry(key).or_insert(Value::Null);
+    }
+    let Value::Object(mut root) = base else {
+        return base;
+    };
+    if let Some(progress) = root
+        .get_mut("status")
+        .and_then(|s| s.get_mut("progress"))
+        .and_then(Value::as_object_mut)
+    {
+        progress.insert("runner".to_string(), Value::Object(runner));
+    }
+    Value::Object(root)
+}
+
 /// Move `status.progress` to [`Stage::Finished`] on a terminal `/status` merge
 /// patch (D3 §2.2 and §2.5).
 ///

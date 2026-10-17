@@ -890,6 +890,60 @@ async fn a_completed_sync_serves_its_interval_slot_and_synced_stays_true() {
     assert_no_delete(&f);
 }
 
+/// **DUI-67: a sync that succeeded with no point is `Ready`, with 0 points.**
+///
+/// The PoC's `pv05-stg-legacy` synced to 0 points (`Synced=True/Succeeded`,
+/// "the newest 0 of 0 points"), and the next pass said `Ready=Unknown/
+/// NeverSynced`: an empty published view (`pages: []`) was read as no view.
+/// CONTROL: the same catalog with no `pages` at all is still `NeverSynced`.
+#[tokio::test]
+async fn dui67_a_sync_that_found_no_point_is_ready_with_zero_points() {
+    let stem = leak(request_stem("token-1"));
+    let published_at = at(2026, 9, 16, 12, 2, 0);
+    for (pages, ready, reason) in [
+        (Some(json!([])), "True", ctrl::REASON_VIEW_READY),
+        (None, "Unknown", ctrl::REASON_NEVER_SYNCED),
+    ] {
+        let mut status = published_status(stem, "token-1", published_at);
+        status["counts"] = json!({"total": 0, "available": 0});
+        let obj = status.as_object_mut().expect("an object");
+        match pages {
+            Some(p) => obj.insert("pages".to_string(), p),
+            None => obj.remove("pages"),
+        };
+        let f = fixture(vec![
+            route("GET", "/trustrosters/default", roster_body()),
+            route("GET", "/trustpolicies", no_trust_policies()),
+            route(
+                "GET",
+                job_path(stem),
+                job_body(
+                    stem,
+                    JOB_UID_1,
+                    "sha256:first",
+                    Some((published_at - chrono::Duration::seconds(120), published_at)),
+                ),
+            ),
+            status_route(),
+        ]);
+        let outcome = run_at(
+            &f,
+            &catalog(json!({"syncRequest": "token-1"}), status),
+            at(2026, 9, 16, 12, 3, 0),
+        )
+        .await;
+        assert_eq!(outcome.phase, ctrl::CatalogPhase::Idle);
+        assert_eq!((outcome.ready, outcome.ready_reason), (ready, reason));
+        for patch in f.status_patches() {
+            let written = condition(&patch["status"], "Ready");
+            assert_eq!(
+                (&written["status"], &written["reason"]),
+                (&json!(ready), &json!(reason))
+            );
+        }
+    }
+}
+
 /// **A sync that ran and FAILED spends its slot too.**
 ///
 /// `slot_already_served` reads `lastSyncJob.finishedAt` and NOT `syncedAt`: a

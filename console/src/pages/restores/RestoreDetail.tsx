@@ -312,6 +312,22 @@ export const VERDICT_STOPPED_SENTENCE =
   "The run finished, and after two minutes the controller has still recorded no verdict on its scorecard, so this page stopped following it. Nothing about the restore changed; read it again to see the verdict when it lands.";
 
 /** One page per restore: moving to another restore starts its page afresh. */
+/**
+ * DUI-62.10, DUI-68.1: a long name as a page title. Its one break opportunity is in the
+ * middle (`<wbr>`), so at 390 px it breaks into two even halves; Chromium ignores
+ * `text-wrap: balance` under `word-break: break-all`, which left "…a3g / a".
+ */
+export function TokenTitle({ value }: { value: string }) {
+  const half = Math.ceil(value.length / 2);
+  return (
+    <span className="lw-token-title">
+      {value.slice(0, half)}
+      <wbr />
+      {value.slice(half)}
+    </span>
+  );
+}
+
 export function RestoreDetail() {
   const { ws, name } = useParams({ from: "/$ws/restores/$name" });
   return <Detail key={`${ws}/${name}`} ws={ws} name={name} />;
@@ -393,7 +409,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
   return (
     <>
       <PageHeader
-        title={<span className="lw-token-title">{r.name}</span>}
+        title={<TokenTitle value={r.name} />}
         breadcrumb={breadcrumb}
         status={<RestoreStatus r={r} />}
         description={`From the point at ${exactUtc(r.pointInTime)} into ${r.target.clusterRef.name}.`}
@@ -468,7 +484,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
                 ) : undefined
               }
             >
-              <p>{interruptionCause(interruption?.cause, interruption?.requestedBy)}</p>
+              <p title={interruption?.requestedBy ?? undefined}>{interruptionCause(interruption?.cause, interruption?.requestedBy)}</p>
               <p>{reconcileWords(interruption?.verification, interruption?.verificationReason)}</p>
               {cleanupLine && <p id="restore-cleanup-state">{cleanupLine}</p>}
             </Alert>

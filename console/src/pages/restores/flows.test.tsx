@@ -13,6 +13,7 @@ import type { components } from "../../api/schema";
 import { RestoreWizard, restoreSearch } from "./RestoreWizard";
 import { RestoreDetail } from "./RestoreDetail";
 import { readCatalogOffers } from "../../api/restores";
+import restoreDoc from "../../../fixtures/console/restore.json";
 
 type S = components["schemas"];
 
@@ -193,6 +194,27 @@ describe("the restore wizard", () => {
     const semantics = document.getElementById("restore-semantics")!.textContent!;
     expect(semantics).toContain("repeated header keys keep every copy in order");
     expect(semantics).not.toContain("keep one copy");
+  });
+
+  it("DUI-68.6: the review names the target's Schema Registry in the approver's words; a target with none says so", async () => {
+    const listed = (await (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/workspaces/team-a/connections"))).json()) as { items: S["Connection"][] };
+    const targets = (registry: { url: string; username: string } | null) => ({
+      ...listed,
+      items: listed.items.map((c) => (c.role === "target" ? { ...c, schemaRegistry: registry ?? undefined } : c)),
+    });
+    const serve = (list: unknown) => (net.override = (path, method) =>
+      method === "GET" && path === "/workspaces/team-a/connections" ? new Response(JSON.stringify(list), { status: 200, headers: { "content-type": "application/json" } }) : null);
+    serve(targets({ url: "http://registry-target:8081", username: "logweir" }));
+    renderAt("/team-a/restores/new");
+    await toReview({ prefix: "dui686-a-" });
+    expect(document.getElementById("review-schema-registry")!.textContent).toBe(
+      "http://registry-target:8081 as logweir: the run imports into it the schemas the restored records reference, keeping their IDs.",
+    );
+    cleanup();
+    serve(targets(null));
+    renderAt("/team-a/restores/new");
+    await toReview({ prefix: "dui686-b-" });
+    expect(document.getElementById("review-schema-registry")!.textContent).toBe("None named: the run writes nothing outside Kafka.");
   });
 
   it("theme A's D3: a create refused for a taken approval name shows the API's sentence, and that nothing was created", async () => {
@@ -425,5 +447,34 @@ describe("the restore wizard", () => {
     renderAt("/team-a/restores/new?backup=orders-hourly-gone");
     await screen.findByText(/No Backup named orders-hourly-gone is in this workspace/);
     expect(screen.queryByText("Bound to")).toBeNull();
+  });
+});
+
+// Last in the file: the mock's runs move on with the wall clock, and a row that adds time
+// before the review rows lets an earlier row's topics exist under their default prefix.
+describe("DUI-64: Retry into new topics", () => {
+  // The retried run's point is one a listed Backup produced, so the wizard lists it only as
+  // that Backup's row (the catalog section leaves it out). Round 3's row checked the prefill
+  // function alone over an offers list that still held it.
+  it("ticks the visible row the retried point came from, and keeps the retried run's topics", async () => {
+    const { offers } = await readCatalogOffers("team-a");
+    const backups = (await (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/workspaces/team-a/backups"))).json()) as { items: S["Backup"][] };
+    const chosen = offers.find((o) => backups.items.some((b) => b.backupId === o.entry.backupId && b.topics.length > 1))!;
+    const backup = backups.items.find((b) => b.backupId === chosen.entry.backupId)!;
+    const kept = backup.topics[backup.topics.length - 1]!;
+    const plan = `name: "r"\nsource:\n  backup: "${backup.backupId}"\n  topics:\n    - "${kept}"\n  point:\n    point_id: "${chosen.entry.pointId}"\n    receipt_key: "k"\nrestore:\n  rate_limit_bytes_per_sec: 200000\n`;
+    const retried = { ...restoreDoc.item, name: "rst-retried", backupSetRef: backup.backupId, target: { ...restoreDoc.item.target, clusterRef: { name: "orders-dr" } }, planBytes: plan, oldTopics: [kept] };
+    net.override = (path, method) =>
+      method === "GET" && path === "/workspaces/team-a/restores/rst-retried" ? new Response(JSON.stringify({ item: retried, requestId: "r" }), { status: 200, headers: { "content-type": "application/json" } }) : null;
+    renderAt("/team-a/restores/new?retryOf=rst-retried");
+    await waitFor(async () => {
+      const ticked = (await screen.findAllByRole("radio", { checked: true })).filter((r) => r.getAttribute("name") === "recovery-point");
+      expect(ticked.map((r) => r.getAttribute("aria-label"))).toEqual([expect.stringMatching(new RegExp(`backup ${backup.name}$`))]);
+    });
+    expect((await screen.findAllByRole("radio", { checked: true })).filter((r) => r.getAttribute("name") === "point")).toEqual([]);
+    await screen.findByText("Bound to", {}, { timeout: 15_000 });
+    await next();
+    await screen.findByRole("heading", { name: "What to restore" });
+    for (const t of backup.topics) expect([t, (screen.getByLabelText(t) as HTMLInputElement).checked]).toEqual([t, t === kept]);
   });
 });

@@ -1444,8 +1444,15 @@ impl Pass<'_> {
     /// `Ready` for a pass that publishes no new view: whatever the published
     /// one justifies.
     fn published_ready(&self) -> (&'static str, &'static str, &'static str) {
-        let has_pages = self.has_pages();
-        if !has_pages {
+        // DUI-67: a sync that found no point publishes `pages: []`, an empty
+        // view and not a missing one. Only an absent list is "never synced"
+        // (a withdrawn or collected view sends `pages: null`).
+        let published = self
+            .catalog
+            .status
+            .as_ref()
+            .is_some_and(|s| s.pages.is_some());
+        if !published {
             return (
                 "Unknown",
                 REASON_NEVER_SYNCED,

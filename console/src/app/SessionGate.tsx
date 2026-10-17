@@ -6,13 +6,13 @@
 //   a session with no workspace -> what the actor holds (nothing) and Sign out.
 // Once the console is up it stays up: a session that ends later is SessionClock's
 // dialog over the page, never a sign-in page in its place (DUI-4).
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Bullseye, Button, EmptyState, EmptyStateActions, EmptyStateBody, EmptyStateFooter, Spinner } from "@patternfly/react-core";
 import ExclamationCircleIcon from "@patternfly/react-icons/dist/esm/icons/exclamation-circle-icon";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
 import UserIcon from "@patternfly/react-icons/dist/esm/icons/user-icon";
-import { ApiError, leaveAfterSignOut, readSession, setCsrfToken, signOut } from "../api/client";
+import { ApiError, readSession, setCsrfToken, signOutAndLeave, signOutRefusedWords } from "../api/client";
 import { keys } from "../api/queries";
 import { SessionProvider } from "../api/session";
 import type { Session } from "../api/types";
@@ -97,6 +97,7 @@ export function Unavailable({ error, onRetry }: { error: unknown; onRetry: () =>
 }
 
 export function NoWorkspace({ session }: { session: Session }) {
+  const [refused, setRefused] = useState<unknown>(null);
   const subject = shortSubject(session.actor.subject);
   const name = session.actor.displayName || subject;
   return (
@@ -115,10 +116,15 @@ export function NoWorkspace({ session }: { session: Session }) {
         {session.authenticationMode === "oidc" && (
           <EmptyStateFooter>
             <EmptyStateActions>
-              <Button variant="secondary" onClick={() => void signOut().finally(() => leaveAfterSignOut())}>
+              <Button variant="secondary" onClick={() => void signOutAndLeave(setRefused)}>
                 Sign out
               </Button>
             </EmptyStateActions>
+            {refused !== null && (
+              <p className="lw-small" role="alert">
+                {signOutRefusedWords(refused)}
+              </p>
+            )}
           </EmptyStateFooter>
         )}
       </EmptyState>

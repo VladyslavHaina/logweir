@@ -47,12 +47,47 @@ export const csrf: Middleware = {
 
 export type ApiClient = Client<paths>;
 
+/** Whether a refusal is the CSRF check's: 403 with an error on the `X-CSRF-Token` header. */
+async function csrfRefused(response: Response): Promise<boolean> {
+  if (response.status !== 403) return false;
+  try {
+    const doc = (await response.clone().json()) as Partial<Problem>;
+    return Array.isArray(doc.errors) && doc.errors.some((e) => e.field?.toLowerCase() === "x-csrf-token");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * DUI-63: a session renewed in another tab comes with a new CSRF token this page never
+ * read. An unsafe request the CSRF check refuses re-reads the session's token once and is
+ * sent again with it. Any other answer, or a second refusal, is the caller's.
+ */
+export function retryOnCsrf(send: (request: Request) => Promise<Response>): (request: Request) => Promise<Response> {
+  return async (request) => {
+    if (SAFE_METHODS.has(request.method)) return send(request);
+    const again = request.clone();
+    const first = await send(request);
+    if (!(await csrfRefused(first))) return first;
+    try {
+      const read = await send(new Request(new URL("/api/v1/session", request.url), { credentials: "same-origin" }));
+      const token = read.ok ? ((await read.json()) as { csrfToken?: string | null }).csrfToken : null;
+      if (!token || token === again.headers.get("X-CSRF-Token")) return first;
+      setCsrfToken(token);
+      again.headers.set("X-CSRF-Token", token);
+      return await send(again);
+    } catch {
+      return first;
+    }
+  };
+}
+
 /** A client over `fetch` (the browser's when absent). Tests hand in their own. */
 export function makeClient(options: { fetch?: (request: Request) => Promise<Response>; baseUrl?: string } = {}): ApiClient {
   const client = createClient<paths>({
     baseUrl: options.baseUrl ?? "",
     credentials: "same-origin",
-    ...(options.fetch ? { fetch: options.fetch } : {}),
+    fetch: retryOnCsrf(options.fetch ?? ((request) => globalThis.fetch(request))),
   });
   client.use(csrf);
   return client;
@@ -202,6 +237,21 @@ export function signInHref(location: { pathname: string; hash: string } = window
  */
 export function leaveAfterSignOut(location: Pick<Location, "pathname" | "search" | "replace"> = window.location): void {
   location.replace(location.pathname + location.search);
+}
+
+/**
+ * DUI-63: sign out, then load the root (`leaveAfterSignOut`) only once the session has
+ * ended. A refusal is handed to `refused` for the page to say; the page is never reloaded
+ * as if the person were signed out.
+ */
+export function signOutAndLeave(refused: (error: unknown) => void, client: ApiClient = api): Promise<void> {
+  return signOut(client).then(() => leaveAfterSignOut(), refused);
+}
+
+/** DUI-63: what the page says when the API refused to end the session. */
+export function signOutRefusedWords(error: unknown): string {
+  const why = error instanceof Error ? error.message : String(error);
+  return `Not signed out: the service refused (${why}). You are still signed in; try again, or close the browser.`;
 }
 
 export async function signOut(client: ApiClient = api): Promise<void> {

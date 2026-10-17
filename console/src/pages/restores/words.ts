@@ -4,6 +4,7 @@
 import { s3Arg, shellArg } from "../../lib/shell";
 import type { components } from "../../api/schema";
 import { NOT_A_TIME, duration, utcIso } from "../../components/When";
+import { shortSubject } from "../../app/subject";
 
 type S = components["schemas"];
 export type Restore = S["Restore"];
@@ -245,13 +246,13 @@ export const QUEUED_RUN_SENTENCE =
   "Queued: this manual restore waits for a slot in the workspace's manual-restore pool and starts, in creation order, when one finishes. Nothing has been created for it yet. The queue does not extend its approval: a restore still waiting when the approval expires is refused and must be confirmed again.";
 
 export const RETRY_IDENTITY_SENTENCE =
-  "It starts from the retried run's recovery point, target connection and byte-rate limit, each of which you may change. The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
+  "It starts from the retried run's recovery point, topics, target connection and byte-rate limit, each of which you may change. The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
 
 export const RETRY_OLD_RUN_SENTENCE =
   "The failed restore is not touched: its object, its evidence and the topics it had already created stay as they are. Resume is not implemented; this is a new run from the beginning.";
 
 export const RETRY_FRESH_TARGET_SENTENCE =
-  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retry into new topics opens the wizard for a NEW restore, starting from this run's point, target and byte-rate limit, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
+  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retry into new topics opens the wizard for a NEW restore, starting from this run's point, topics, target and byte-rate limit, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
 
 export const ORIGINAL_NAME_SENTENCE =
   "Each topic is recreated under its own name, a new generation of the name, instead of beside it under a prefix. Only into topics that do not exist: the runner refuses if a name exists, refuses while a broker auto-creates topics (unless the target is a different cluster from the archive's source), and refuses when a declarative owner manages a name. It needs its own approval subject, originalName. Stop every producer of these names first.";
@@ -445,10 +446,13 @@ const CAUSE_WORDS: Record<string, string> = {
   RunFailed: "Its run failed after it had created its target topics",
 };
 
-/** Why a restore is Interrupted, in a sentence; an unknown cause is named as the API gave it. */
+/**
+ * Why a restore is Interrupted, in a sentence; an unknown cause is named as the API gave it.
+ * DUI-68.3: who cancelled it (`<issuer>#<subject>`) is shortened as the user menu shortens a subject.
+ */
 export function interruptionCause(cause: string | null | undefined, requestedBy: string | null | undefined): string {
   const said = cause ? (CAUSE_WORDS[cause] ?? `Cause ${cause}`) : "The cause is not recorded";
-  return cause === "Cancelled" && requestedBy ? `${said} by ${requestedBy}.` : `${said}.`;
+  return cause === "Cancelled" && requestedBy ? `${said} by ${shortSubject(requestedBy.slice(requestedBy.lastIndexOf("#") + 1))}.` : `${said}.`;
 }
 
 /** What the reconcile of the partial targets says now. */

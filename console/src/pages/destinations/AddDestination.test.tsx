@@ -11,6 +11,7 @@ import { createdSecrets } from "../../mock/connections";
 import { destinationStore } from "../../mock/destinations";
 import { AddDestination } from "./AddDestination";
 import { RotateAccess } from "./RotateAccess";
+import { rotatedWords } from "./DestinationDetail";
 
 const KEY_ID = "AKIA-TYPED-ONCE-4410";
 const KEY_SECRET = "wJalr-typed-once-secret-9902";
@@ -131,8 +132,26 @@ describe("Rotate access", () => {
     expect(body.access.evidenceWrite).toBeUndefined();
     expect(sent[0]!.header["Idempotency-Key"]).toBeUndefined();
     expect(onRotated.mock.calls[0]![0].generation).toBe(d.generation + 1);
+    // DUI-66: a new credential was entered, so the page says a new Secret was written.
+    expect(onRotated.mock.calls[0]![1]).toBe(true);
     expect(everythingHeld(qc)).not.toContain(KEY_SECRET);
     expect(JSON.stringify(destinationStore())).not.toContain(KEY_SECRET);
+  });
+
+  it("DUI-66: choosing a Secret the destination already names writes none, and the page says so", async () => {
+    const sent = recordPosts();
+    const { onRotated } = rotate(primary());
+    fireEvent.change(document.getElementById("rotate-archiveWrite-source") as HTMLSelectElement, { target: { value: "existing" } });
+    await waitFor(() => expect(document.getElementById("rotate-archiveWrite-secret")).not.toBeNull());
+    fireEvent.change(document.getElementById("rotate-archiveWrite-secret") as HTMLSelectElement, { target: { value: "lwd-primary-archive-read" } });
+    fireEvent.click(screen.getByRole("button", { name: "Rotate access" }));
+    await waitFor(() => expect(onRotated).toHaveBeenCalled());
+    expect(JSON.parse(sent[0]!.body).access.archiveWrite.secret).toEqual({ existing: { name: "lwd-primary-archive-read" } });
+    expect(onRotated.mock.calls[0]![1]).toBe(false);
+    expect(rotatedWords(false)).toMatch(/^No Secret was written/);
+    expect(rotatedWords(false)).not.toMatch(/new Secret/);
+    // The control: a new credential's sentence.
+    expect(rotatedWords(true)).toMatch(/^A new credential was written to a new Secret/);
   });
 
   it("marks an error about an input the chosen source hides on that grant's Credential select (DUI-2)", async () => {

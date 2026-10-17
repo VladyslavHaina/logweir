@@ -1,0 +1,15 @@
+{
+  "type": "https://logweir.dev/problems/forbidden",
+  "title": "Forbidden",
+  "status": 403,
+  "code": "forbidden",
+  "detail": "Unsafe requests must carry the session's synchronizer token in X-CSRF-Token; read it from GET /api/v1/session.",
+  "errors": [
+    {
+      "field": "x-csrf-token",
+      "code": "invalid",
+      "message": "the synchronizer token does not match this session"
+    }
+  ],
+  "retryable": false
+}

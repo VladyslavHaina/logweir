@@ -229,7 +229,7 @@ function Groups({ point }: { point: PointView }) {
 function useRunPoint(ws: string, b: Backup | undefined, receiptSha256: string | null | undefined) {
   const catalogs = useCatalogs(ws);
   const catalog = (catalogs.data ?? []).find((c) => b?.destinationRef && c.destinationRef?.name === b.destinationRef.name);
-  const points = useCatalogPoints(ws, catalog?.name ?? "", false, Boolean(catalog));
+  const points = useCatalogPoints(ws, catalog?.name ?? "", false, catalog?.syncedAt, Boolean(catalog));
   const enabled = Boolean(catalog);
   const rows = (points.data?.pages ?? []).flatMap((p) => p.items);
   const point = b

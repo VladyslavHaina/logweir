@@ -37,6 +37,7 @@ import { Coded, Commands, Facts, FieldHelp, Instant, shown } from "./parts";
 import { matchesQuery, pointHaystack, restorableWindow, rfc3339, type RecoveryPoint } from "./points";
 import type { PlanFields, PreparedPlan } from "./plan";
 import { CloneLifetime } from "../cutover/CloneLifetime";
+import { RegistryLine } from "../approvals/parts";
 import { TopicConfigurationChoice } from "../cutover/TopicConfiguration";
 import {
   approvalRoute,
@@ -994,6 +995,8 @@ export function ReviewStep({
           { term: "Up to", value: fields.pointInTime ? `${exactUtc(fields.pointInTime)} (${fields.pointInTime})` : "Not recorded" },
           { term: "Into", value: `${fields.target.bootstrapServers.length ? v.target : "no target"}: ${mapping.map((m) => (m.source === m.target ? m.source : `${m.source} → ${m.target}`)).join(", ")}` },
           { term: "Mode", value: modeMeaning(fields.target.mode, fields.target.originalName === true) },
+          // DUI-68.6: the approver's Schema Registry line, from what the plan is rendered from (never the bytes).
+          { term: "Schema Registry", value: <RegistryLine id="review-schema-registry" registry={fields.target.schemaRegistry} /> },
           // DUI-54.4: a scratch run says what happens to its topics, a clone for how long it is kept.
           fields.target.mode === "scratch" && { term: "Afterwards", id: "review-afterwards", value: afterwardsWords("scratch", fields.target.teardown, fields.target.teardownTtlSeconds) },
           { term: "Verification", value: fields.sample.coverage === "complete" ? `complete${typeof fields.sample.completeMaxRecords === "number" ? `, at most ${count(fields.sample.completeMaxRecords)} archived records` : ", no record bound"}` : "sampled: 25 records per partition and the manifest's counts" },

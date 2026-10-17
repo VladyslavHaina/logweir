@@ -188,10 +188,10 @@ function restoreHref(ws: string, catalog: string, pointId: string): string {
   return `#/${ws}/restores/new?catalog=${encodeURIComponent(catalog)}&point=${encodeURIComponent(pointId)}`;
 }
 
-function PointsCard({ ws, name }: { ws: string; name: string }) {
+function PointsCard({ ws, name, syncedAt }: { ws: string; name: string; syncedAt: string | null | undefined }) {
   const [onlyRestorable, setOnlyRestorable] = useState(false);
   const [open, setOpen] = useState<Record<string, boolean>>({});
-  const points = useCatalogPoints(ws, name, onlyRestorable);
+  const points = useCatalogPoints(ws, name, onlyRestorable, syncedAt);
   const flags = useFlags(ws);
   const mayRestore = flags?.restoreCreate === true;
   const pages: PointPage[] = points.data?.pages ?? [];
@@ -555,7 +555,7 @@ export function CatalogDetail() {
             <ViewCard c={c} />
           </GridItem>
           <GridItem>
-            <PointsCard ws={ws} name={c.name} />
+            <PointsCard ws={ws} name={c.name} syncedAt={c.syncedAt} />
           </GridItem>
           <GridItem>
             <Card>

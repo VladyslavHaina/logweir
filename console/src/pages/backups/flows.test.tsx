@@ -27,6 +27,7 @@ import backupsList from "../../../fixtures/console/backups-list.json";
 import operationBackup from "../../../fixtures/console/operation-backup.json";
 import catalogsList from "../../../fixtures/console/catalogs-list.json";
 import catalogDoc from "../../../fixtures/console/catalog.json";
+import neverSynced from "../../../fixtures/console/catalog-never-synced.json";
 import signers from "../../../fixtures/console/catalog-signers.json";
 import trustList from "../../../fixtures/console/trust-policies-list.json";
 
@@ -486,6 +487,28 @@ describe("one catalog's page", () => {
     await screen.findByText("the point pages could not be read");
     expect(screen.getByText("The view")).toBeTruthy();
     expect(document.body.textContent).not.toMatch(/This catalog's view holds no point/);
+  });
+
+  it("DUI-65: a never-synced catalog's page follows its first sync, view and points, with no navigation", async () => {
+    // The never-synced answer is the API's own (d3_reads.rs, DUI-65): viewExpired false, Ready Unknown.
+    let built = false;
+    reads(operator, (_r, path) => {
+      if (path === "/workspaces/team-a/catalogs/primary") return json(200, built ? catalogDoc : neverSynced);
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/points"))
+        return json(200, built ? catalogPoints : { items: [], page: { limit: 200 }, truncated: false, viewExpired: false, requestId: "r" });
+      if (path.startsWith("/workspaces/team-a/catalogs/primary/signers")) return json(200, signers);
+      return null;
+    });
+    renderAt("/team-a/catalog/primary");
+    await screen.findByText("The view is not usable");
+    built = true;
+    // The point id is shown middle-truncated; its tail is whole.
+    await waitFor(() => expect(document.body.textContent).toContain(catalogPoints.items[0]!.pointId.slice(-20)), { timeout: 12_000 });
+    expect(screen.queryByText("The view is not usable")).toBeNull();
+    // Control: once Ready, the catalog is not read again.
+    const settled = gets("/workspaces/team-a/catalogs/primary").filter((g) => g.path === "/workspaces/team-a/catalogs/primary").length;
+    await new Promise((r) => setTimeout(r, 6000));
+    expect(gets("/workspaces/team-a/catalogs/primary").filter((g) => g.path === "/workspaces/team-a/catalogs/primary").length).toBe(settled);
   });
 
   it("offers no control that trusts an untrusted signer", async () => {
