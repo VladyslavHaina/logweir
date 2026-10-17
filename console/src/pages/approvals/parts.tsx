@@ -362,22 +362,7 @@ export function ScopeCard({ scope }: { scope: ApprovalScope }) {
           </Term>
           {/* DUI-61: the one write outside Kafka. */}
           <Term term="Schema Registry">
-            <span id="scope-schema-registry" className="lw-break">
-              {registry ? (
-                <>
-                  <code className="lw-mono">{registry.url}</code>
-                  {registry.username && (
-                    <>
-                      {" "}
-                      as <code className="lw-mono">{registry.username}</code>
-                    </>
-                  )}
-                  : the run imports into it the schemas the restored records reference, keeping their IDs.
-                </>
-              ) : (
-                "None named: the run writes nothing outside Kafka."
-              )}
-            </span>
+            <RegistryLine id="scope-schema-registry" registry={registry} />
           </Term>
           <Term term="Verification">
             {scope.verification.coverage} over <Instant value={scope.verification.windowStart} /> to <Instant value={scope.verification.windowEnd} />
@@ -476,5 +461,31 @@ function OwnerStatement({ scope }: { scope: ApprovalScope }) {
       )}
       {kind === "ownerPath" && owners.length === 0 && <Content component="p">No owner is listed.</Content>}
     </div>
+  );
+}
+
+/**
+ * DUI-61, DUI-68.6: the target Schema Registry a restore writes into, the one write outside
+ * Kafka, in the same words for the approver (from the API's approval scope) and the requester's
+ * review (from the target connection's `schemaRegistry`, which the plan is rendered from).
+ */
+export function RegistryLine({ id, registry }: { id: string; registry: { url: string; username?: string | null } | null | undefined }) {
+  return (
+    <span id={id} className="lw-break">
+      {registry ? (
+        <>
+          <code className="lw-mono">{registry.url}</code>
+          {registry.username && (
+            <>
+              {" "}
+              as <code className="lw-mono">{registry.username}</code>
+            </>
+          )}
+          : the run imports into it the schemas the restored records reference, keeping their IDs.
+        </>
+      ) : (
+        "None named: the run writes nothing outside Kafka."
+      )}
+    </span>
   );
 }

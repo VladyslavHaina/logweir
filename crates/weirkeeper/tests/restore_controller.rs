@@ -12097,9 +12097,19 @@ async fn only_an_exit_three_carries_a_runner_reason_and_every_other_pass_is_unch
         "every case has a golden and every golden a case"
     );
     for (name, exit_code, tail) in cases {
-        let got = fx34_observe(exit_code, &tail).await;
+        let mut got = fx34_observe(exit_code, &tail).await;
         let want = &golden["cases"][name];
         assert!(want.is_object(), "[{name}] no golden");
+        // The golden predates DUI-68.4, which writes the finished pod's runner
+        // facts on every terminal status: set aside, and asserted by itself.
+        for write in got["writes"].as_array_mut().expect("writes") {
+            let progress = write
+                .pointer_mut("/body/status/progress")
+                .and_then(Value::as_object_mut);
+            if let Some(runner) = progress.and_then(|p| p.remove("runner")) {
+                assert_eq!(runner["containerState"], "Terminated", "[{name}] {runner}");
+            }
+        }
         assert_eq!(got["writes"], want["writes"], "[{name}] the writes");
         assert_eq!(got["exitCode"], want["exitCode"], "[{name}]");
         assert_eq!(got["terminalState"], want["terminalState"], "[{name}]");
@@ -12953,6 +12963,47 @@ async fn a_second_pass_over_a_refused_restore_reads_and_writes_nothing() {
             "pass {pass}: the Job is the only object touched: {requests:?}"
         );
     }
+}
+
+/// **DUI-68.4: a refused restore's terminal status carries the finished pod's
+/// runner facts, not an earlier pass's `Pending`/`ContainerCreating`.**
+///
+/// The stored status is the one a running pass wrote while the pod was being
+/// created. The exit-3 pass reads the terminated pod; merged onto the stored
+/// object, `progress.runner` says `Failed`/`Terminated` with no waiting reason.
+/// CONTROL: the names it already carried stay.
+#[tokio::test]
+async fn dui68_4_a_refused_restores_runner_snapshot_is_the_finished_pods() {
+    let mut running: Value =
+        serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME)).expect("the fixture");
+    running["status"] = serde_json::json!({
+        "phase": "Running",
+        "progress": {
+            "stage": "Starting",
+            "runner": {"jobName": NAME, "podName": POD, "podPhase": "Pending", "scheduled": true,
+                       "containerState": "Waiting", "waitingReason": "ContainerCreating"}
+        }
+    });
+    let running: Restore = serde_json::from_value(running).expect("a Restore");
+    let (outcome, seen) = fx34_pass_over(
+        &running,
+        fx34_routes_for(3, 200, fx34_k3_log_with_detail(), Some(&fx34_token())),
+    )
+    .await;
+    assert_eq!(outcome.expect("the pass completes").exit_code, Some(3));
+    let mut stored = serde_json::to_value(running.status.as_ref().expect("a status")).unwrap();
+    for patch in patched_statuses(&seen) {
+        apply_merge_patch(&mut stored, &patch);
+    }
+    let runner = &stored["progress"]["runner"];
+    assert_eq!(stored["progress"]["stage"], "Finished", "{stored}");
+    assert_eq!(runner["podPhase"], "Failed", "{runner}");
+    assert_eq!(runner["containerState"], "Terminated", "{runner}");
+    assert!(runner.get("waitingReason").is_none(), "{runner}");
+    assert_eq!(
+        (&runner["jobName"], &runner["podName"]),
+        (&serde_json::json!(NAME), &serde_json::json!(POD))
+    );
 }
 
 /// **The status is written only when its content changes**, and the reason

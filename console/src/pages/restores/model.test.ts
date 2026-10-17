@@ -11,6 +11,7 @@ import readyFixture from "../../../fixtures/console/preflight-ready.json";
 import notReadyFixture from "../../../fixtures/console/preflight-not-ready.json";
 import staleFixture from "../../../fixtures/console/preflight-stale.json";
 import pendingFixture from "../../../fixtures/console/preflight-pending.json";
+import cancelledFixture from "../../../fixtures/console/preflight-cancelled.json";
 import catalogPoints from "../../../fixtures/console/catalog-points.json";
 import setIds from "../../../fixtures/set-ids.json";
 import { renderPlanBytes, preparePlanDocument } from "./plan";
@@ -514,6 +515,11 @@ describe("the readiness gate", () => {
     expect(readinessRefusal(pf(pendingFixture), "", "")).toMatch(/has not finished/);
     expect(readinessRefusal(pf(staleFixture), "", "")).toMatch(/no longer applies/);
     expect(readinessRefusal(pf(notReadyFixture), "", "")).toMatch(/destination\.archiveListable \(AccessDenied\)/);
+  });
+  it("DUI-68.2: a cancelled check says it was cancelled, never that it did not become applicable", () => {
+    expect(readinessRefusal(pf(cancelledFixture), "", "")).toBe("This check was cancelled. Run it again.");
+    // The control: a finished, not applicable check that nobody cancelled keeps its sentence.
+    expect(readinessRefusal(pf(cancelledFixture, { state: "unknown", reason: "NotApplicable" } as Partial<Preflight>), "", "")).toMatch(/without becoming applicable/);
   });
   it("a draft-shaped verdict submits: the approval row alone, every other blocking row ready", () => {
     const draft = { ...ready, state: "unknown", checks: [...ready.checks, draftRow] } as Preflight;

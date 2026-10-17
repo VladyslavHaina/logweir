@@ -950,9 +950,8 @@ body {
   --pf-v6-c-page__main-section--PaddingBlockEnd: 0;
 }
 
-/* DUI-62.10: a page title that is one long name (rst-…) breaks into even lines at 390 px,
-   never leaving one letter on the last. */
+/* DUI-62.10, DUI-68.1: a page title that is one long name (rst-…) breaks at the `<wbr>`
+   TokenTitle puts in its middle; only a half wider than the line breaks anywhere. */
 .lw-token-title {
-  word-break: break-all;
-  text-wrap: balance;
+  overflow-wrap: anywhere;
 }

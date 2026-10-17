@@ -196,6 +196,27 @@ describe("the restore wizard", () => {
     expect(semantics).not.toContain("keep one copy");
   });
 
+  it("DUI-68.6: the review names the target's Schema Registry in the approver's words; a target with none says so", async () => {
+    const listed = (await (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/workspaces/team-a/connections"))).json()) as { items: S["Connection"][] };
+    const targets = (registry: { url: string; username: string } | null) => ({
+      ...listed,
+      items: listed.items.map((c) => (c.role === "target" ? { ...c, schemaRegistry: registry ?? undefined } : c)),
+    });
+    const serve = (list: unknown) => (net.override = (path, method) =>
+      method === "GET" && path === "/workspaces/team-a/connections" ? new Response(JSON.stringify(list), { status: 200, headers: { "content-type": "application/json" } }) : null);
+    serve(targets({ url: "http://registry-target:8081", username: "logweir" }));
+    renderAt("/team-a/restores/new");
+    await toReview({ prefix: "dui686-a-" });
+    expect(document.getElementById("review-schema-registry")!.textContent).toBe(
+      "http://registry-target:8081 as logweir: the run imports into it the schemas the restored records reference, keeping their IDs.",
+    );
+    cleanup();
+    serve(targets(null));
+    renderAt("/team-a/restores/new");
+    await toReview({ prefix: "dui686-b-" });
+    expect(document.getElementById("review-schema-registry")!.textContent).toBe("None named: the run writes nothing outside Kafka.");
+  });
+
   it("theme A's D3: a create refused for a taken approval name shows the API's sentence, and that nothing was created", async () => {
     const DETAIL =
       "An Approval named approval-1234abcd already exists in team-a and was not made for this request: it binds another object, and it is never adopted. Nothing was created. Submit this Restore with another approval name.";

@@ -4,6 +4,7 @@
 import { s3Arg, shellArg } from "../../lib/shell";
 import type { components } from "../../api/schema";
 import { NOT_A_TIME, duration, utcIso } from "../../components/When";
+import { shortSubject } from "../../app/subject";
 
 type S = components["schemas"];
 export type Restore = S["Restore"];
@@ -445,10 +446,13 @@ const CAUSE_WORDS: Record<string, string> = {
   RunFailed: "Its run failed after it had created its target topics",
 };
 
-/** Why a restore is Interrupted, in a sentence; an unknown cause is named as the API gave it. */
+/**
+ * Why a restore is Interrupted, in a sentence; an unknown cause is named as the API gave it.
+ * DUI-68.3: who cancelled it (`<issuer>#<subject>`) is shortened as the user menu shortens a subject.
+ */
 export function interruptionCause(cause: string | null | undefined, requestedBy: string | null | undefined): string {
   const said = cause ? (CAUSE_WORDS[cause] ?? `Cause ${cause}`) : "The cause is not recorded";
-  return cause === "Cancelled" && requestedBy ? `${said} by ${requestedBy}.` : `${said}.`;
+  return cause === "Cancelled" && requestedBy ? `${said} by ${shortSubject(requestedBy.slice(requestedBy.lastIndexOf("#") + 1))}.` : `${said}.`;
 }
 
 /** What the reconcile of the partial targets says now. */
