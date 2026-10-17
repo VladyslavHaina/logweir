@@ -2399,7 +2399,8 @@ fn execute_with_validated_approval(
     // PROD-03.2: whether this run imports schemas, and the verified snapshot
     // when it does, before the pass that collects the IDs the restored records
     // carry. A run that does not import says why in its scorecard.
-    let schemas = schema_import::prepare(&c.spec, c.bound_set.as_ref(), &c.archive)?;
+    let schemas =
+        schema_import::prepare(&c.spec, c.bound_set.as_ref(), &set.backup_id, &c.archive)?;
     let mut schema_ids = match &schemas {
         schema_import::Prepared::Import(p) => Some(logweir_core::schema_registry::NeededIds::new(
             p.snapshot.ids(),

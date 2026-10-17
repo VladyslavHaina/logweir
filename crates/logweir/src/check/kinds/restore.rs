@@ -187,6 +187,18 @@ pub fn run(req: &RestorePreflightRequest, wiring: &dyn Wiring, deadline: Deadlin
     // PROD-03.2: the schemas the restore would import, when the target
     // connection names a registry (the plan lists the row only then).
     if req.capability_checks.contains(&CheckId::TargetSchemas) {
+        // PoC D3: a plan bound to no point imports what its set's own
+        // receipt captured, as the run does (`schema_import::prepare`).
+        if spec.source.point.is_none() {
+            let access = wiring
+                .objects(
+                    &req.source_destination,
+                    DestinationRole::ArchiveRead,
+                    deadline.slice(2),
+                )
+                .map_err(|f| f.message);
+            (bound_receipt, bound_snapshot) = unbound_schemas(&req.backup_id, access);
+        }
         checks.push(super::capability::target_schemas(
             &req.target,
             &spec.source.topics,
@@ -583,6 +595,61 @@ fn refuse_bound_point(
     );
 }
 
+/// The snapshot `receipt` names, read beside it and held to its digest, for
+/// `target.schemas`; `None` when the receipt captured no registry.
+fn captured_snapshot(
+    receipt: &BackupReceipt,
+    access: &dyn ObjectAccess,
+) -> Option<Result<logweir_core::schema_registry::Snapshot, String>> {
+    let block = receipt.schema_registry.as_ref().filter(|b| b.captured)?;
+    let key = block.snapshot_key.clone().unwrap_or_default();
+    let sha = block.snapshot_sha256.clone().unwrap_or_default();
+    Some(
+        access
+            .get(&key, caps::SCHEMA_SNAPSHOT)
+            .map_err(|e| {
+                format!(
+                    "{}: the schema snapshot {key} could not be read: {e}",
+                    logweir_core::schema_registry::SNAPSHOT_INVALID
+                )
+            })
+            .and_then(|bytes| logweir_core::schema_registry::Snapshot::parse(&bytes, &sha)),
+    )
+}
+
+/// PoC D3: the receipt and snapshot of the set a plan bound to no point
+/// restores, read as the run reads them
+/// ([`crate::drill::schema_import::receipt_of_set`]). A failed read is a
+/// snapshot that could not be read, never "none was captured".
+fn unbound_schemas(
+    backup_id: &str,
+    access: Result<Box<dyn ObjectAccess>, String>,
+) -> (
+    Option<BackupReceipt>,
+    Option<Result<logweir_core::schema_registry::Snapshot, String>>,
+) {
+    let unread = |why: String| {
+        Some(Err(format!(
+            "{}: the receipt of backup set {backup_id} could not be read: {why}",
+            logweir_core::schema_registry::SNAPSHOT_INVALID
+        )))
+    };
+    let access = match access {
+        Ok(access) => access,
+        Err(why) => return (None, unread(why)),
+    };
+    match crate::drill::schema_import::receipt_of_set(backup_id, |key: &str, cap| {
+        access.get(key, cap)
+    }) {
+        Ok(Some(receipt)) => {
+            let snapshot = captured_snapshot(&receipt, access.as_ref());
+            (Some(receipt), snapshot)
+        }
+        Ok(None) => (None, None),
+        Err(e) => (None, unread(e.to_string())),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn archive_checks(
     req: &RestorePreflightRequest,
@@ -719,23 +786,7 @@ fn archive_checks(
             Ok((note, receipt)) => {
                 // PROD-03.2: the snapshot the receipt names, read beside it
                 // and held to its digest, for `target.schemas`.
-                if let Some(block) = receipt.schema_registry.as_ref().filter(|b| b.captured) {
-                    let key = block.snapshot_key.clone().unwrap_or_default();
-                    let sha = block.snapshot_sha256.clone().unwrap_or_default();
-                    *bound_snapshot = Some(
-                        access
-                            .get(&key, caps::SCHEMA_SNAPSHOT)
-                            .map_err(|e| {
-                                format!(
-                                    "{}: the schema snapshot {key} could not be read: {e}",
-                                    logweir_core::schema_registry::SNAPSHOT_INVALID
-                                )
-                            })
-                            .and_then(|bytes| {
-                                logweir_core::schema_registry::Snapshot::parse(&bytes, &sha)
-                            }),
-                    );
-                }
+                *bound_snapshot = captured_snapshot(&receipt, access.as_ref());
                 *bound_receipt = Some(receipt);
                 note
             }
@@ -1744,3 +1795,39 @@ pub const OVER_CAP_MANIFEST_REMEDY: &str =
     "The backup set's manifest is larger than this build reads (docs/kubernetes.md §7b.4). \
      No grant or policy change helps: restore from a smaller set, or a build whose manifest \
      cap holds this one.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::drill::schema_import::tests::{archive, SET};
+
+    /// PoC D3: the preview of a plan bound to no point reads the snapshot its
+    /// set's own receipt names, as the run does, so `target.schemas` says what
+    /// will be imported. Control: without the claim that names the run there
+    /// is nothing to read, and a handle that could not be opened is a snapshot
+    /// that could not be read, never "none captured".
+    #[test]
+    fn the_preview_of_a_plan_bound_to_no_point_reads_its_sets_snapshot() {
+        let (receipt, snapshot) = unbound_schemas(SET, Ok(Box::new(archive(true))));
+        assert_eq!(receipt.map(|r| r.backup_id).as_deref(), Some(SET));
+        assert!(matches!(snapshot, Some(Ok(_))), "{snapshot:?}");
+        let (receipt, snapshot) = unbound_schemas(SET, Ok(Box::new(archive(false))));
+        assert!(receipt.is_none() && snapshot.is_none());
+        let (_, snapshot) = unbound_schemas(SET, Err("AccessDenied".into()));
+        assert!(
+            matches!(&snapshot, Some(Err(e)) if e.contains("could not be read: AccessDenied")),
+            "{snapshot:?}"
+        );
+        // `run` hands it to `target.schemas` for every plan bound to no point.
+        let src = include_str!("restore.rs");
+        let body = src.split("pub fn run(").nth(1).expect("run's body");
+        let call = body
+            .find("(bound_receipt, bound_snapshot) = unbound_schemas(&req.backup_id, access);")
+            .expect("run reads the unbound set's schemas");
+        assert!(
+            call < body
+                .find("super::capability::target_schemas(")
+                .expect("the row")
+        );
+    }
+}
