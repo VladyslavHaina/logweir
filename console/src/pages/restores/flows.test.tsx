@@ -70,7 +70,7 @@ const next = async () => {
 };
 
 /** From the point to the review, running the readiness check on the way. */
-async function toReview(change?: { prefix?: string; original?: boolean }) {
+async function toReview(change?: { prefix?: string; original?: boolean; clone?: boolean }) {
   await screen.findByText("Bound to", {}, { timeout: 15_000 });
   await next();
   await screen.findByRole("heading", { name: "What to restore" });
@@ -80,6 +80,10 @@ async function toReview(change?: { prefix?: string; original?: boolean }) {
   if (change?.original) {
     fireEvent.click(screen.getByLabelText("The original names"));
     fireEvent.click(await screen.findByLabelText(/No declarative owner/));
+  }
+  if (change?.clone) {
+    fireEvent.click(screen.getByLabelText("Delete the restored topics when the run ends (scratch mode)"));
+    fireEvent.click(await screen.findByLabelText("Keep them as a clone for a while"));
   }
   await next();
   await screen.findByRole("heading", { name: /ready\?/ });
@@ -173,6 +177,18 @@ describe("the restore wizard", () => {
     // One restore exists for it however many times it was sent: the second answer replays the first.
     const list = (await (await import("../../mock/fetch")).mockFetch(new Request("https://logweir.invalid/api/v1/workspaces/team-a/restores"))).json() as Promise<{ items: S["Restore"][] }>;
     expect((await list).items.filter((r) => r.planHash === body.planHash)).toHaveLength(1);
+  });
+
+  it("DUI-54.4: a clone's review states how long it is kept; a newTopic review has no such line", async () => {
+    renderAt("/team-a/restores/new");
+    await toReview({ clone: true });
+    expect(document.getElementById("review-afterwards")!.textContent).toBe(
+      "A clone: the topics this run creates are kept, then deleted 24 h after the run. A run that does not pass deletes them at once.",
+    );
+    cleanup();
+    renderAt("/team-a/restores/new");
+    await toReview();
+    expect(document.getElementById("review-afterwards")).toBeNull();
   });
 
   it("theme A's D3: a create refused for a taken approval name shows the API's sentence, and that nothing was created", async () => {

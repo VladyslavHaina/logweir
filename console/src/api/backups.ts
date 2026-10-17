@@ -141,9 +141,14 @@ export function useCatalog(ws: string, name: string) {
     enabled: useCan(ws, "catalogs"),
     queryFn: async ({ signal }) =>
       (await call(() => api.GET("/api/v1/workspaces/{ws}/catalogs/{name}", { params: { path: { ws, name } }, signal }))).item,
+    // DUI-54.2: a view not built yet (a just-connected catalog) or aged out is re-read until a sync builds it.
+    refetchInterval: (q) => (q.state.data?.viewExpired ? VIEW_MISSING_MS : false),
     retry: (count, error) => !notFound(error) && count < 2,
   });
 }
+
+/** How often a catalog whose view is missing is re-read. */
+const VIEW_MISSING_MS = 5000;
 
 /**
  * Each catalog's newest selectable point, for the Overview: one read of one point per
@@ -193,6 +198,7 @@ export function useCatalogPoints(ws: string, name: string, selectableOnly: boole
         }),
       ),
     getNextPageParam: (last) => last.page.nextCursor ?? undefined,
+    refetchInterval: (q) => (q.state.data?.pages.some((p) => p.viewExpired) ? VIEW_MISSING_MS : false),
     retry: false,
   });
 }

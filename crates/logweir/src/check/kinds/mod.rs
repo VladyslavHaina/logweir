@@ -572,8 +572,9 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              prerequisite reported beside it."
         }
         CheckCode::WriteNotProbed => {
-            "This destination has no create-only write probe configured, so the grant is \
-             verified only when a run executes."
+            "This check did not write a create-only marker (the destination configures no \
+             write probe, or the check, like a restore's readiness check, never writes), so \
+             the grant is verified only when a run executes."
         }
         CheckCode::EvidenceReadNotConfigured => {
             "No evidence-read grant a check pod can hold is configured (none at all, or the \

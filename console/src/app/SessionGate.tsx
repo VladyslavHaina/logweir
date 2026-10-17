@@ -12,7 +12,7 @@ import { Bullseye, Button, EmptyState, EmptyStateActions, EmptyStateBody, EmptyS
 import ExclamationCircleIcon from "@patternfly/react-icons/dist/esm/icons/exclamation-circle-icon";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
 import UserIcon from "@patternfly/react-icons/dist/esm/icons/user-icon";
-import { ApiError, readSession, setCsrfToken, signOut } from "../api/client";
+import { ApiError, leaveAfterSignOut, readSession, setCsrfToken, signOut } from "../api/client";
 import { keys } from "../api/queries";
 import { SessionProvider } from "../api/session";
 import type { Session } from "../api/types";
@@ -115,7 +115,7 @@ export function NoWorkspace({ session }: { session: Session }) {
         {session.authenticationMode === "oidc" && (
           <EmptyStateFooter>
             <EmptyStateActions>
-              <Button variant="secondary" onClick={() => void signOut().finally(() => window.location.reload())}>
+              <Button variant="secondary" onClick={() => void signOut().finally(() => leaveAfterSignOut())}>
                 Sign out
               </Button>
             </EmptyStateActions>

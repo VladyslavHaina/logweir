@@ -255,9 +255,6 @@ export const WRITE_ONLY_SENTENCE =
 export const DEFAULT_DESTINATION_SENTENCE =
   "At most one destination per workspace is the default, and new schedules start from it. Naming a second one is refused rather than silently moving the flag: clear it on the destination that holds it first.";
 
-export const DEFAULT_ANNOTATION_RESIDUAL =
-  "A default set by hand with only the logweir.dev/default-destination annotation carries no label, so the conflict check cannot see it; it still reads as the default everywhere else.";
-
 export const WRITE_PROBE_SENTENCE =
   "Create-only marker lets an access test create one marker object under logweir/readiness/. It is never deleted, and nothing else is ever written by a test. A destination created with kubectl and no opinion gets disabled instead.";
 

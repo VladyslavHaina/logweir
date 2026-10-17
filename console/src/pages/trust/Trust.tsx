@@ -37,6 +37,11 @@ function list(names: string[] | undefined): string {
   return names && names.length > 0 ? names.join(", ") : "";
 }
 
+/** Whether a policy's namespace rows say anything: it names a namespace, or its lists were cut. */
+export function namesNamespaces(p: Pick<TrustPolicy, "namespaces" | "boundNamespaces" | "namespacesFiltered" | "namespacesTruncated">): boolean {
+  return Boolean(p.namespaces?.length || p.boundNamespaces?.length || p.namespacesFiltered || p.namespacesTruncated);
+}
+
 function PolicyCard({ p }: { p: TrustPolicy }) {
   const fresh = isFresh(p);
   const why = unknownReason(p);
@@ -103,28 +108,33 @@ function PolicyCard({ p }: { p: TrustPolicy }) {
             {p.generation ?? "Not recorded"}
             <span className="lw-subtle"> · observed {p.observedGeneration ?? "not recorded"}</span>
           </Term>
-          {/* DUI-31.5: the installation default names no namespace and still governs; say so instead of "Not recorded". */}
-          <Term term="Claims namespaces">
-            {p.default && !p.namespaces?.length ? (
-              <>
-                None by name
-                <div className="lw-subtle lw-small">As the installation default it needs none.</div>
-              </>
-            ) : (
-              <Value value={list(p.namespaces)} />
-            )}
-          </Term>
-          <Term term="Governs namespaces">
-            {p.default ? (
-              <>{p.boundNamespaces?.length ? `${list(p.boundNamespaces)}, and every` : "Every"} namespace no other policy names</>
-            ) : (
-              <Value value={list(p.boundNamespaces)} />
-            )}
-          </Term>
-          <Term term="Namespace lists">
-            {p.namespacesFiltered ? "Narrowed to the namespaces you administer" : "Complete for this policy"}
-            {p.namespacesTruncated ? "; cut short by the row limit" : ""}
-          </Term>
+          {/* DUI-54.9: a policy that names no namespace (the one-namespace install) has nothing to say in these three rows. */}
+          {namesNamespaces(p) && (
+            <>
+              {/* DUI-31.5: the installation default names no namespace and still governs; say so instead of "Not recorded". */}
+              <Term term="Claims namespaces">
+                {p.default && !p.namespaces?.length ? (
+                  <>
+                    None by name
+                    <div className="lw-subtle lw-small">As the installation default it needs none.</div>
+                  </>
+                ) : (
+                  <Value value={list(p.namespaces)} />
+                )}
+              </Term>
+              <Term term="Governs namespaces">
+                {p.default ? (
+                  <>{p.boundNamespaces?.length ? `${list(p.boundNamespaces)}, and every` : "Every"} namespace no other policy names</>
+                ) : (
+                  <Value value={list(p.boundNamespaces)} />
+                )}
+              </Term>
+              <Term term="Namespace lists">
+                {p.namespacesFiltered ? "Narrowed to the namespaces you administer" : "Complete for this policy"}
+                {p.namespacesTruncated ? "; cut short by the row limit" : ""}
+              </Term>
+            </>
+          )}
           <Term term="Keys">
             {count(p.keyCount)}
             {p.keysTruncated ? `; ${count(keys.length)} shown, the list was cut short` : ""}

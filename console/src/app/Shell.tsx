@@ -55,7 +55,7 @@ import MoonIcon from "@patternfly/react-icons/dist/esm/icons/moon-icon";
 import FlaskIcon from "@patternfly/react-icons/dist/esm/icons/flask-icon";
 import SignOutAltIcon from "@patternfly/react-icons/dist/esm/icons/sign-out-alt-icon";
 import LockIcon from "@patternfly/react-icons/dist/esm/icons/lock-icon";
-import { MOCK, signOut } from "../api/client";
+import { MOCK, leaveAfterSignOut, signOut } from "../api/client";
 import { grantOf, useSessionDoc, type Flag } from "../api/session";
 import { Logo } from "./Logo";
 import { useTheme, type ThemeChoice } from "./theme";
@@ -249,8 +249,8 @@ function UserMenu({ ws }: { ws: string }) {
               description={MOCK ? "Not in the prototype" : undefined}
               onClick={() => {
                 setLeaving(true);
-                // Whatever the answer, reload: the next session read shows the sign-in page.
-                void signOut().finally(() => window.location.reload());
+                // Whatever the answer, reload at the root: the next session read shows the sign-in page.
+                void signOut().finally(() => leaveAfterSignOut());
               }}
             >
               Sign out

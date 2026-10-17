@@ -355,7 +355,7 @@ function DestinationPage({ ws, name }: { ws: string; name: string }) {
         <PageSection>
           {rotated !== null && (
             <Alert isInline variant="success" title={`Access rotated. The destination is now at generation ${rotated}.`} className="lw-gap-top">
-              A new credential was written to a new Secret bound to this destination; a superseded Secret is left for you to delete.
+              A new credential was written to a new Secret bound to this destination. The superseded Secret is left in place; an administrator removes it with kubectl.
             </Alert>
           )}
           {unjudged && <Alert isInline isPlain variant="info" title="Not judged yet">{NOT_JUDGED_SENTENCE}</Alert>}

@@ -192,7 +192,7 @@ export function CloneStatus({ clone: c, teardown, restoreName }: { clone: Clone;
                   ? `Running (attempt ${c.attempts ?? 1} of 3).`
                   : c.phase === "RemovalFailed"
                     ? `Stopped after ${c.attempts ?? 0} attempt(s).`
-                    : "Not run yet. Deleting this restore runs it at once."}
+                    : "Not run yet: it runs at expiry. An administrator who deletes this Restore with kubectl runs it at once."}
             {/* The controller's sentence, verbatim (theme A's D4: the cause and the steps out of RemovalFailed). */}
             {c.reason && <div className="lw-small lw-break">{c.reason}</div>}
           </DescriptionListDescription>

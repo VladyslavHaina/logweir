@@ -189,6 +189,15 @@ export function signInHref(location: { pathname: string; hash: string } = window
 }
 
 /** Sign out: the unsafe POST, with the CSRF token, then the caller reloads. */
+/**
+ * After a sign-out, load the console's root with no `#/<workspace>` (DUI-54.6): the
+ * address is the only place a workspace is remembered, and the next person to sign in
+ * lands on their own, not on the one the previous person had open.
+ */
+export function leaveAfterSignOut(location: Pick<Location, "pathname" | "search" | "replace"> = window.location): void {
+  location.replace(location.pathname + location.search);
+}
+
 export async function signOut(client: ApiClient = api): Promise<void> {
   const { response, error } = await client.POST("/api/v1/session/logout", {
     params: { header: { Origin: window.location.origin } },
