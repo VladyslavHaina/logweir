@@ -50,6 +50,7 @@ import { CompactList, useNarrow } from "../../components/CompactList";
 import { BackupStatus, Commands, MessageValue, Term, Value, VerdictLabel, useFlags } from "./parts";
 import { Prose } from "../../components/Prose";
 import { Trigger } from "./BackupList";
+import { registryCaptureWords } from "../catalog/model";
 import "./evidence.css";
 import {
   BASIS_WORDS,
@@ -299,6 +300,12 @@ function PointCard({ ws, b, receiptSha256 }: { ws: string; b: Backup; receiptSha
                 </Link>
               </FlexItem>
             </Flex>
+            {/* DUI-56: a Backup carries no registry facts; the run's catalog point does, once a catalog lists it. */}
+            {point.schemaRegistry && (
+              <Content component="p" className="lw-gap-top" id="run-point-registry">
+                Schema Registry: {registryCaptureWords(point.schemaRegistry)}
+              </Content>
+            )}
             <Content component="p" className="lw-subtle lw-gap-top">
               The committed positions captured with this point. A restore can translate them so consumers resume on the
               restored topics. A group that is not captured has no position: it is never read as offset 0.
