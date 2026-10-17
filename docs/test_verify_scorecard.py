@@ -5388,6 +5388,31 @@ def test_the_schema_registry_minors_are_the_rust_readers():
     ) == str(mod.SCORECARD_SCHEMAS_SINCE_MINOR_OF_MAJOR_2)
 
 
+def test_a_schema_dependent_topic_says_registry_captured_when_the_receipt_captured_it():
+    """PoC D4: a 1.9.0 receipt whose `schema_registry` says `captured: true`
+    prints "schema-dependent, registry captured" per topic, end to end through
+    the shipped script. Control: the same receipt with `captured: false` (and
+    its reason) prints "registry not captured"."""
+    doc = json.loads(
+        (ROOT / "e2e/fixtures/invariants/receipt_1_9_schema_dependent_registry_captured.json")
+        .read_text()
+    )
+    uncaptured = json.loads(json.dumps(doc))
+    uncaptured["schema_registry"] = json.loads(
+        (ROOT / "e2e/fixtures/invariants/receipt_1_9_registry_not_captured.json").read_text()
+    )["schema_registry"]
+    with tempfile.TemporaryDirectory() as d:
+        pth, sig = _write_signed(d, "captured", BACKUP_RECEIPT_TYPE, doc)
+        r = run_typed("backup-receipt", pth, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert 'schema_dependency["orders"]: schema-dependent, registry captured;' in r.stdout, r.stdout
+        assert "registry not captured" not in r.stdout, r.stdout
+        pth, sig = _write_signed(d, "uncaptured", BACKUP_RECEIPT_TYPE, uncaptured)
+        r = run_typed("backup-receipt", pth, sig, FIX / "public.pem")
+        assert r.returncode == 0, r.stderr
+        assert 'schema_dependency["orders"]: schema-dependent, registry not captured;' in r.stdout, r.stdout
+
+
 def test_an_absent_schema_registry_reads_not_captured():
     """SR-10: a receipt without the block reads "registry not captured", never
     captured; a scorecard without `target.schemas` prints no schemas line."""

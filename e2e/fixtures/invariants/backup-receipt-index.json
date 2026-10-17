@@ -848,6 +848,14 @@
     "arm": ""
   },
   {
+    "id": "receipt_1_9_schema_dependent_registry_captured",
+    "file": "receipt_1_9_schema_dependent_registry_captured.json",
+    "rust_exit": 0,
+    "python_exit": 0,
+    "reason": "",
+    "arm": ""
+  },
+  {
     "id": "receipt_1_9_registry_not_captured",
     "file": "receipt_1_9_registry_not_captured.json",
     "rust_exit": 0,

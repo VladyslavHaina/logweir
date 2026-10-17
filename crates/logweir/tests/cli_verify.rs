@@ -1249,3 +1249,75 @@ fn source_coverage_reads_recorded_only_from_the_block() {
     assert!(source_watermark_lines(Some(&empty), true)[0]
         .starts_with("source_watermarks: an EMPTY CAPTURE"));
 }
+
+/// PoC D4: a schema-dependent topic of a 1.9.0 receipt whose `schema_registry`
+/// says `captured: true` reads "registry captured", end to end through
+/// `drill verify`. Control: the same receipt with the corpus's not-captured
+/// block reads "registry not captured". `check-verifier-parity.sh` holds the
+/// Python reader to the same lines over the corpus case.
+#[test]
+fn a_schema_dependent_topic_says_registry_captured_when_the_receipt_captured_it() {
+    const CORPUS: &str = "../../e2e/fixtures/invariants";
+    let captured: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(format!(
+            "{CORPUS}/receipt_1_9_schema_dependent_registry_captured.json"
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let not_captured: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(format!("{CORPUS}/receipt_1_9_registry_not_captured.json")).unwrap(),
+    )
+    .unwrap();
+    let mut uncaptured = captured.clone();
+    uncaptured["schema_registry"] = not_captured["schema_registry"].clone();
+    let dir = tempfile::tempdir().unwrap();
+    let run = |name: &str, doc: &serde_json::Value| {
+        let bytes = serde_json::to_vec(doc).unwrap();
+        let (doc_path, sig_path) = (
+            dir.path().join(format!("{name}.json")),
+            dir.path().join(format!("{name}.sig")),
+        );
+        std::fs::write(&doc_path, &bytes).unwrap();
+        let sidecar = sign_detached(
+            &fixture_key(),
+            "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+            &bytes,
+        )
+        .unwrap();
+        std::fs::write(&sig_path, serde_json::to_vec(&sidecar).unwrap()).unwrap();
+        let out = bin()
+            .args([
+                "drill",
+                "verify",
+                "--payload-type",
+                "backup-receipt",
+                "--scorecard",
+            ])
+            .arg(&doc_path)
+            .arg("--signature")
+            .arg(&sig_path)
+            .arg("--public-key")
+            .arg(format!("{FIX}/public.pem"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{name}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    };
+    let stdout = run("captured", &captured);
+    assert!(
+        stdout.contains("schema_dependency[\"orders\"]: schema-dependent, registry captured;"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("registry not captured"), "{stdout}");
+    let stdout = run("uncaptured", &uncaptured);
+    assert!(
+        stdout.contains("schema_dependency[\"orders\"]: schema-dependent, registry not captured;"),
+        "{stdout}"
+    );
+}

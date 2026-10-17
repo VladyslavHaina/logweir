@@ -1291,7 +1291,8 @@ derives what each must say from the document):
   `topic_configuration: not recorded, …`;
 - `schema_dependency["<topic>"]: schema-dependent, registry not captured; <n>
   records judged (<basis>); key framed <f> of <n> non-null[, dependent, schema
-  ids <ids>[ and <k> more]]; value …` (`no schema framing detected; …`, or
+  ids <ids>[ and <k> more]]; value …` (`registry captured` when the
+  `schema_registry` block says captured; `no schema framing detected; …`, or
   `not assessed (<reason>)`), or `schema_dependency: not assessed, so whether
   any topic's records need a schema registry is not known from this receipt`;
 - `generations["<topic>"]:` — `topic ID <id> before and after the capture

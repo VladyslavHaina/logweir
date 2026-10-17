@@ -5837,11 +5837,13 @@ def _consumer_positions_lines(block, verified=None):
     return lines
 
 
-def _schema_dependency_lines(block):
+def _schema_dependency_lines(block, registry_captured=False):
     """The receipt's `schema_dependency`, one line per topic in NAME order, or
     the line that says it is absent — the twin of `crates/logweir/src/
     verify.rs::schema_dependency_lines`, in the same words (PROD-03.0). Absent
-    is NOT ASSESSED, never "not schema-dependent"."""
+    is NOT ASSESSED, never "not schema-dependent". A schema-dependent topic
+    says "registry captured" only when the receipt's `schema_registry` block
+    says `captured: true`."""
     if block is None:
         return [
             "schema_dependency: not assessed, so whether any topic's records need a schema "
@@ -5864,7 +5866,9 @@ def _schema_dependency_lines(block):
     for topic in sorted(block):
         entry = block[topic]
         verdict = entry["verdict"]
-        if verdict == "schemaDependent":
+        if verdict == "schemaDependent" and registry_captured:
+            said = "schema-dependent, registry captured"
+        elif verdict == "schemaDependent":
             said = "schema-dependent, registry not captured"
         elif verdict == "notDetected":
             said = "no schema framing detected"
@@ -6769,7 +6773,8 @@ def main(
         # PROD-03.0: the schema dependency, one line per topic, in the same
         # words `logweir drill verify` prints (`verify.rs::
         # schema_dependency_lines`); the parity script compares them.
-        for line in _schema_dependency_lines(doc.get("schema_dependency")):
+        captured = (doc.get("schema_registry") or {}).get("captured") is True
+        for line in _schema_dependency_lines(doc.get("schema_dependency"), captured):
             print(f"       {line}")
         # PROD-01.4a: the topic ID before and after the capture, one line per
         # topic, in the same words `logweir drill verify` prints (`verify.rs::

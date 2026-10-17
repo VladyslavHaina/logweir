@@ -883,12 +883,13 @@ pub fn consumer_positions_lines(
 /// `scripts/check-verifier-parity.sh` compares every line starting
 /// `schema_dependency` between the two readers.
 ///
-/// A `schemaDependent` topic says "registry not captured" in as many words:
-/// no Logweir build captures a schema registry, so a reader of the restored
-/// records needs one the archive does not carry.
+/// A `schemaDependent` topic says whether the receipt's `schema_registry`
+/// block (1.9.0) captured the source registry: "registry captured" when it
+/// did, "registry not captured" when the block is absent or says it was not.
 #[must_use]
 pub fn schema_dependency_lines(
     block: Option<&BTreeMap<String, logweir_core::backup_receipt::TopicSchemaDependency>>,
+    registry_captured: bool,
 ) -> Vec<String> {
     let Some(block) = block else {
         return vec![
@@ -917,6 +918,9 @@ pub fn schema_dependency_lines(
         .iter()
         .map(|(topic, e)| {
             let verdict = match e.verdict.as_str() {
+                "schemaDependent" if registry_captured => {
+                    "schema-dependent, registry captured".to_string()
+                }
                 "schemaDependent" => "schema-dependent, registry not captured".to_string(),
                 "notDetected" => "no schema framing detected".to_string(),
                 _ => format!(
@@ -1630,7 +1634,8 @@ fn print_backup_receipt(
     }
     // PROD-03.0: the schema dependency, one line per topic — or the line that
     // says it was not assessed, which is never "not schema-dependent".
-    for line in schema_dependency_lines(blocks.schema_dependency) {
+    let registry_captured = blocks.schema_registry.is_some_and(|r| r.captured);
+    for line in schema_dependency_lines(blocks.schema_dependency, registry_captured) {
         println!("schema:    {line}");
     }
     // PROD-01.4a: the topic ID before and after the capture, one line per
