@@ -201,6 +201,20 @@ describe("two-person: the second person's page", () => {
     expect(posts()[0]!.key).toBeNull();
   });
 
+  it("DUI-52: names the workspace the request is in, from the request and not the route", async () => {
+    serve({ policy: TWO_PERSON, request: { ...pending(), workspace: "prd" } });
+    renderAt("/team-a/approvals/restore-x");
+    await screen.findByRole("button", { name: "Approve" });
+    expect(document.getElementById("request-workspace")!.textContent).toBe("prd");
+  });
+
+  it("DUI-52: a switchover's approval page names the request's workspace", async () => {
+    serve({ policy: TWO_PERSON, switchoverRequests: { "swo-1": swoRequest({ workspace: "prd" }) } });
+    renderAt("/team-a/approvals/switchover/swo-1");
+    await screen.findByRole("button", { name: "Approve" });
+    expect(document.getElementById("switchover-workspace")!.textContent).toBe("In workspace prd");
+  });
+
   it("a clone's request shows when its topics are deleted and the topic configuration the approver signs for", async () => {
     const base = pending() as { scope: { target: Record<string, unknown> } } & Record<string, unknown>;
     const clone = {
