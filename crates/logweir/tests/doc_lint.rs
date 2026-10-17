@@ -2385,7 +2385,10 @@ fn the_entry_after_the_rc1_record_carries_its_own_items() {
         // OD-23 (item 145): the verifier that reads the new blocks.
         ("format steps", "`verify_scorecard.py` 1.35.0"),
         // DUI-51 (item 146): the key a catalog keeps a point by.
-        ("a catalog lists its prefix", "`<prefix>/<set>/manifest.json`"),
+        (
+            "a catalog lists its prefix",
+            "`<prefix>/<set>/manifest.json`",
+        ),
         // D4 (item 147): the readers' new word.
         ("registry captured", "`schema-dependent, registry captured`"),
         // SEC-1 (item 148): the field the approver's line is read from.
