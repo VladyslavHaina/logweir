@@ -42,9 +42,10 @@ publication: `LOGWEIR_TAG` (`sha-<commit>`) for the images and
 together by `images.yml`, or a release that promotes one unchanged (its tag and
 chart version; versions.env, *A RELEASE PIN*). The profile needs a build that
 carries the chart-gap fixes below (every publication since main `86a554e6`):
-`LOGWEIR_COMMIT` names main `4bb185d5` (2026-10-15), pinned as the release
-`v0.4.1`, and versions.env's comment records every pin before it, among them
-the release `v0.4.0`. The first long-lived pin, main `fdb48cd8` (CI run 36183088296,
+`LOGWEIR_COMMIT` names main `3bf3165c` (2026-10-16, OD-23: one namespace with
+workspaces), the `sha-` publication of CI run 38970870492, installed fresh, and
+versions.env's comment records every pin before it, among them the releases
+`v0.4.1` and `v0.4.0`. The first long-lived pin, main `fdb48cd8` (CI run 36183088296,
 2026-09-25), carried the
 fixes for the first PoC round's product defects P1–P10 (first published at
 `02dc44b6`), the second round's P11 and P12, the durable compromise
@@ -61,9 +62,8 @@ then to `fdb48cd8` with
 
 **One namespace, four workspaces (OD-23).** [logweir.values.yaml](logweir.values.yaml)
 installs into ONE namespace, `logweir`, and needs a chart that knows
-`workspaces` (0.5.0 and later); the `v0.4.1` pin above does not, so until
-versions.env names such a publication, install from a checkout (step 6, *From
-a checkout*). A PoC installed with an earlier chart is not upgraded in place:
+`workspaces` (0.5.0 and later, and every `main` publication since `3bf3165c`,
+which versions.env pins). A PoC installed with an earlier chart is not upgraded in place:
 install afresh and import its archive ([*Import an earlier install's
 archive*](#import-an-earlier-installs-archive)).
 
