@@ -637,8 +637,8 @@ fn unbound_schemas(
         Ok(access) => access,
         Err(why) => return unread(why),
     };
-    match crate::drill::schema_import::receipt_of_set(backup_id, |key: &str, cap| {
-        access.get(key, cap)
+    match crate::drill::schema_import::receipt_of_set(backup_id, |key: &str, max_bytes| {
+        access.get(key, max_bytes)
     }) {
         Ok(receipt) => receipt
             .and_then(|r| r.schema_registry)

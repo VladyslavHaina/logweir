@@ -130,8 +130,8 @@ pub fn prepare(
     archive: &Store,
 ) -> Result<Prepared, DrillError> {
     if bound.is_none() && spec.target.schema_registry.is_some() {
-        let receipt = receipt_of_set(set_backup_id, |key: &str, cap| {
-            archive.get_capped(key, cap).map(|(bytes, _)| bytes)
+        let receipt = receipt_of_set(set_backup_id, |key: &str, max_bytes| {
+            archive.get_capped(key, max_bytes).map(|(bytes, _)| bytes)
         })
         .map_err(|e| {
             DrillError::Operational(format!(
