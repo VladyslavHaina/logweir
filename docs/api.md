@@ -289,6 +289,11 @@ member's rule is in its schema description. Beyond those:
   read before the Job is made, the controller records that source's
   `notAttempted` verdict instead. Follow it until the verdict lands; the
   console does, for up to two minutes.
+- A `NotAttempted` verdict the controller will try again
+  (`status.evidence.observation.retryAfter`, after an evidence read that did
+  not finish) is `verification.state: pending`, and its `detail` says when the
+  next attempt starts. Once the attempts are spent it is `notAttempted`. The
+  console follows a pending verdict for up to 30 minutes.
 - `teardown.deleted` and `lastEnforcement.deleted` are lists of names.
 - The Job name, pod name and container state are not published.
 

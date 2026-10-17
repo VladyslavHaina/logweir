@@ -125,6 +125,11 @@ struct Observed<'a> {
     /// verification block exists. The controller's next pass creates the Job,
     /// so the verdict is coming: pending, never "not attempted".
     fetch_owed: bool,
+    /// DUI-55: when the controller starts its next evidence attempt, while a
+    /// fetch that did not finish is to be retried
+    /// (`status.evidence.observation.retryAfter`). Absent once a verdict was
+    /// reached or the attempts are spent.
+    retry_after: Option<DateTime<Utc>>,
 }
 
 fn find<'a>(conditions: Option<&'a Vec<Condition>>, type_: &str) -> Option<&'a Condition> {
@@ -300,6 +305,9 @@ fn verification_of(o: &Observed<'_>, terminal_run: bool) -> OperationVerificatio
         Some("Valid") if v.matched_key_id.is_some() && v.verified_at.is_some() => {
             VerificationState::Valid
         }
+        // DUI-55: a `NotAttempted` the controller will try again is not a
+        // verdict yet: pending, with when the next attempt starts.
+        Some("NotAttempted") if o.retry_after.is_some() => VerificationState::Pending,
         Some("Valid") | Some("NotAttempted") => VerificationState::NotAttempted,
         Some("Invalid") => VerificationState::Invalid,
         // An evidence-fetch Job is reading the document and no verdict is
@@ -307,12 +315,22 @@ fn verification_of(o: &Observed<'_>, terminal_run: bool) -> OperationVerificatio
         None | Some("Pending") => VerificationState::Pending,
         Some(_) => VerificationState::Unknown,
     };
+    let detail = match (state, o.retry_after) {
+        (VerificationState::Pending, Some(at)) if v.result.as_deref() == Some("NotAttempted") => {
+            Some(format!(
+                "the last attempt to read the evidence did not finish; the controller tries again \
+                 at {}",
+                at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            ))
+        }
+        _ => v.detail.as_deref().map(|d| bounded(d, 512)),
+    };
     OperationVerification {
         state,
         matched_key_id: v.matched_key_id.clone(),
         verified_at: v.verified_at,
         payload_type: v.payload_type.clone(),
-        detail: v.detail.as_deref().map(|d| bounded(d, 512)),
+        detail,
     }
 }
 
@@ -353,6 +371,9 @@ pub fn backup_operation(backup: &Backup) -> Operation {
         // A Backup's digest comes off the pod log with its keys, so a read a
         // Job owes is already `evidence_recorded`: pending, then `verifying`.
         fetch_owed: false,
+        retry_after: evidence
+            .and_then(|e| e.observation.as_ref())
+            .and_then(|o| o.retry_after),
     };
     let (state, state_reason) = state_of(&observed);
     let result_status = result_of(&observed, state, None);
@@ -416,6 +437,9 @@ pub fn restore_operation(restore: &Restore) -> Operation {
             && evidence.is_some_and(|e| {
                 e.verification.is_none() && e.scorecard_key.is_some() && e.sidecar_key.is_some()
             }),
+        retry_after: evidence
+            .and_then(|e| e.observation.as_ref())
+            .and_then(|o| o.retry_after),
     };
     let (state, state_reason) = state_of(&observed);
     let outcome = status.and_then(|s| s.outcome.as_deref());

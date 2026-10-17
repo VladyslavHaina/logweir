@@ -58,9 +58,10 @@ function notFound(error: unknown): boolean {
 
 export const useBackupDoc = useBackup;
 
-/** How often a terminal run whose verdict is still pending is read again, and for how long. */
-const SETTLE_MS = 5000;
-const SETTLE_READS = 60;
+/** How often a terminal run whose verdict is still pending is read again, and for how long:
+ *  30 minutes, past the controller's last evidence retry (+1, +5 and +15 min; DUI-55). */
+const SETTLE_MS = 10_000;
+const SETTLE_READS = 180;
 
 /** The run's operation view: stage, diagnoses, result, evidence. Read until it is terminal and its
  *  verdict has settled. While `streaming` (stream.ts holds the run's event stream open) the stream

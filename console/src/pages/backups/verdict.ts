@@ -174,6 +174,8 @@ export function detailVerdict(op: Pick<OperationView, "verification" | "result" 
     return { green: false, reason: CASES.recordedBeforeRevocation };
   }
   if (recorded === undefined) {
+    // DUI-55: a pending verdict with the controller's reason (a retry scheduled) says it.
+    if (v.state === "pending" && typeof v.detail === "string" && v.detail) return { green: false, reason: `Pending: ${v.detail}.` };
     // No result was recorded: the verification state says which case (pending, no evidence, unreadable).
     return listVerdict({ verificationState: v.state, verifiedSuccess: false });
   }
