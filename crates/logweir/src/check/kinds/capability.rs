@@ -450,9 +450,15 @@ fn registry_answers(
 pub fn registry_reachable(connection: &ConnectionPlan, now: DateTime<Utc>) -> CheckOutcome {
     let id = CheckId::RegistryReachable;
     match registry_answers(connection) {
+        // DUI-62.2: a registry with no user is asked with no credential.
         Ok((_, plan)) => ready(id, CheckCode::RegistryAnswered, now).with_message(&format!(
-            "the Schema Registry at {} answered with this connection's registry credential",
-            plan.url
+            "the Schema Registry at {} answered {}",
+            plan.url,
+            if plan.username.is_some() {
+                "with this connection's registry credential"
+            } else {
+                "without a credential (this connection names no registry user)"
+            }
         )),
         Err((state, code, message)) => catalogue::outcome(id, state, code, now)
             .with_message(&message)
@@ -515,7 +521,20 @@ pub fn target_schemas(
         .copied()
         .collect();
     let entries = sr::closure(snapshot, &needed);
-    match sr::classify(&mut client, &entries) {
+    // DUI-58: the run reads every subject's mode before it writes and refuses
+    // a read-only one; the preview asks the same question, with the same rule.
+    let classified = sr::classify(&mut client, &entries).and_then(|classes| {
+        let mut subjects: Vec<&str> = entries
+            .iter()
+            .zip(&classes)
+            .filter(|(_, c)| **c == sr::Class::Import)
+            .map(|(v, _)| v.subject.as_str())
+            .collect();
+        subjects.sort_unstable();
+        subjects.dedup();
+        sr::writable_modes(&mut client, &subjects).map(|_| classes)
+    });
+    match classified {
         Ok(classes) => {
             let import = classes.iter().filter(|c| **c == sr::Class::Import).count();
             ready(id, CheckCode::SchemasImportable, now).with_message(&format!(
@@ -531,6 +550,11 @@ pub fn target_schemas(
         Err(e @ sr::ImportRefusal::Conflict { .. }) => refuse(
             CheckState::NotReady,
             CheckCode::SchemaConflict,
+            e.to_string(),
+        ),
+        Err(e @ sr::ImportRefusal::ReadOnly { .. }) => refuse(
+            CheckState::NotReady,
+            CheckCode::SchemaRegistryReadOnly,
             e.to_string(),
         ),
         Err(e) => refuse(

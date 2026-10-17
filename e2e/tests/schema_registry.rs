@@ -1310,7 +1310,7 @@ fn decoded_ok(topic: &str) -> bool {
 /// | row | pass predicate | control |
 /// |---|---|---|
 /// | `registry.reachable` | the target registry with its password: `ready` `RegistryAnswered` | the wrong password: `notReady` `RegistryUnauthorized` |
-/// | `target.schemas` | a restore check of a point that captured the source registry, into the empty target: `ready` `SchemasImportable`, naming how many will be imported | the same check after a conflicting schema took one of the IDs in the target: `notReady` `SchemaConflict` |
+/// | `target.schemas` | a restore check of a point that captured the source registry, into the empty target: `ready` `SchemasImportable`, naming how many will be imported | a subject to import made `READONLY`: `notReady` `SchemaRegistryReadOnly` (DUI-58); the same check after a conflicting schema took one of the IDs in the target: `notReady` `SchemaConflict` |
 #[test]
 #[ignore = "needs the `registry` profile: --profiles registry (e2e/README.md)"]
 fn the_registry_check_rows_answer_from_the_live_registries() {
@@ -1473,6 +1473,38 @@ fn the_registry_check_rows_answer_from_the_live_registries() {
         "the preview names what will be imported: {}",
         importable.message
     );
+    // DUI-58: a subject the import would write, read-only in the target (it is
+    // absent there; the mode is its own): `notReady` `SchemaRegistryReadOnly`,
+    // the run's own refusal, and still nothing written. Then the mode is
+    // removed again.
+    let (read_only, _) = src
+        .ids
+        .iter()
+        .find(|(subject, _)| subject.ends_with("-audit-value"))
+        .cloned()
+        .expect("a subject the import writes");
+    let mode_url = format!("{}/mode/{}", target_url(), enc(&read_only));
+    let (s, b) = http("PUT", &mode_url, Some(&json!({"mode": "READONLY"})), true);
+    assert_eq!(s, 200, "the target takes a subject-level READONLY: {b}");
+    let refused = schemas();
+    let (s, b) = http("DELETE", &mode_url, None, true);
+    assert_eq!(s, 200, "the READONLY mode is removed again: {b}");
+    assert_eq!(
+        (refused.state, refused.code),
+        (CheckState::NotReady, CheckCode::SchemaRegistryReadOnly),
+        "{}",
+        refused.message
+    );
+    assert!(
+        refused.message.contains(&read_only) && refused.message.contains("READONLY"),
+        "{}",
+        refused.message
+    );
+    assert!(
+        !target_subjects().contains(&read_only),
+        "the preview wrote nothing"
+    );
+
     // The control: one of the point's IDs taken in the target by another
     // schema, as SR-6 does it.
     let (_, framed_id) = src

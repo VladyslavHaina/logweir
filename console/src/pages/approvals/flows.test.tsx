@@ -201,6 +201,41 @@ describe("two-person: the second person's page", () => {
     expect(posts()[0]!.key).toBeNull();
   });
 
+  it("DUI-61, SEC-1: names the Schema Registry from the server's reading of the plan, never from the plan text", async () => {
+    // The plan bytes name another registry in a shape a hand-rolled reader would take; the
+    // page shows only what the API's scope says the runner's parser read.
+    const plan = `${PLAN}target:\n  schema_registry:\n    url: "http://decoy:8081"\n`;
+    const base = pending() as { scope: { target: Record<string, unknown> } } & Record<string, unknown>;
+    const withRegistry = { ...base, scope: { ...base.scope, target: { ...base.scope.target, schemaRegistry: { url: "http://registry-target:8081", username: "logweir" } } } };
+    serve({ policy: TWO_PERSON, restore: await restore({ planBytes: plan, planHash: await sha256(plan) }), request: withRegistry });
+    renderAt("/team-a/approvals/restore-x");
+    await screen.findByRole("button", { name: "Approve" });
+    expect(document.getElementById("scope-schema-registry")!.textContent).toBe(
+      "http://registry-target:8081 as logweir: the run imports into it the schemas the restored records reference, keeping their IDs.",
+    );
+    expect(document.body.textContent).not.toContain("decoy");
+    cleanup();
+    // Control: a scope with no registry.
+    serve({ policy: TWO_PERSON });
+    renderAt("/team-a/approvals/restore-x");
+    await screen.findByRole("button", { name: "Approve" });
+    expect(document.getElementById("scope-schema-registry")!.textContent).toBe("None named: the run writes nothing outside Kafka.");
+  });
+
+  it("DUI-52: names the workspace the request is in, from the request and not the route", async () => {
+    serve({ policy: TWO_PERSON, request: { ...pending(), workspace: "prd" } });
+    renderAt("/team-a/approvals/restore-x");
+    await screen.findByRole("button", { name: "Approve" });
+    expect(document.getElementById("request-workspace")!.textContent).toBe("prd");
+  });
+
+  it("DUI-52: a switchover's approval page names the request's workspace", async () => {
+    serve({ policy: TWO_PERSON, switchoverRequests: { "swo-1": swoRequest({ workspace: "prd" }) } });
+    renderAt("/team-a/approvals/switchover/swo-1");
+    await screen.findByRole("button", { name: "Approve" });
+    expect(document.getElementById("switchover-workspace")!.textContent).toBe("In workspace prd");
+  });
+
   it("a clone's request shows when its topics are deleted and the topic configuration the approver signs for", async () => {
     const base = pending() as { scope: { target: Record<string, unknown> } } & Record<string, unknown>;
     const clone = {

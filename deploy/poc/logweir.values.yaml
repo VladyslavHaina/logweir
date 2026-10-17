@@ -2,7 +2,7 @@
 # PoC profile. README.md step 6 has the exact command; in short:
 #
 #   helm upgrade --install logweir "$LOGWEIR_CHART" --version "$LOGWEIR_CHART_VERSION" \
-#     -n logweir -f deploy/poc/logweir.values.yaml --wait --timeout 15m
+#     -n logweir --skip-crds -f deploy/poc/logweir.values.yaml --wait --timeout 15m
 #
 # THE IMAGES ARE NOT IN THIS FILE. The published chart (versions.env's
 # LOGWEIR_CHART at LOGWEIR_CHART_VERSION) already names the four Logweir images

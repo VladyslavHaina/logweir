@@ -27,6 +27,7 @@ import DownloadIcon from "@patternfly/react-icons/dist/esm/icons/download-icon";
 import { StatusLabel } from "../../components/Status";
 import { ProbeLabels } from "../connections/parts";
 import { probeState } from "../../api/connections";
+import { afterwardsWords } from "../../api/approvals";
 import { LoadingRows } from "../../components/States";
 import { count, exactUtc } from "../../components/When";
 import { Ident } from "../../components/Ident";
@@ -124,12 +125,14 @@ export function PointStep({
 }) {
   const narrow = useNarrow();
   const [query, setQuery] = useState("");
-  const [limit, setLimit] = useState(SHOWN);
+  const [shownLimit, setLimit] = useState(SHOWN);
   const matching = useMemo(() => points.filter((b) => matchesQuery(pointHaystack(b), query)), [points, query]);
   // DUI-41.4: a catalog point chosen before the wizard opened (Recovery catalog → Restore this
   // point) is shown as chosen: its section opens, it is listed even past the first 50, and it
   // is brought into view once.
   const pointKey = useWatch({ control, name: "pointKey" }) as string;
+  // DUI-62.4: a chosen Backup (Backup → Restore this point, a retry) is never hidden behind "Show more".
+  const limit = Math.max(shownLimit, matching.findIndex((b) => pointKeyOf(b) === pointKey) + 1);
   const chosenOffer = pointKey.startsWith("catalog/") ? offers.find((o) => offerKeyOf(o) === pointKey) : undefined;
   const [offersOpen, setOffersOpen] = useState(pointKey.startsWith("catalog/"));
   const listedOffers = chosenOffer && !offers.slice(0, 50).includes(chosenOffer) ? [chosenOffer, ...offers.slice(0, 49)] : offers.slice(0, 50);
@@ -150,7 +153,7 @@ export function PointStep({
     <>
       <Title headingLevel="h2" size="xl">Which recovery point?</Title>
       {retryOf && (
-        <Alert variant="info" isInline title={`Retrying ${retryOf} to a fresh target`} className="lw-gap-top lw-gap-bottom" id="retry-banner">
+        <Alert variant="info" isInline title={`Retrying ${retryOf} into new topics`} className="lw-gap-top lw-gap-bottom" id="retry-banner">
           <p>This is a NEW restore. {RETRY_IDENTITY_SENTENCE}</p>
           <p>{RETRY_OLD_RUN_SENTENCE}</p>
         </Alert>
@@ -795,6 +798,7 @@ export function CheckStep({
   connection,
   onStart,
   onCancel,
+  onReread,
   topicPreview,
 }: {
   readiness: ReadinessState;
@@ -805,6 +809,8 @@ export function CheckStep({
   connection: Connection | null;
   onStart: () => void;
   onCancel: () => void;
+  /** DUI-62.5: read a check this page lost track of (a session that ended) again. */
+  onReread?: () => void;
   /** The topic configuration preview (theme A), once the check is done. */
   topicPreview?: ReactNode;
 }) {
@@ -844,6 +850,14 @@ export function CheckStep({
           {readiness.error !== null && readiness.error !== undefined && (
             <Alert variant="danger" isInline title="The check could not be started or read">
               <ErrorText error={readiness.error} />
+              {r && !r.terminal && onReread && (
+                <div className="lw-gap-top">
+                  After signing in again, read this check again: its verdict is kept by the service.{" "}
+                  <Button variant="link" isInline onClick={onReread} id="readiness-reread">
+                    Read the check again
+                  </Button>
+                </div>
+              )}
             </Alert>
           )}
           {r && refusal && !running && (
@@ -980,6 +994,8 @@ export function ReviewStep({
           { term: "Up to", value: fields.pointInTime ? `${exactUtc(fields.pointInTime)} (${fields.pointInTime})` : "Not recorded" },
           { term: "Into", value: `${fields.target.bootstrapServers.length ? v.target : "no target"}: ${mapping.map((m) => (m.source === m.target ? m.source : `${m.source} → ${m.target}`)).join(", ")}` },
           { term: "Mode", value: modeMeaning(fields.target.mode, fields.target.originalName === true) },
+          // DUI-54.4: a scratch run says what happens to its topics, a clone for how long it is kept.
+          fields.target.mode === "scratch" && { term: "Afterwards", id: "review-afterwards", value: afterwardsWords("scratch", fields.target.teardown, fields.target.teardownTtlSeconds) },
           { term: "Verification", value: fields.sample.coverage === "complete" ? `complete${typeof fields.sample.completeMaxRecords === "number" ? `, at most ${count(fields.sample.completeMaxRecords)} archived records` : ", no record bound"}` : "sampled: 25 records per partition and the manifest's counts" },
           { term: "Byte-rate limit", value: rateLimitWords(fields.rateLimitBytesPerSec) },
           { term: "Replication factor", value: `${replication.value} (${replicationBasisText(replication, brokers)})` },

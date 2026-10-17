@@ -6,7 +6,7 @@ import { Button, Card, Content, PageSection } from "@patternfly/react-core";
 import { Table, Tbody, Td, Th, Thead, Tr } from "@patternfly/react-table";
 import CloudUploadAltIcon from "@patternfly/react-icons/dist/esm/icons/cloud-upload-alt-icon";
 import { mayStart, useGrant } from "../../api/connections";
-import { DEFAULT_ANNOTATION_RESIDUAL, NOT_JUDGED_SENTENCE, useDestinationList, type DestinationSummary } from "../../api/destinations";
+import { NOT_JUDGED_SENTENCE, useDestinationList, type DestinationSummary } from "../../api/destinations";
 import { PageHeader } from "../../components/PageHeader";
 import { CompactList, useNarrow } from "../../components/CompactList";
 import { Empty, ErrorState, LoadingRows } from "../../components/States";
@@ -127,7 +127,7 @@ export function DestinationList() {
               <div className="lw-pad">
                 {!items.some((d) => d.default) && (
                   <Content component="p" className="lw-subtle lw-small">
-                    No destination here is marked default, so a new schedule starts with none chosen. {DEFAULT_ANNOTATION_RESIDUAL}
+                    No destination here is marked default, so a new schedule starts with none chosen.
                   </Content>
                 )}
                 {items.some((d) => d.status.valid === null || d.status.valid === undefined) && (

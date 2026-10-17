@@ -293,10 +293,12 @@ function CheckVerdict({ state, gating }: { state: string; gating?: string | null
 
 type CheckEntry = Preflight["checks"][number];
 
-function scopeText(scope: CheckEntry["scope"]): string {
+export function scopeText(scope: CheckEntry["scope"]): string {
   const kind = scope?.kind ?? "";
   const name = scope?.name ?? "";
   if (!kind && !name) return "Not recorded";
+  // DUI-62.2: a connection check names the principal it exercised, not an object.
+  if (kind === "KafkaCluster" && /^User:/.test(name)) return `the connection, as ${name}`;
   return kind && name ? `${kind}/${name}` : kind + name;
 }
 
@@ -613,7 +615,7 @@ export function LastTestLine({
   if (!test) {
     return (
       <Content component="p" className="lw-subtle">
-        No {noun} is recorded for this {subject}. That says what is stored, not whether it works.
+        No {noun} of this {subject} is on record now: none was run, or the last one's result has expired (results are kept for a limited time). Test again to see whether it works.
       </Content>
     );
   }

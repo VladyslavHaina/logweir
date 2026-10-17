@@ -9,7 +9,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { api } from "../api/client";
 import { SessionProvider } from "../api/session";
-import { connections, session } from "../mock/data";
+import { backups, connections, session } from "../mock/data";
 import { createdSecrets } from "../mock/connections";
 import { SessionGate } from "../app/SessionGate";
 import { createConsoleRouter } from "../router";
@@ -195,6 +195,17 @@ describe("PROD-07.2: an interrupted restore on the mock", () => {
     fireEvent.click(screen.getByRole("button", { name: /Retry into new topics/ }));
     await waitFor(() => expect(router.state.location.pathname).toBe("/team-a/restores/new"));
     expect(router.state.location.search).toEqual({ retryOf: "orders-drill-stopped-m3t8q" });
+  });
+
+  it("DUI-56: a backup's page says whether its catalog point captured the registry", async () => {
+    const captured = backups.find((b) => b.name.startsWith("orders-hourly-") && (b as { schemaRegistry?: { captured?: boolean } }).schemaRegistry?.captured === true)!;
+    open(`/team-a/backups/${captured.name}`);
+    expect((await screen.findByText(/^Schema Registry: /, {}, { timeout: 15_000 })).textContent).toBe("Schema Registry: Captured: 4 subjects, 7 versions");
+    cleanup();
+    // Control: the run whose registry did not answer says so, from its own point.
+    const missed = backups.find((b) => (b as { schemaRegistry?: { captured?: boolean } }).schemaRegistry?.captured === false)!;
+    open(`/team-a/backups/${missed.name}`);
+    expect((await screen.findByText(/^Schema Registry: /, {}, { timeout: 15_000 })).textContent).toBe("Schema Registry: Not captured: the registry did not answer");
   });
 
   it("a restore that passed shows its imported schemas and no Interrupted state (the control)", async () => {

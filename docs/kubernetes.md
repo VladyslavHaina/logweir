@@ -893,10 +893,20 @@ connection's own Secret. TLS trusts the public roots plus `auth.tlsCa` when set.
   allowed to set a subject's mode (on Redpanda, a superuser). Any registry
   answer other than the one that means "not there" refuses the run. The plan's
   `target.schema_registry` must equal the target connection's
-  (`ConnectionPlanMismatch`).
+  (`ConnectionPlanMismatch`). The snapshot comes only from a verified receipt:
+  the bound point's (`source.point`). A plan bound to no point (a restore
+  planned from a Backup with no catalog row) whose set captured a registry is
+  refused `SchemaSnapshotInvalid` before any topic is created, because its
+  receipt cannot be verified there: plan it from the set's catalog point, or
+  restore into a connection without a registry. The runner and `target.schemas`
+  find that out from the receipt its set's `execution.claim.json` names (the
+  archive-read grant reads `logweir/backups/` for it); a set with no claim
+  imports nothing (`noSnapshot`).
 - **Checks:** `registry.reachable` (connection test and backup readiness,
-  advisory) and `target.schemas` (restore readiness, blocking) are listed only for
-  a connection that names a registry.
+  advisory) and `target.schemas` (restore readiness, blocking; it reads each
+  subject's mode with the run's rule, so a read-only one is
+  `SchemaRegistryReadOnly` before the run) are listed only for a connection that
+  names a registry.
 - The registry Secret carries the connection's `logweir-binding` (it covers the
   registry URL and username) and is projected as
   `LOGWEIR_{SOURCE,TARGET}_REGISTRY_PASSWORD`, beside
@@ -1511,6 +1521,11 @@ current interval slot serves it. An `Index` sync walks the day shards of
 `logweir/catalog/v1/log/` newest first, down to the archive's oldest day (at most
 3,660 shards). A `Full` rescan pages `logweir/catalog/v1/points/` and resumes
 after `status.cursor.rescanStartAfter`.
+The catalog lives at the bucket root, so it holds the points of every
+destination that shares the bucket; a sync counts and lists only the points
+this destination can restore, those whose manifest is
+`<prefix>/<set>/manifest.json` under its own prefix (an empty prefix keeps
+every point).
 
 | Bound | Value |
 |---|---|
@@ -3329,11 +3344,14 @@ mismatch, and image pruning can remove it.
 **0.4.x to 0.5.0 has no in-place upgrade** (OD-23: one namespace per install,
 workspaces inside it). Export trust as in [*Recover onto a clean installation
 with the kit*](install.md#recover-onto-a-clean-installation-with-the-kit), keep
-the bucket, `helm uninstall` the old release (one install per cluster), apply
+the bucket, `helm uninstall` the old release (one install per cluster), delete
+the `TrustPolicy/logweir-installation` and `ClusterRole/logweir-identity-singleton`
+it leaves (exported with the trust; the fresh install makes its own), apply
 the 0.5.0 chart's CRDs server-side
 (`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`, then
 wait for them to be established), install 0.5.0 into one namespace with
-`workspaces`, import trust, and then in each
+`workspaces` and `--skip-crds` (Helm 4 would apply `crds/` again and fail on
+the fields `kubectl` now owns), import trust, and then in each
 workspace add connections, destinations and schedules and connect a catalog to
 see the old points. Delete the old namespaces when done. Every archive stays
 readable and verifiable: nothing in the bucket names a namespace. The CRDs go

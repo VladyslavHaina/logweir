@@ -264,6 +264,7 @@ receipt_unchecked_cases=0
 receipt_admin_cases=0
 receipt_cp_cases=0
 receipt_sd_dependent_cases=0
+receipt_sd_captured_cases=0
 receipt_sd_key_cases=0
 receipt_sd_absent_cases=0
 receipt_sd_entry_cases=0
@@ -480,10 +481,12 @@ $rust_sd
 $py_sd"
         fi
         want_sd="$("$PY" -c 'import json, sys
-block = json.load(open(sys.argv[1])).get("schema_dependency")
+doc = json.load(open(sys.argv[1]))
+block = doc.get("schema_dependency")
 if block is None:
     print("schema_dependency: not assessed, so whether any topic'"'"'s records need a schema registry is not known from this receipt")
-words = {"schemaDependent": "schema-dependent, registry not captured", "notDetected": "no schema framing detected"}
+captured = (doc.get("schema_registry") or {}).get("captured") is True
+words = {"schemaDependent": "schema-dependent, registry " + ("captured" if captured else "not captured"), "notDetected": "no schema framing detected"}
 def side(name, s):
     out = "%s framed %d of %d non-null" % (name, s["framed"], s["framed"] + s["unframed"])
     if s["dependent"]:
@@ -509,6 +512,7 @@ $want_sd
 $rust_sd"
         fi
         case "$want_sd" in *"registry not captured"*) receipt_sd_dependent_cases=$((receipt_sd_dependent_cases + 1)) ;; esac
+        case "$want_sd" in *"schema-dependent, registry captured"*) receipt_sd_captured_cases=$((receipt_sd_captured_cases + 1)) ;; esac
         case "$want_sd" in *"key framed "*", dependent"*) receipt_sd_key_cases=$((receipt_sd_key_cases + 1)) ;; esac
         case "$want_sd" in *"schema_dependency: not assessed"*) receipt_sd_absent_cases=$((receipt_sd_absent_cases + 1)) ;; esac
         case "$want_sd" in *": not assessed ("*) receipt_sd_entry_cases=$((receipt_sd_entry_cases + 1)) ;; esac
@@ -647,8 +651,9 @@ if [ "$receipt_unchecked_cases" -eq 0 ] || [ "$receipt_admin_cases" -eq 0 ]; the
     fail "the accepted backup-receipt cases do not include both an owner NOT CHECKED ($receipt_unchecked_cases) and one looked for and not found ($receipt_admin_cases), so the route words (PROD-05.1 M2) were never told apart"
 fi
 if [ "$receipt_sd_dependent_cases" -eq 0 ] || [ "$receipt_sd_key_cases" -eq 0 ] \
-    || [ "$receipt_sd_absent_cases" -eq 0 ] || [ "$receipt_sd_entry_cases" -eq 0 ]; then
-    fail "the accepted backup-receipt cases do not include a schema-dependent topic ($receipt_sd_dependent_cases), a dependent key side ($receipt_sd_key_cases), a receipt without the block ($receipt_sd_absent_cases) and a not-assessed entry ($receipt_sd_entry_cases), so the schema dependency lines (PROD-03.0) were never told apart"
+    || [ "$receipt_sd_absent_cases" -eq 0 ] || [ "$receipt_sd_entry_cases" -eq 0 ] \
+    || [ "$receipt_sd_captured_cases" -eq 0 ]; then
+    fail "the accepted backup-receipt cases do not include a schema-dependent topic ($receipt_sd_dependent_cases), one whose registry was captured ($receipt_sd_captured_cases), a dependent key side ($receipt_sd_key_cases), a receipt without the block ($receipt_sd_absent_cases) and a not-assessed entry ($receipt_sd_entry_cases), so the schema dependency lines (PROD-03.0, 03.1) were never told apart"
 fi
 if [ "$receipt_gen_same_cases" -eq 0 ] || [ "$receipt_gen_changed_cases" -eq 0 ] || [ "$receipt_gen_unknown_cases" -eq 0 ]; then
     fail "the accepted backup-receipt cases do not include a topic with one generation ($receipt_gen_same_cases), one recreated during the capture ($receipt_gen_changed_cases) and one whose ID is unknown ($receipt_gen_unknown_cases), so the generations lines (PROD-01.4a) were never told apart"

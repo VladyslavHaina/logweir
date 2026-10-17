@@ -4402,6 +4402,24 @@ pub struct ScopeTargetView {
     /// are created as always.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic_configuration: Option<ScopeTopicConfigurationView>,
+    /// PROD-03.2: `target.schema_registry`, as the runner's plan type reads
+    /// it: the registry the run imports the restored records' schemas into,
+    /// keeping their IDs, the one write outside Kafka. Absent: the plan names
+    /// none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema_registry: Option<ScopeRegistryView>,
+}
+
+/// PROD-03.2: the target Schema Registry a plan names, as a second person
+/// approves it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScopeRegistryView {
+    /// `http://` or `https://`, no userinfo.
+    pub url: String,
+    /// The basic-auth username, when the plan names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
 }
 
 /// PROD-05.2: the plan's configuration choice, as a second person approves it.

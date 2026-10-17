@@ -100,7 +100,7 @@ export function truncatedWords(c: Pick<Catalog, "truncated" | "conditions">): st
 export const PARTIAL_POINTS_SENTENCE = "This list is partial: a page or a line of the view could not be read.";
 
 export const VIEW_EXPIRED_SENTENCE =
-  "The Kubernetes view of this catalog has expired or has never been synced. That is a missing view and not a missing archive: the points are still in object storage. Sync the catalog to get the window back.";
+  "The Kubernetes view of this catalog has expired or has never been synced. That is a missing view and not a missing archive: the points are still in object storage. The next sync builds it again (on the catalog's interval, or when an administrator requests one with kubectl); this page re-reads it until then.";
 
 export const TWO_AXES_SENTENCE =
   "Availability and verification are separate. Availability is whether the archive can still serve a point; verification is whether its receipt verifies under a key this installation accepts. A point is restorable only when it is Available and Verified (or VerifiedHistorical), and that is the catalog's own judgement, not this page's. A point whose Backup the controller refused is never restorable, whatever its two columns say.";

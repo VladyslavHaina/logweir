@@ -271,3 +271,16 @@ describe("DUI-48.4: the stepper from a Backup's summary alone", () => {
   });
 });
 
+
+describe("DUI-55: a verdict the controller will retry", () => {
+  it("is pending with when the next attempt starts, never a final 'Not attempted'", () => {
+    const o = op();
+    o.verification = { state: "pending", detail: "the last attempt to read the evidence did not finish; the controller tries again at 2026-10-16T02:25:15Z" };
+    const v = detailVerdict(o);
+    expect(v.green).toBe(false);
+    expect(v.green === false && v.reason).toBe("Pending: the last attempt to read the evidence did not finish; the controller tries again at 2026-10-16T02:25:15Z.");
+    // Control: a pending verdict with no reason keeps the general sentence.
+    o.verification = { state: "pending" };
+    expect(detailVerdict(o)).toEqual({ green: false, reason: CASES.pending });
+  });
+});

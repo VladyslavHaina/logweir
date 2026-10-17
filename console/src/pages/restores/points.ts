@@ -244,10 +244,10 @@ export function catalogPoint(catalog: Catalog, entry: PointView, destination: De
     catalog: { name: catalog.name, entry },
     backupSetRef: entry.backupId,
     window: catalogWindow(entry)!,
-    // The view's topics are a layout, not the frozen list: the operator names the topics
-    // (prefilled from the layout when it is whole), and the readiness check reads the
-    // manifest for exactly those names.
-    topics: null,
+    // DUI-62.6: a whole layout is chosen from with the same checkboxes as a Backup's topics;
+    // only a point whose layout the view cut short asks for the names as text. Either way
+    // the readiness check reads the manifest for exactly the names chosen.
+    topics: entry.topics && entry.topics.length > 0 && !entry.topicsOmitted ? entry.topics.map((t) => t.name) : null,
     destinationName: name,
     destinationUid: destination?.uid ?? "",
     locationDigest: destination?.locationDigest ?? "",

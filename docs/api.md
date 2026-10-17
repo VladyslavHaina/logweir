@@ -289,6 +289,11 @@ member's rule is in its schema description. Beyond those:
   read before the Job is made, the controller records that source's
   `notAttempted` verdict instead. Follow it until the verdict lands; the
   console does, for up to two minutes.
+- A `NotAttempted` verdict the controller will try again
+  (`status.evidence.observation.retryAfter`, after an evidence read that did
+  not finish) is `verification.state: pending`, and its `detail` says when the
+  next attempt starts. Once the attempts are spent it is `notAttempted`. The
+  console follows a pending verdict for up to 30 minutes.
 - `teardown.deleted` and `lastEnforcement.deleted` are lists of names.
 - The Job name, pod name and container state are not published.
 
@@ -780,7 +785,11 @@ Each is exit 2 with the field named.
 - **The trusted entry point.** With `requireTrustedProxy: true`, a socket peer
   that is not a trusted proxy is `421` (audit `untrusted_entry_point`, note
   `peerNotTrusted`), and so is a trusted peer without exactly one
-  `X-Forwarded-Proto: https` (`forwardedProtoNotHttps`). The probes are exempt.
+  `X-Forwarded-Proto: https` (`forwardedProtoNotHttps`). While the
+  `trustedProxyService` endpoints could not be read for 30 s, a peer outside
+  `trustedProxyCidrs` is refused `503 kubernetes_unavailable` instead (note
+  `trustedProxyUnconfirmed`): the service cannot confirm its entry point right
+  now. The probes are exempt.
   The range must be the ingress controller's own pods: kube-proxy keeps a pod's
   source address through a ClusterIP.
 - **Readiness** starts false and turns true once Kubernetes answers and the

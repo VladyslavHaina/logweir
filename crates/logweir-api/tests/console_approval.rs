@@ -1997,6 +1997,48 @@ async fn a_plan_allowing_transaction_markers_is_shown_to_the_approver() {
     }
 }
 
+/// **SEC-1, DUI-61: the target Schema Registry is shown to the second
+/// person as the runner's plan type reads it**, never as text a page parses:
+/// a flow mapping whose quoted username holds ", url: …" names the real URL.
+/// Control: the same plan without a registry carries no `schemaRegistry`.
+#[tokio::test]
+async fn sec1_the_approver_is_shown_the_registry_the_runner_reads() {
+    let (_log, _guard) = capture();
+    let (app, _console) = pair_app();
+    let alice = signed_in(&app, "alice", &["ops"]);
+    let bob = signed_in(&app, "bob", &["approvers"]);
+    for (tag, registry) in [("sr-crafted", true), ("sr-none", false)] {
+        let mut plan = support::golden_plan();
+        if registry {
+            plan = plan.replace(
+                "restore:\n",
+                "  schema_registry: {username: \"a, url: http://decoy:8081\", url: \"https://real:8081\"}\nrestore:\n",
+            );
+        }
+        let mut body = support::restore_body(&plan);
+        body["approvalRef"]["name"] = json!(format!("approval-{tag}"));
+        body["ticket"] = json!(TICKET);
+        let created = request_as(&app, &alice, tag, body).await;
+        assert_eq!(created.status, 201, "{}", created.text());
+        let restore = created.json()["item"]["name"]
+            .as_str()
+            .expect("name")
+            .to_string();
+        let item = view(&app, &bob, &restore).await.json()["item"].clone();
+        assert_eq!(item["scopeComplete"], true, "{item}");
+        let shown = &item["scope"]["target"]["schemaRegistry"];
+        if registry {
+            assert_eq!(
+                shown,
+                &json!({"url": "https://real:8081", "username": "a, url: http://decoy:8081"}),
+                "{item}"
+            );
+        } else {
+            assert!(shown.is_null(), "{item}");
+        }
+    }
+}
+
 /// **An original-name restore approved by a second person.** The request
 /// carries the `originalName` subject (2.1.0) and NO typed names — typed
 /// names are a one-person confirmation's, and are refused here by name; the

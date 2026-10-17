@@ -7702,6 +7702,21 @@ fn the_only_write_in_the_check_runner_is_create_only() {
     );
 }
 
+/// DUI-62.1: every remedy reaches the person as written. A remedy passes the
+/// redaction chokepoint (`with_remedy`), and one that read like a credential
+/// pair ("registry-password key") was shown with "[redacted]" in it.
+#[test]
+fn dui62_every_remedy_survives_the_redactor_unchanged() {
+    let mut changed: Vec<String> = Vec::new();
+    for code in CheckCode::ALL {
+        let remedy = kinds::remedy_for(*code);
+        if logweir_core::check_contract::redact(remedy) != remedy {
+            changed.push(format!("{code}: {remedy}"));
+        }
+    }
+    assert!(changed.is_empty(), "redacted remedies: {changed:#?}");
+}
+
 /// Every row the runner can emit has a catalogue entry — so `expiresAt` and
 /// `gating` are properties of the ROW and not of the call site.
 #[test]
@@ -8528,7 +8543,8 @@ mod live {
             timeout_seconds: 300,
             ..plan_of(CheckRequest::CatalogSync(Box::new(
                 logweir_core::check_contract::CatalogSyncRequest {
-                    destination: minio_destination("mvp-demo"),
+                    // DUI-51: the destination serves the manifest's prefix.
+                    destination: minio_destination("logweir/e2e-catalog"),
                     ..sync_request()
                 },
             )))
@@ -8562,7 +8578,8 @@ mod live {
             timeout_seconds: 300,
             ..plan_of(CheckRequest::CatalogSync(Box::new(
                 logweir_core::check_contract::CatalogSyncRequest {
-                    destination: minio_destination("mvp-demo"),
+                    // DUI-51: the destination serves the manifest's prefix.
+                    destination: minio_destination("logweir/e2e-catalog"),
                     mode: logweir_core::check_contract::CatalogSyncMode::Full,
                     ..sync_request()
                 },
@@ -9983,6 +10000,14 @@ fn sync_request() -> logweir_core::check_contract::CatalogSyncRequest {
     }
 }
 
+/// [`sync_request`] over a destination at `logweir/archive`, the prefix the
+/// live-store rows write their manifest under.
+fn archive_prefix_request() -> logweir_core::check_contract::CatalogSyncRequest {
+    let mut request = sync_request();
+    request.destination.location.prefix = "logweir/archive".to_string();
+    request
+}
+
 /// The `details` body a run relayed, as text.
 fn body_of(run: &Run) -> String {
     let relay = run.relay.as_ref().expect("the relay decodes");
@@ -10690,7 +10715,7 @@ fn catalog_sync_reads_the_version_the_live_store_reports() {
             shared_store: Some(Arc::new(store)),
             ..FakeWiring::default()
         };
-        let run = drive_sync(sync_request(), &wiring);
+        let run = drive_sync(archive_prefix_request(), &wiring);
         let entries = entries_of(&body_of(&run));
         assert_eq!(entries.len(), 1, "{entries:?}");
         assert_eq!(
@@ -10922,7 +10947,7 @@ fn catalog_sync_over_a_live_store_copy_notes_the_pin() {
             shared_store: Some(Arc::new(store)),
             ..FakeWiring::default()
         };
-        let run = drive_sync(sync_request(), &wiring);
+        let run = drive_sync(archive_prefix_request(), &wiring);
         let entries = entries_of(&body_of(&run));
         assert_eq!(entries.len(), 1, "{what}: {entries:?}");
         assert_eq!(
@@ -10986,6 +11011,60 @@ fn a_pinned_copy_is_reserved_its_fifth_object() {
             2 + examined * 5,
             "budget {budget}: catalogObjectsRead counts every read. {body}"
         );
+    }
+}
+
+/// DUI-51: a catalog over a destination with a prefix lists only the points
+/// that destination's restore can read, `<prefix>/<set>/manifest.json`. The
+/// PoC layout: one bucket, destination A at `poc` (and an archive imported key
+/// for key under `poc/`), destination B at `poc/v51`. Each catalog counts and
+/// lists only its own; both walks agree. An empty prefix keeps every point.
+#[test]
+fn dui51_a_catalog_lists_only_the_points_its_destinations_prefix_serves() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let under = |set: &str, started: &str, prefix: &str| {
+        let mut r = catalog_receipt(set, &format!("run-{set}"), started);
+        r.archive.manifest_key = format!("{prefix}/{set}/manifest.json");
+        r.archive.prefix = prefix.to_string();
+        catalog_fixture(
+            &r,
+            &format!("s3://lw-archive/{prefix}"),
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        )
+    };
+    let at_poc = under("set-a", "2026-09-16T03:00:00Z", "poc");
+    let at_v51 = under("set-b", "2026-09-15T03:00:00Z", "poc/v51");
+    let objects = place(place(FakeObjects::new(), &at_poc), &at_v51);
+    let wiring = FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects);
+
+    for mode in [
+        logweir_core::check_contract::CatalogSyncMode::Index,
+        logweir_core::check_contract::CatalogSyncMode::Full,
+    ] {
+        for (prefix, expected) in [
+            ("poc", vec![at_poc.point.point_id.clone()]),
+            ("poc/v51", vec![at_v51.point.point_id.clone()]),
+            (
+                "",
+                vec![at_poc.point.point_id.clone(), at_v51.point.point_id.clone()],
+            ),
+        ] {
+            let mut request = sync_request();
+            request.mode = mode;
+            request.destination.location.prefix = prefix.to_string();
+            let run = drive_sync(request, &wiring);
+            assert_eq!(run.code, ExitCode::Ok, "{mode:?} {prefix:?}");
+            let body = body_of(&run);
+            let listed: Vec<String> = entries_of(&body)
+                .iter()
+                .map(|e| e["pointId"].as_str().expect("a point id").to_string())
+                .collect();
+            assert_eq!(listed, expected, "{mode:?} prefix {prefix:?}: {body}");
+            let counts = summary_of(&body, "catalog-counts=");
+            assert_eq!(counts["total"], expected.len(), "{mode:?} {prefix:?}");
+            assert_eq!(counts["available"], expected.len(), "{mode:?} {prefix:?}");
+        }
     }
 }
 

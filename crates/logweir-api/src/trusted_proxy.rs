@@ -33,7 +33,8 @@
 //! STALENESS FAILS CLOSED. The set is refreshed every [`REFRESH_EVERY`]. A
 //! refresh that fails keeps the last complete set, but only for
 //! [`MAX_AGE`] after it was read: past that the service source trusts nobody,
-//! requests from the ingress are answered `421`, and `/readyz` reports not
+//! requests from the ingress are answered `503` ("could not confirm its entry
+//! point right now", `crate::http::ENTRY_POINT_UNCONFIRMED`), and `/readyz` reports not
 //! ready — an outage an operator can see, never a stale grant nobody can. The
 //! window an address stays trusted after its pod is gone is therefore at most
 //! [`MAX_AGE`], and in the ordinary case one refresh: the endpoint leaves the

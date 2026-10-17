@@ -203,6 +203,10 @@ function RequestCard({ request, grant }: { request: ApprovalRequest; grant: Appr
         </Content>
         {shown && (
           <DescriptionList isCompact columnModifier={{ default: "1Col", lg: "2Col" }} className="lw-gap-top lw-approval-facts">
+            {/* DUI-52: the workspace the request is in, as the signed document names it. */}
+            <Term term="Workspace">
+              <span id="request-workspace">{request.workspace}</span>
+            </Term>
             <Term term="Requested by">
               <span id="request-requester">
                 <Requester

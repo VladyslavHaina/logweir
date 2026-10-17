@@ -1507,3 +1507,58 @@ fn dui38_a_restore_whose_evidence_a_job_reads_is_pending_until_the_job_relays() 
     );
     assert!(is_settled(&restore_view(&restore_of(&no_sidecar), now())));
 }
+
+/// DUI-55: a `NotAttempted` the controller will retry
+/// (`status.evidence.observation.retryAfter`) is pending, says when the next
+/// attempt starts, and keeps the stream open; with the attempts spent
+/// (no `retryAfter`) it is the final `NotAttempted` (the control).
+#[test]
+fn dui55_a_not_attempted_verdict_with_a_retry_scheduled_is_pending() {
+    use logweir_api::status::{backup_view, is_settled};
+    let base = base_backup();
+    let (running, _) = patched::<Backup>(
+        base.clone(),
+        &backup_ctl::running_status_patch(&backup_of(&base), "b1", now()),
+    );
+    let keys = EvidenceKeys {
+        receipt: Some("logweir/backups/b1/r.receipt.json".into()),
+        sidecar: Some("logweir/backups/b1/r.receipt.sig".into()),
+        receipt_sha256: None,
+    };
+    let terminal = backup_ctl::finished_status_patch(
+        &backup_of(&running),
+        0,
+        &keys,
+        None,
+        None,
+        Some((1, 2)),
+        Some("sha256:00ff"),
+        now(),
+    );
+    let (finished, _) = patched::<Backup>(running, &terminal);
+    let (not_attempted, _) = patched::<Backup>(
+        finished.clone(),
+        &backup_second(&finished, &terminal, VerificationVerdict::NotAttempted),
+    );
+    let (retrying, _) = patched::<Backup>(
+        not_attempted.clone(),
+        &json!({"status": {"evidence": {"observation": {"attempt": 2, "retryAfter": "2026-09-15T12:15:00Z"}}}}),
+    );
+    let op = backup_operation(&backup_of(&retrying));
+    assert_eq!(op.verification.state, VerificationState::Pending);
+    assert!(
+        op.verification
+            .detail
+            .as_deref()
+            .is_some_and(|d| d.contains("tries again at 2026-09-15T12:15:00Z")),
+        "{:?}",
+        op.verification.detail
+    );
+    assert!(!op.verified_success);
+    assert!(!is_settled(&backup_view(&backup_of(&retrying), now())));
+
+    // CONTROL: no retry scheduled, the verdict is final.
+    let op = backup_operation(&backup_of(&not_attempted));
+    assert_eq!(op.verification.state, VerificationState::NotAttempted);
+    assert!(is_settled(&backup_view(&backup_of(&not_attempted), now())));
+}

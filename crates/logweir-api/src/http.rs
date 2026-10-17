@@ -548,14 +548,29 @@ pub async fn boundary_guard(
                 audit.set_failure("untrusted_entry_point");
                 audit.note("entryPoint", reason);
             }
-            return axum::response::IntoResponse::into_response(ApiError::new(
-                ProblemCode::MisdirectedRequest,
-                "This console accepts requests only through its trusted HTTPS entry point.",
-            ));
+            // DUI-53: a stale proxy set is this service's outage, not the
+            // person's wrong entry point. Still refused (fail-closed).
+            let error = if reason == ENTRY_POINT_UNCONFIRMED {
+                ApiError::new(
+                    ProblemCode::KubernetesUnavailable,
+                    "This service could not confirm its entry point right now: it could not \
+                     read its trusted proxy from Kubernetes. Try again in a moment.",
+                )
+            } else {
+                ApiError::new(
+                    ProblemCode::MisdirectedRequest,
+                    "This console accepts requests only through its trusted HTTPS entry point.",
+                )
+            };
+            return axum::response::IntoResponse::into_response(error);
         }
     }
     next.run(req).await
 }
+
+/// [`entry_point`]'s reason (and audit note) when the trusted proxy Service's
+/// endpoints could not be read recently enough to judge the peer.
+pub const ENTRY_POINT_UNCONFIRMED: &str = "trustedProxyUnconfirmed";
 
 /// The trusted-entry-point contract (`requireTrustedProxy`, shared mode).
 ///
@@ -567,7 +582,11 @@ pub async fn boundary_guard(
 /// vouch for, is `421 misdirected_request` (audit code
 /// `untrusted_entry_point`, with `peerNotTrusted` or
 /// `forwardedProtoNotHttps` as the note). The two probes are exempt, because a
-/// kubelet dials the Pod IP.
+/// kubelet dials the Pod IP. A peer outside the static ranges while the
+/// `trustedProxyService` set is stale or not read yet is
+/// [`ENTRY_POINT_UNCONFIRMED`]: still refused, but `503
+/// kubernetes_unavailable`, because the service cannot tell whether the peer
+/// is its ingress.
 ///
 /// WHAT IT IS NOT, AND WHY IT DOES NOT BREAK D0. D0 forbids deriving an
 /// IDENTITY, a callback URL or an authorization decision from forwarded
@@ -595,6 +614,9 @@ pub fn entry_point(
     }
     let trusted = peer.is_some_and(|peer| shared.trusted_proxies.contains(peer));
     if !trusted {
+        if !shared.trusted_proxies.ready() {
+            return Err(ENTRY_POINT_UNCONFIRMED);
+        }
         return Err("peerNotTrusted");
     }
     let mut protos = headers

@@ -197,9 +197,11 @@ change, made pre-1.0 and with no in-place upgrade from 0.4.x: install afresh,
 keep the bucket, import trust and connect a catalog in each workspace
 ([install.md](install.md#upgrade-crds-before-upgrading-the-controller)). Apply
 the chart's CRDs server-side before `helm install`
-(`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`):
+(`kubectl apply --server-side --force-conflicts -f charts/logweir/crds/`), then
+install with `--skip-crds`:
 `helm uninstall` leaves the old CRDs and `helm install` does not replace them,
-so without it the API server prunes the fields 0.5.0 added.
+so without the apply the API server prunes the fields 0.5.0 added, and without
+`--skip-crds` Helm 4 fails on the fields the apply gave to `kubectl`.
 
 - **Chart:** `kubernetes.namespace`, `kubernetes.connectionsNamespace`,
   `controller.watchNamespaces`, `identity.authorizedRunnerNamespaces` and

@@ -245,13 +245,13 @@ export const QUEUED_RUN_SENTENCE =
   "Queued: this manual restore waits for a slot in the workspace's manual-restore pool and starts, in creation order, when one finishes. Nothing has been created for it yet. The queue does not extend its approval: a restore still waiting when the approval expires is refused and must be confirmed again.";
 
 export const RETRY_IDENTITY_SENTENCE =
-  "The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
+  "It starts from the retried run's recovery point, target connection and byte-rate limit, each of which you may change. The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
 
 export const RETRY_OLD_RUN_SENTENCE =
   "The failed restore is not touched: its object, its evidence and the topics it had already created stay as they are. Resume is not implemented; this is a new run from the beginning.";
 
 export const RETRY_FRESH_TARGET_SENTENCE =
-  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retrying opens the wizard for a NEW restore of a point you choose, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
+  "This run did not complete. A restore cannot be resumed, and any topics it had already created stay as they are. Retry into new topics opens the wizard for a NEW restore, starting from this run's point, target and byte-rate limit, with a fresh topic prefix: a new plan, a new plan hash, and a new approval of its own where the policy asks for one. This run is not modified.";
 
 export const ORIGINAL_NAME_SENTENCE =
   "Each topic is recreated under its own name, a new generation of the name, instead of beside it under a prefix. Only into topics that do not exist: the runner refuses if a name exists, refuses while a broker auto-creates topics (unless the target is a different cluster from the archive's source), and refuses when a declarative owner manages a name. It needs its own approval subject, originalName. Stop every producer of these names first.";
@@ -278,7 +278,7 @@ export const TIME_BASIS_OPTED_WARNING =
   "This plan accepts a point in time read on the producers' clocks: for a LogAppendTime topic the restore takes the records whose producer timestamps are at or before the point, not the ones the broker had appended by then.";
 
 export const RESTORE_SEMANTICS_SENTENCE =
-  "Restores copy the archive as written: an archive holding transaction markers is refused unless the plan allows them, and under that allowance aborted transactions and markers are restored as ordinary records, LogAppendTime timestamps come back as producer CreateTime, repeated header keys keep one copy, and when timestamps are out of order a point-in-time restore can miss records.";
+  "Restores copy the archive as written. A backup holds committed records only, and the restore writes them without transactions; an archive an engine before build 5 wrote can hold aborted records and transaction markers, and is refused unless the plan allows them. LogAppendTime timestamps come back as producer CreateTime, repeated header keys keep every copy in order, and a point in time that would skip an out-of-order record is refused before anything is written.";
 
 export const READINESS_CAVEAT_SENTENCE =
   "A ready verdict says these checks passed when they ran. A credential can be rotated, a topic created or an ACL changed a minute later; the runner's own guards remain the authority.";

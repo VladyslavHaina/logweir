@@ -314,6 +314,8 @@ export function Instant({ value }: { value: string | null | undefined }) {
 export function ScopeCard({ scope }: { scope: ApprovalScope }) {
   const original = scope.topics.some((t) => t.originalName);
   const t = scope.target;
+  // SEC-1: the server's reading of the plan, by the runner's own plan type; never parsed here.
+  const registry = t.schemaRegistry ?? null;
   return (
     <Card id="approval-scope">
       <CardHeader>
@@ -357,6 +359,25 @@ export function ScopeCard({ scope }: { scope: ApprovalScope }) {
           </Term>
           <Term term="Topic configuration">
             <span id="scope-topic-configuration">{topicConfigurationWords(t.topicConfiguration)}</span>
+          </Term>
+          {/* DUI-61: the one write outside Kafka. */}
+          <Term term="Schema Registry">
+            <span id="scope-schema-registry" className="lw-break">
+              {registry ? (
+                <>
+                  <code className="lw-mono">{registry.url}</code>
+                  {registry.username && (
+                    <>
+                      {" "}
+                      as <code className="lw-mono">{registry.username}</code>
+                    </>
+                  )}
+                  : the run imports into it the schemas the restored records reference, keeping their IDs.
+                </>
+              ) : (
+                "None named: the run writes nothing outside Kafka."
+              )}
+            </span>
           </Term>
           <Term term="Verification">
             {scope.verification.coverage} over <Instant value={scope.verification.windowStart} /> to <Instant value={scope.verification.windowEnd} />

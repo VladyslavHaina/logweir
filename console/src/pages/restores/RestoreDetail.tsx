@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import {
   Alert,
+  AlertActionCloseButton,
   Breadcrumb,
   BreadcrumbItem,
   Button,
@@ -98,10 +99,10 @@ import {
   restoreSchemasWords,
 } from "./words";
 import "./restores.css";
-import { Prose } from "../../components/Prose";
+import { ErrorText, Prose } from "../../components/Prose";
 
 const STAGES: { stage: OperationStage; title: string; desc: string }[] = [
-  { stage: "admission", title: "Admitted", desc: "Plan checked and approved" },
+  { stage: "admission", title: "Admission", desc: "The plan is checked and, where the policy asks, approved" },
   { stage: "preparing", title: "Preparing", desc: "Topics created on the target" },
   { stage: "running", title: "Restoring", desc: "Records replayed from the archive" },
   { stage: "verifying", title: "Verifying", desc: "Restored records compared with the archive" },
@@ -135,6 +136,18 @@ function Stages({ op, verified }: { op: OperationView; verified: boolean }) {
 }
 
 /** A scorecard fact, shown as a claim until the evidence verified. */
+/**
+ * DUI-62.8: the timeline newest first by its own instants, and a finished run's
+ * waiting state (`RunnerReady` not True, "has not started") left out: it ended.
+ */
+export function timelineOf<C extends { type: string; status: string; lastTransitionTime?: string | null }>(op: { terminal: boolean; conditions: C[] }): C[] {
+  return op.conditions
+    .filter((c) => !(op.terminal && c.type === "RunnerReady" && c.status !== "True"))
+    .map((c, i) => ({ c, i }))
+    .sort((a, b) => Date.parse(b.c.lastTransitionTime ?? "") - Date.parse(a.c.lastTransitionTime ?? "") || b.i - a.i)
+    .map(({ c }) => c);
+}
+
 function Claim({ value, verified }: { value: React.ReactNode; verified: boolean }) {
   if (value === null || value === undefined || value === "") return <span className="lw-subtle">Not recorded</span>;
   return verified ? (
@@ -380,7 +393,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
   return (
     <>
       <PageHeader
-        title={r.name}
+        title={<span className="lw-token-title">{r.name}</span>}
         breadcrumb={breadcrumb}
         status={<RestoreStatus r={r} />}
         description={`From the point at ${exactUtc(r.pointInTime)} into ${r.target.clusterRef.name}.`}
@@ -395,7 +408,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
             </Button>
           ) : failed && mayCreate ? (
             <Button variant="secondary" icon={<RedoIcon />} onClick={retry} id="retry-fresh-target">
-              Retry to a fresh target
+              Retry into new topics
             </Button>
           ) : verified && switchable && caps?.restoreCreate !== false ? (
             <Button variant="primary" icon={<ExchangeAltIcon />} onClick={() => void navigate({ to: "/$ws/restores/$name/cutover", params: { ws, name } })}>
@@ -460,7 +473,12 @@ function Detail({ ws, name }: { ws: string; name: string }) {
               {cleanupLine && <p id="restore-cleanup-state">{cleanupLine}</p>}
             </Alert>
           )}
-          {act.isError && <ErrorState error={act.error} onRetry={() => act.reset()} />}
+          {/* DUI-57: a refused Cancel or Clean up is the action's answer, not a page that failed to load. */}
+          {act.isError && (
+            <Alert variant="danger" isInline title={`${act.variables === "cleanup" ? "Clean up" : "Cancel"} was not done`} id="restore-action-refused" actionClose={<AlertActionCloseButton onClose={() => act.reset()} />}>
+              <ErrorText error={act.error} />
+            </Alert>
+          )}
           {failed && (
             <Alert variant="danger" isInline title={`This restore ${r.operation.state === "refused" ? "was refused" : "failed"}${r.operation.stateReason ? `: ${r.operation.stateReason}` : ""}`}>
               {refusalSentence(op) && <p className="lw-break">{refusalSentence(op)}</p>}
@@ -531,7 +549,7 @@ function Detail({ ws, name }: { ws: string; name: string }) {
                       ]}
                     />
                     <ol className={op.terminal ? "lw-timeline lw-gap-top" : "lw-timeline lw-timeline--live lw-gap-top"} aria-live="polite">
-                      {[...op.conditions].reverse().map((c) => (
+                      {timelineOf(op).map((c) => (
                         <li key={`${c.type}-${c.lastTransitionTime}`}>
                           <Flex justifyContent={{ default: "justifyContentSpaceBetween" }} gap={{ default: "gapSm" }}>
                             <FlexItem>

@@ -1434,6 +1434,9 @@ fn walk_index(
                 },
             );
             walk.seen.insert(point_id.clone());
+            if !served_here(req, &observation) {
+                continue;
+            }
             walk.counts.total = walk.counts.total.saturating_add(1);
             *walk
                 .by_day
@@ -1529,12 +1532,15 @@ fn walk_full(
             }
             walk.last_record_key = Some(key.clone());
             walk.seen.insert(key.clone());
-            walk.counts.total = walk.counts.total.saturating_add(1);
             let subject = Subject {
                 record_key: &key,
                 point_id: point_id_of_record_key(&key),
             };
             let observation = examine(req, access, walk, trust, &subject);
+            if !served_here(req, &observation) {
+                continue;
+            }
+            walk.counts.total = walk.counts.total.saturating_add(1);
             push(req, walk, observation, view_limit);
         }
         if exhausted {
@@ -1726,6 +1732,17 @@ fn examine(
             EntryCause::of(CauseDocument::Record, CauseReason::Malformed),
         );
     }
+    // DUI-51: a point another destination of the bucket wrote is not read
+    // further; the walk drops it ([`served_here`]).
+    if !serves(&req.destination.location.prefix, &point) {
+        let mut o = Observation::without_record(
+            subject,
+            Availability::Unreadable,
+            EntryCause::of(CauseDocument::Record, CauseReason::Malformed),
+        );
+        o.point = Some(point);
+        return o;
+    }
 
     // WHAT THIS POINT HOLDS AT ONCE, by construction and not by the
     // caps alone: the parsed record, for as long as the point is examined,
@@ -1860,6 +1877,35 @@ fn examine(
     }
 
     found.observed(point, subject)
+}
+
+/// DUI-51: whether a destination with storage prefix `prefix` serves `point`,
+/// that is, whether its restore reads the point's manifest where the point
+/// says it is: `<prefix>/<set>/manifest.json`, one set segment directly under
+/// the prefix (`Store::engine_manifest_key`), so `poc` does not serve a point
+/// of `poc/v51`. The catalog records of one bucket sit at its root whatever
+/// the prefix, so without this a catalog lists every destination's points. An
+/// empty prefix (the bucket root) keeps every point. Whether the set segment
+/// is the record's own set stays the cross-check's (a `Conflict`).
+fn serves(prefix: &str, point: &CatalogPoint) -> bool {
+    prefix.is_empty()
+        || point
+            .archive
+            .manifest_key
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_prefix('/'))
+            .and_then(|rest| rest.strip_suffix("/manifest.json"))
+            .is_some_and(|set| !set.is_empty() && !set.contains('/'))
+}
+
+/// Whether the walk counts and lists `observation`: a point with a record is
+/// listed only when this destination [`serves`] it. A point whose record gave
+/// no facts names no manifest, so it stays listed as what it is.
+fn served_here(req: &CatalogSyncRequest, observation: &Observation) -> bool {
+    observation
+        .point
+        .as_ref()
+        .is_none_or(|p| serves(&req.destination.location.prefix, p))
 }
 
 /// Whether a record names, byte for byte, a key `backup run` writes a receipt

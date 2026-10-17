@@ -29,11 +29,17 @@ export function setCsrfToken(token: string | null | undefined): void {
   csrfToken = token ?? "";
 }
 
-/** `X-CSRF-Token` on every unsafe request, and on nothing else. */
+/**
+ * `X-CSRF-Token` on every unsafe request, and on nothing else. And DUI-57: every unsafe
+ * request says `Content-Type: application/json`, which the API requires of each one,
+ * including the commands that carry no body (Cancel, Clean up, a check's or a
+ * discovery's cancel); openapi-fetch sets it only when there is a body.
+ */
 export const csrf: Middleware = {
   onRequest({ request }) {
-    if (!SAFE_METHODS.has(request.method) && csrfToken) {
-      request.headers.set("X-CSRF-Token", csrfToken);
+    if (!SAFE_METHODS.has(request.method)) {
+      if (csrfToken) request.headers.set("X-CSRF-Token", csrfToken);
+      if (!request.headers.has("Content-Type")) request.headers.set("Content-Type", "application/json");
     }
     return request;
   },
@@ -189,6 +195,15 @@ export function signInHref(location: { pathname: string; hash: string } = window
 }
 
 /** Sign out: the unsafe POST, with the CSRF token, then the caller reloads. */
+/**
+ * After a sign-out, load the console's root with no `#/<workspace>` (DUI-54.6): the
+ * address is the only place a workspace is remembered, and the next person to sign in
+ * lands on their own, not on the one the previous person had open.
+ */
+export function leaveAfterSignOut(location: Pick<Location, "pathname" | "search" | "replace"> = window.location): void {
+  location.replace(location.pathname + location.search);
+}
+
 export async function signOut(client: ApiClient = api): Promise<void> {
   const { response, error } = await client.POST("/api/v1/session/logout", {
     params: { header: { Origin: window.location.origin } },

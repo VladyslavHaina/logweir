@@ -510,7 +510,7 @@ has the method; MinIO's action names are S3's):
 | Role | Actions | Resources |
 |---|---|---|
 | `archiveWrite` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`, `s3:PutObject` | the bucket for the listing; `arn:aws:s3:::<bucket>/<prefix>/*` for both object actions, plus `s3:PutObject` on `arn:aws:s3:::<bucket>/logweir/*` for the execution claim, the receipt and the catalog record — the claim is a conditional create (`If-None-Match: *`), so the store must honour it or every backup exits 4 `ExecutionClaimUnproven` ([why](formats/backup-receipt.md#the-execution-claim-one-engine-run-per-backup_id)) |
-| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`; to restore a catalog point, also `s3:GetObject` on its receipt and, on a versioned bucket, `s3:GetObjectVersion` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*`; the receipt is under `arn:aws:s3:::<bucket>/logweir/backups/*`; to reconcile an interrupted restore, also `s3:GetObject` on `arn:aws:s3:::<bucket>/logweir/drills/*` (its targets record); `s3:GetObjectVersion` on `arn:aws:s3:::<bucket>/<prefix>/*` |
+| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`; to restore a catalog point, also `s3:GetObject` on its receipt and, on a versioned bucket, `s3:GetObjectVersion`; for a restore into a target registry, `s3:GetObject` on the receipt and snapshot (and, for a plan with no catalog point, the set's execution claim) | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*`; the receipt, claim and snapshot are under `arn:aws:s3:::<bucket>/logweir/backups/*`; to reconcile an interrupted restore, also `s3:GetObject` on `arn:aws:s3:::<bucket>/logweir/drills/*` (its targets record); `s3:GetObjectVersion` on `arn:aws:s3:::<bucket>/<prefix>/*` |
 | `evidenceWrite` | `s3:PutObject` (conditional create) | `arn:aws:s3:::<bucket>/logweir/*` |
 | `evidenceRead` | `s3:GetObject` | `arn:aws:s3:::<bucket>/logweir/*` |
 | write probe (opt-in; run as the `evidenceWrite` grant, already inside its `logweir/*`) | `s3:PutObject` | `arn:aws:s3:::<bucket>/logweir/readiness/*` |
@@ -1039,13 +1039,23 @@ in your secret store:
 
 **0.4.x to 0.5.0 has no in-place upgrade** (OD-23). Export trust as in
 *Recover onto a clean installation with the kit*, keep the bucket, `helm
-uninstall` the old release (one install per cluster), **apply the 0.5.0
-chart's CRDs server-side** (the first command of the block below, then its
-wait loop), install 0.5.0 into one namespace with `workspaces`, import trust,
-and then in each workspace add connections, destinations and schedules and
-connect a catalog to see the old points. Delete the old namespaces when done.
-Every archive stays readable and verifiable: nothing in the bucket names a
-namespace.
+uninstall` the old release (one install per cluster), then delete the two
+cluster-scoped objects it leaves, both covered by the export:
+`TrustPolicy/logweir-installation` (the fresh install's hook makes trust only
+on a cluster with no `TrustPolicy`) and `ClusterRole/logweir-identity-singleton`
+(it names the old release namespace, and the chart refuses another). **Apply
+the 0.5.0 chart's CRDs server-side** (the first command of the block below,
+then its wait loop), install 0.5.0 into one namespace with `workspaces` **and
+`--skip-crds`** (Helm 4 otherwise applies `crds/` server-side over the fields
+the `kubectl` apply now owns and fails with a conflict on `.spec.names`),
+import trust, and then in each workspace add connections, destinations and
+schedules and connect a catalog to see the old points. Delete the old
+namespaces when done. Every archive stays readable and verifiable: nothing in
+the bucket names a namespace. Copy an old bucket into a workspace's bucket
+key for key, under the same prefix and `logweir/`: points and receipts name
+bucket-relative keys, and a restore reads a set at the prefix it was written
+under ([deploy/poc/README.md](../deploy/poc/README.md), *Import an earlier
+install's archive*).
 
 **Why the CRDs go first on a fresh install too:** `helm uninstall` leaves the
 CRDs, and `helm install` creates a CRD from `crds/` only when none exists, so

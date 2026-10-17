@@ -43,6 +43,10 @@ export function SwitchoverApprovalPage() {
                 </CardHeader>
                 <CardBody>
                   <Content component="p" className="lw-subtle"><Prose text={request.stateSentence} /></Content>
+                  {/* DUI-52: the workspace the request is in, from the request itself. */}
+                  <Content component="p" id="switchover-workspace">
+                    In workspace <strong>{request.workspace}</strong>
+                  </Content>
                   {/* DUI-21: the second person sees who asked, as on a restore's request. */}
                   {request.state !== "notConfirmed" && request.requester && (
                     <Content component="p" id="switchover-requester">

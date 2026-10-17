@@ -21,7 +21,7 @@ import { Field, controlState } from "../connections/parts";
 export type GrantsForm = { grants: Grants };
 
 export const EXISTING_ON_ROTATION =
-  "Only a Secret this destination already names. To change a credential, enter the new value: it is written to a new Secret bound to this destination, and the old one is left for you to delete.";
+  "Only a Secret this destination already names. To change a credential, enter the new value: it is written to a new Secret bound to this destination, and the old one is left in place for an administrator to remove with kubectl.";
 
 function keepWords(view: AccessGrantView | undefined): string {
   if (view && !holdsGrant(view)) return "Keep as it is (none)";
@@ -62,7 +62,8 @@ export function GrantFields({
 
   return (
     <>
-      <Title headingLevel="h4" size="md">
+      {/* DUI-54.10: a gap between one grant's last helper and the next grant's heading. */}
+      <Title headingLevel="h4" size="md" className="lw-gap-top">
         {ROLE_WORDS[role]}
       </Title>
       <Grid hasGutter md={6}>

@@ -20,9 +20,10 @@
 # point 2). Each workspace gets its own bucket `poc-<ws>` (archive prefix
 # `poc`), because a destination's evidence root is the fixed `logweir/` of its
 # own bucket (`logweir/backups/<id>/…`, `logweir/drills/<run>…`): a bucket per
-# workspace is the only layout that also keeps evidence apart. `poc-stg` also
-# holds `legacy/`, where an earlier install's archive is mirrored for import
-# (README.md, *Import an earlier install's archive*).
+# workspace is the only layout that also keeps evidence apart. An earlier
+# install's archive is copied key for key into one workspace's `poc/` and
+# `logweir/` (README.md, *Import an earlier install's archive*), so no extra
+# prefix is granted.
 #
 #   user                        grant(s) of that workspace's destination
 #   logweir-poc-<ws>-writer     archiveWrite (+ evidenceWrite)
@@ -92,9 +93,9 @@ spec:
                   > "/tmp/logweir-poc-$ws-archive-write.json"
                 printf '%s' "{\"Version\":\"2012-10-17\",\"Statement\":[
                   {\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::$b\"],
-                   \"Condition\":{\"StringLike\":{\"s3:prefix\":[\"poc/*\",\"logweir/*\",\"legacy/*\"]}}},
+                   \"Condition\":{\"StringLike\":{\"s3:prefix\":[\"poc/*\",\"logweir/*\"]}}},
                   {\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\"],
-                   \"Resource\":[\"arn:aws:s3:::$b/poc/*\",\"arn:aws:s3:::$b/logweir/*\",\"arn:aws:s3:::$b/legacy/*\"]}]}" \
+                   \"Resource\":[\"arn:aws:s3:::$b/poc/*\",\"arn:aws:s3:::$b/logweir/*\"]}]}" \
                   > "/tmp/logweir-poc-$ws-archive-read.json"
                 printf '%s' "{\"Version\":\"2012-10-17\",\"Statement\":[
                   {\"Effect\":\"Allow\",\"Action\":[\"s3:ListBucket\"],\"Resource\":[\"arn:aws:s3:::$b\"],

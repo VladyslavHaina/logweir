@@ -526,9 +526,9 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
         // -- Schema Registry (PROD-03.1/03.2) ------------------------------
         CheckCode::RegistryUnauthorized => {
             "The registry refused the connection's registry username and password. A connection \
-             is immutable: create a new one with the right credential (or rotate the password in \
-             its Secret's registry-password key). A backup still runs and records the registry \
-             as not captured."
+             is immutable: create a new one with the right credential (an administrator can \
+             instead change it in the connection's Secret with kubectl). A backup still runs and \
+             records the registry as not captured."
         }
         CheckCode::RegistryUnreachable => {
             "Check that the registry URL resolves from the install's namespace, that egress \
@@ -540,10 +540,17 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              of their subject-versions, with other content. Logweir never rewrites record bytes, \
              so restore into a registry that holds none of these schemas, or the source's own."
         }
+        CheckCode::SchemaRegistryReadOnly => {
+            "A subject this restore would import is read-only in the target registry (its own \
+             mode or the registry's), so the run would be refused before any write. Restore into \
+             a registry whose subjects accept writes, or have its administrator change the mode."
+        }
         CheckCode::SchemaSnapshotInvalid => {
-            "The recovery point's schema snapshot is missing from the archive or is not the one \
-             its signed receipt names. Restore another point, or restore into a connection \
-             without a registry (the schemas are then not imported)."
+            "The recovery point's schema snapshot is missing from the archive, is not the one \
+             its signed receipt names, or comes from a receipt this restore cannot verify (a \
+             plan from a Backup with no catalog point). Plan the restore from a catalog point, \
+             restore another point, or restore into a connection without a registry (the \
+             schemas are then not imported)."
         }
         // -- switchoverReadiness (PROD-04.2 §3.8) --------------------------
         CheckCode::RestoreEvidenceRefused => switchover::EVIDENCE_REMEDY,
@@ -570,8 +577,9 @@ pub fn remedy_for(code: CheckCode) -> &'static str {
              prerequisite reported beside it."
         }
         CheckCode::WriteNotProbed => {
-            "This destination has no create-only write probe configured, so the grant is \
-             verified only when a run executes."
+            "This check did not write a create-only marker (the destination configures no \
+             write probe, or the check, like a restore's readiness check, never writes), so \
+             the grant is verified only when a run executes."
         }
         CheckCode::EvidenceReadNotConfigured => {
             "No evidence-read grant a check pod can hold is configured (none at all, or the \
