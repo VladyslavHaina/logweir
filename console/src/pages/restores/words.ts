@@ -245,7 +245,7 @@ export const QUEUED_RUN_SENTENCE =
   "Queued: this manual restore waits for a slot in the workspace's manual-restore pool and starts, in creation order, when one finishes. Nothing has been created for it yet. The queue does not extend its approval: a restore still waiting when the approval expires is refused and must be confirmed again.";
 
 export const RETRY_IDENTITY_SENTENCE =
-  "The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
+  "It starts from the retried run's recovery point, target connection and byte-rate limit, each of which you may change. The topic prefix is a fresh one derived from the run being retried, so every target topic name is new and nothing the failed run created is written to. A different prefix is a different plan, plan hash and minted Restore and Approval names: the approval that authorised the failed run is not reused and cannot be (the controller refuses it with PlanHashMismatch). Where the policy asks for one, this restore waits for an approval of its own.";
 
 export const RETRY_OLD_RUN_SENTENCE =
   "The failed restore is not touched: its object, its evidence and the topics it had already created stay as they are. Resume is not implemented; this is a new run from the beginning.";

@@ -58,7 +58,9 @@ import {
   type WizardContext,
   type WizardValues,
 } from "./model";
-import { CheckStep, PointStep, ReviewStep, TargetStep, WhatStep, Resolution as ResolutionView, offerKeyOf, pointKeyOf, type ReadinessState } from "./WizardSteps";
+import { CheckStep, PointStep, ReviewStep, TargetStep, WhatStep, Resolution as ResolutionView, offerKeyOf, pointKeyOf, type Offer, type ReadinessState } from "./WizardSteps";
+import { useRestore } from "../../api/queries";
+import { planRateLimit } from "./words";
 import { Coded, WriteProblem } from "./parts";
 import { TOPIC_CONFIGURATION_CHECK, TopicConfigurationPreview, topicPreviewLines } from "../cutover/TopicConfiguration";
 import { usePreflightDetails } from "../../api/switchovers";
@@ -156,6 +158,26 @@ const BLANK: WizardValues = {
 };
 
 const FOLLOW_DEADLINE_MS = 12 * 60_000;
+
+/**
+ * DUI-59: what a retry keeps of the run it retries: the same recovery point (its catalog
+ * point when the plan was bound to one, otherwise the Backup of its set), the same target
+ * connection and the same byte-rate limit. Only the prefix is new (`freshTargetPrefix`).
+ */
+export function retryPrefill(
+  retried: { backupSetRef: string; target: { clusterRef: { name: string } }; planBytes?: string | null },
+  points: { uid: string; backupId?: string | null }[],
+  offers: Offer[],
+  targets: { name: string }[],
+): { pointKey: string; target: string; rateLimit: string } {
+  const pointId = /^\s+point_id:\s*"?(lwp1-[0-9a-f]{32})"?\s*$/m.exec(retried.planBytes ?? "")?.[1];
+  const offer = pointId ? offers.find((o) => o.entry.pointId === pointId) : undefined;
+  const backup = points.find((b) => b.backupId === retried.backupSetRef);
+  const pointKey = offer ? offerKeyOf(offer) : backup ? `backup/${backup.uid}` : "";
+  const target = targets.some((t) => t.name === retried.target.clusterRef.name) ? retried.target.clusterRef.name : "";
+  const rate = planRateLimit(retried.planBytes);
+  return { pointKey, target, rateLimit: rate === null ? "" : String(rate / 1_000_000) };
+}
 
 export function RestoreWizard() {
   const { ws } = useParams({ from: "/$ws/restores/new" });
@@ -270,6 +292,18 @@ function WizardBody({
   );
   const form = useForm<WizardValues>({ resolver: zodResolver(schema), mode: "onChange", defaultValues: { ...BLANK, pointKey: initialKey, target: targets[0]?.name ?? "" } });
   const values = useWatch({ control: form.control }) as WizardValues;
+
+  // DUI-59: a retry starts from the retried run's point, target and rate limit, once they are read.
+  const retried = useRestore(ws, retryOf);
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (!retryOf || prefilled.current || !retried.data || offers.isPending) return;
+    prefilled.current = true;
+    const fill = retryPrefill(retried.data, recoveryPoints(backups), offers.data?.offers ?? [], targets);
+    if (fill.target) form.setValue("target", fill.target);
+    if (fill.rateLimit) form.setValue("rateLimit", fill.rateLimit);
+    if (fill.pointKey) form.setValue("pointKey", fill.pointKey, { shouldValidate: true });
+  }, [retryOf, retried.data, offers.isPending, offers.data, backups, targets, form]);
 
   // --------------------------------------------------------- the chosen point
   const chosenBackup = backups.find((b) => pointKeyOf(b) === values.pointKey) ?? null;
