@@ -39,7 +39,8 @@ concurrency:
 # (sections 5 and 12) records the evidence.
 jobs:
   matrix:
-    timeout-minutes: 60
+    # The full drill is the whole e2e suite on one runner: about 75 minutes on 4.3.1.
+    timeout-minutes: 120
     runs-on: ubuntu-24.04
     env:
       AWS_EC2_METADATA_DISABLED: "true"

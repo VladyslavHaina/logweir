@@ -14,7 +14,7 @@ re-derives the expected set from `Cargo.lock` and fails naming any `name@version
 this file has lost, so a hand edit is caught by a test that reads the lockfile
 rather than this document.
 
-**Packages in the resolved graph: 403.**
+**Packages in the resolved graph: 408.**
 
 ## What this file is, and what `deny.toml` is
 
@@ -61,8 +61,8 @@ attributed in [NOTICE](NOTICE) instead.
 
 | arm | entries |
 |---|---|
-| licence file | 305 |
-| `authors` field | 68 |
+| licence file | 312 |
+| `authors` field | 66 |
 | neither; the fact is stated | 16 |
 | this workspace | 14 |
 
@@ -334,11 +334,11 @@ S3 server.
 - Copyright: Copyright 2021 Datafuse Labs
 - Copyright source: licence file
 
-### base16ct@0.2.0
+### base16ct@1.0.0
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
-- Copyright: Copyright (c) 2022 The RustCrypto Project Developers
+- Copyright: Copyright (c) 2022-2025 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### base64@0.22.1
@@ -352,12 +352,6 @@ S3 server.
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2014 Steve "Sc00bz" Thomas (steve at tobtu dot com)
 - Copyright: Copyright (c) 2021-2025 The RustCrypto Project Developers
-- Copyright source: licence file
-
-### bindgen@0.72.1
-
-- SPDX: `BSD-3-Clause`
-- Copyright: Copyright (c) 2013, Jyun-Yan You
 - Copyright source: licence file
 
 ### bitflags@2.13.1
@@ -402,12 +396,6 @@ S3 server.
 - Copyright: Copyright (c) 2014 Alex Crichton
 - Copyright source: licence file
 
-### cexpr@0.6.0
-
-- SPDX: `Apache-2.0/MIT`
-- Copyright: Jethro Beekman <jethro@jbeekman.nl>
-- Copyright source: `authors` field
-
 ### cfg-if@1.0.4
 
 - SPDX: `MIT OR Apache-2.0`
@@ -439,12 +427,6 @@ S3 server.
 - Copyright: Copyright 2016 Djzin
 - Copyright source: licence file
 
-### clang-sys@1.9.1
-
-- SPDX: `Apache-2.0`
-- Copyright: Kyle Mayes <kyle@mayeses.com>
-- Copyright source: `authors` field
-
 ### clap@4.5.40
 
 - SPDX: `MIT OR Apache-2.0`
@@ -475,6 +457,12 @@ S3 server.
 - Copyright: Copyright (c) 2014 Alex Crichton
 - Copyright source: licence file
 
+### cmov@0.5.4
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2022-2026 The RustCrypto Project Developers
+- Copyright source: licence file
+
 ### colorchoice@1.0.5
 
 - SPDX: `MIT OR Apache-2.0`
@@ -493,6 +481,12 @@ S3 server.
 - Copyright: Copyright (c) 2017 Armin Ronacher <armin.ronacher@active-4.com>
 - Copyright source: licence file
 
+### const-oid@0.10.2
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2020-2026 The RustCrypto Project Developers
+- Copyright source: licence file
+
 ### const-oid@0.9.6
 
 - SPDX: `Apache-2.0 OR MIT`
@@ -509,6 +503,12 @@ S3 server.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2012-2013 Mozilla Foundation
+- Copyright source: licence file
+
+### cpubits@0.1.1
+
+- SPDX: `MIT OR Apache-2.0`
+- Copyright: Copyright (c) 2023-2026 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### cpufeatures@0.2.17
@@ -535,10 +535,10 @@ S3 server.
 - Copyright: Copyright (c) 2018 Sam Rijs, Alex Crichton and contributors
 - Copyright source: licence file
 
-### crypto-bigint@0.5.5
+### crypto-bigint@0.7.10
 
 - SPDX: `Apache-2.0 OR MIT`
-- Copyright: Copyright (c) 2021 The RustCrypto Project Developers
+- Copyright: Copyright (c) 2021-2026 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### crypto-common@0.1.7
@@ -551,6 +551,12 @@ S3 server.
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2021-2026 RustCrypto Developers
+- Copyright source: licence file
+
+### ctutils@0.4.8
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2025-2026 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### curve25519-dalek@4.1.3
@@ -589,6 +595,12 @@ S3 server.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2020-2023 The RustCrypto Project Developers
+- Copyright source: licence file
+
+### der@0.8.3
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2020-2026 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### digest@0.10.7
@@ -634,11 +646,11 @@ S3 server.
 - Copyright: Copyright 2026 The Logweir Authors
 - Copyright source: this workspace
 
-### ecdsa@0.16.9
+### ecdsa@0.17.0
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright 2018-2022 RustCrypto Developers
-- Copyright: Copyright (c) 2018-2022 RustCrypto Developers
+- Copyright: Copyright (c) 2018-2026 RustCrypto Developers
 - Copyright source: licence file
 
 ### ed25519@2.2.3
@@ -666,10 +678,10 @@ S3 server.
 - Copyright: Copyright (c) 2015
 - Copyright source: licence file
 
-### elliptic-curve@0.13.8
+### elliptic-curve@0.14.3
 
 - SPDX: `Apache-2.0 OR MIT`
-- Copyright: Copyright (c) 2020-2022 RustCrypto Developers
+- Copyright: Copyright (c) 2020-2026 RustCrypto Developers
 - Copyright source: licence file
 
 ### encode_unicode@1.0.0
@@ -720,7 +732,7 @@ S3 server.
 - Copyright: Stjepan Glavina <stjepang@gmail.com>
 - Copyright source: `authors` field
 
-### ff@0.13.1
+### ff@0.14.0
 
 - SPDX: `MIT/Apache-2.0`
 - Copyright: Copyright (c) 2017 Sean Bowe
@@ -860,19 +872,13 @@ S3 server.
 - Copyright: Copyright (c) 2014 The Rust Project Developers
 - Copyright source: licence file
 
-### glob@0.3.4
-
-- SPDX: `MIT OR Apache-2.0`
-- Copyright: Copyright (c) 2014 The Rust Project Developers
-- Copyright source: licence file
-
 ### gloo-timers@0.3.0
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Rust and WebAssembly Working Group
 - Copyright source: `authors` field
 
-### group@0.13.0
+### group@0.14.0
 
 - SPDX: `MIT/Apache-2.0`
 - Copyright: Sean Bowe <ewillbefull@gmail.com>, Jack Grigg <jack@z.cash>
@@ -922,6 +928,12 @@ S3 server.
 - Copyright source: licence file
 
 ### hmac@0.12.1
+
+- SPDX: `MIT OR Apache-2.0`
+- Copyright: Copyright (c) 2017 Artyom Pavlov
+- Copyright source: licence file
+
+### hmac@0.13.0
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2017 Artyom Pavlov
@@ -1116,12 +1128,6 @@ S3 server.
 - Copyright: Copyright (c) Individual contributors
 - Copyright source: licence file
 
-### itertools@0.13.0
-
-- SPDX: `MIT OR Apache-2.0`
-- Copyright: Copyright (c) 2015
-- Copyright source: licence file
-
 ### itertools@0.15.0
 
 - SPDX: `MIT OR Apache-2.0`
@@ -1237,13 +1243,7 @@ S3 server.
 - Copyright: Copyright (c) The Rust Project Developers
 - Copyright source: licence file
 
-### libloading@0.8.9
-
-- SPDX: `ISC`
-- Copyright: Copyright © 2015, Simonas Kazlauskas
-- Copyright source: licence file
-
-### libz-sys@1.1.29
+### libz-sys@1.1.32
 
 - SPDX: `MIT OR Apache-2.0`
 - Copyright: Copyright (c) 2014 Alex Crichton
@@ -1386,12 +1386,6 @@ S3 server.
 - Copyright: Copyright (c) 2014 Sean McArthur
 - Copyright source: licence file
 
-### minimal-lexical@0.2.1
-
-- SPDX: `MIT/Apache-2.0`
-- Copyright: Copyright (c) 2009 The Go Authors. All rights reserved.
-- Copyright source: licence file
-
 ### miniz_oxide@0.9.1
 
 - SPDX: `MIT OR Zlib OR Apache-2.0`
@@ -1412,12 +1406,6 @@ S3 server.
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) 2015 Carl Lerche + nix-rust Authors
-- Copyright source: licence file
-
-### nom@7.1.3
-
-- SPDX: `MIT`
-- Copyright: Copyright (c) 2014-2019 Geoffroy Couprie
 - Copyright source: licence file
 
 ### nu-ansi-term@0.50.3
@@ -1487,10 +1475,10 @@ S3 server.
 - Copyright: Jack O'Connor
 - Copyright source: `authors` field
 
-### p256@0.13.2
+### p256@0.14.0
 
 - SPDX: `Apache-2.0 OR MIT`
-- Copyright: Copyright (c) 2020-2023 RustCrypto Developers
+- Copyright: Copyright (c) 2020-2026 RustCrypto Developers
 - Copyright source: licence file
 
 ### parking@2.2.1
@@ -1521,6 +1509,12 @@ S3 server.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2021 The RustCrypto Project Developers
+- Copyright source: licence file
+
+### pem-rfc7468@1.0.0
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2021-2025 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### percent-encoding@2.3.2
@@ -1589,6 +1583,12 @@ S3 server.
 - Copyright: Copyright (c) 2020-2023 The RustCrypto Project Developers
 - Copyright source: licence file
 
+### pkcs8@0.11.0
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2020-2026 The RustCrypto Project Developers
+- Copyright source: licence file
+
 ### pkg-config@0.3.34
 
 - SPDX: `MIT OR Apache-2.0`
@@ -1608,7 +1608,13 @@ S3 server.
 - Copyright: Copyright (c) 2019 The CryptoCorrosion Contributors
 - Copyright source: licence file
 
-### primeorder@0.13.6
+### primefield@0.14.0
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2024-2026 RustCrypto Developers
+- Copyright source: licence file
+
+### primeorder@0.14.0
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2020-2023 RustCrypto Developers
@@ -1759,11 +1765,11 @@ S3 server.
 - Copyright: Copyright (c) 2016-2026 Sean McArthur
 - Copyright source: licence file
 
-### rfc6979@0.4.0
+### rfc6979@0.6.0
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright 2018-2022 RustCrypto Developers
-- Copyright: Copyright (c) 2018-2022 RustCrypto Developers
+- Copyright: Copyright (c) 2018-2026 RustCrypto Developers
 - Copyright source: licence file
 
 ### ring@0.17.14
@@ -1825,7 +1831,7 @@ S3 server.
 - Copyright: no copyright statement in the published crate; SPDX MIT OR Apache-2.0 applies
 - Copyright source: neither; the fact is stated
 
-### rustls-webpki@0.103.15
+### rustls-webpki@0.103.16
 
 - SPDX: `ISC`
 - Copyright: Copyright 2015 Brian Smith.
@@ -1879,10 +1885,10 @@ S3 server.
 - Copyright: Copyright (c) 2016-2019 Ulrik Sverdrup "bluss" and scopeguard developers
 - Copyright source: licence file
 
-### sec1@0.7.3
+### sec1@0.8.1
 
 - SPDX: `Apache-2.0 OR MIT`
-- Copyright: Copyright (c) 2021-2022 The RustCrypto Project Developers
+- Copyright: Copyright (c) 2021-2026 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### secrecy@0.10.3
@@ -1957,6 +1963,12 @@ S3 server.
 - Copyright: David Tolnay <dtolnay@gmail.com>
 - Copyright source: `authors` field
 
+### serdect@0.4.3
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2022-2025 The RustCrypto Project Developers
+- Copyright source: licence file
+
 ### sha1@0.10.7
 
 - SPDX: `MIT OR Apache-2.0`
@@ -1973,6 +1985,15 @@ S3 server.
 - Copyright: Copyright (c) 2016 Artyom Pavlov
 - Copyright source: licence file
 
+### sha2@0.11.1
+
+- SPDX: `MIT OR Apache-2.0`
+- Copyright: Copyright (c) 2016-2026 The RustCrypto Project Developers
+- Copyright: Copyright (c) 2016 Artyom Pavlov
+- Copyright: Copyright (c) 2009-2013 Mozilla Foundation
+- Copyright: Copyright (c) 2006-2009 Graydon Hoare
+- Copyright source: licence file
+
 ### sharded-slab@0.1.7
 
 - SPDX: `MIT`
@@ -1984,13 +2005,6 @@ S3 server.
 - SPDX: `MIT`
 - Copyright: no copyright statement in the published crate; SPDX MIT applies
 - Copyright source: neither; the fact is stated
-
-### shlex@1.3.0
-
-- SPDX: `MIT OR Apache-2.0`
-- Copyright: Copyright 2015 Nicholas Allegra (comex).
-- Copyright: Copyright (c) 2015 Nicholas Allegra (comex).
-- Copyright source: licence file
 
 ### shlex@2.0.1
 
@@ -2021,6 +2035,12 @@ S3 server.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2018-2023 RustCrypto Developers
+- Copyright source: licence file
+
+### signature@3.0.0
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2018-2026 RustCrypto Developers
 - Copyright source: licence file
 
 ### simd-adler32@0.3.10
@@ -2081,6 +2101,12 @@ S3 server.
 
 - SPDX: `Apache-2.0 OR MIT`
 - Copyright: Copyright (c) 2021-2023 The RustCrypto Project Developers
+- Copyright source: licence file
+
+### spki@0.8.1
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2021-2026 The RustCrypto Project Developers
 - Copyright source: licence file
 
 ### stable_deref_trait@1.2.1
@@ -2183,7 +2209,7 @@ S3 server.
 - Copyright: Copyright (c) 2020 Soveu
 - Copyright source: licence file
 
-### tokio@1.53.1
+### tokio@1.54.1
 
 - SPDX: `MIT`
 - Copyright: Copyright (c) Tokio Contributors
@@ -2452,7 +2478,7 @@ S3 server.
 - Copyright: Copyright (c) 2023 dAxpeDDa
 - Copyright source: licence file
 
-### webpki-root-certs@1.0.9
+### webpki-root-certs@1.0.11
 
 - SPDX: `CDLA-Permissive-2.0`
 - Copyright: no copyright statement in the published crate; SPDX CDLA-Permissive-2.0 applies
@@ -2464,7 +2490,7 @@ S3 server.
 - Copyright: no copyright statement in the published crate; SPDX CDLA-Permissive-2.0 applies
 - Copyright source: neither; the fact is stated
 
-### webpki-roots@1.0.9
+### webpki-roots@1.0.11
 
 - SPDX: `CDLA-Permissive-2.0`
 - Copyright: no copyright statement in the published crate; SPDX CDLA-Permissive-2.0 applies
@@ -2596,6 +2622,13 @@ S3 server.
 - Copyright: Alex Crichton <alex@alexcrichton.com>
 - Copyright source: `authors` field
 
+### wnaf@0.14.1
+
+- SPDX: `Apache-2.0 OR MIT`
+- Copyright: Copyright (c) 2026 RustCrypto Developers
+- Copyright: Copyright (c) 2018-2025 \`group\` crate developers
+- Copyright source: licence file
+
 ### writeable@0.6.4
 
 - SPDX: `Unicode-3.0`
@@ -2682,23 +2715,23 @@ S3 server.
 - Copyright: David Tolnay <dtolnay@gmail.com>
 - Copyright source: `authors` field
 
-### zstd@0.13.3
+### zstd@0.13.4
 
-- SPDX: `MIT`
-- Copyright: Copyright (c) 2016 Alexandre Bury
+- SPDX: `BSD-3-Clause`
+- Copyright: Copyright (c) 2026, Alexandre Bury
 - Copyright source: licence file
 
-### zstd-safe@7.2.4
+### zstd-safe@7.4.0
 
-- SPDX: `MIT OR Apache-2.0`
-- Copyright: Copyright (c) 2016 Alexandre Bury
+- SPDX: `BSD-3-Clause`
+- Copyright: Copyright (c) 2026, Alexandre Bury
 - Copyright source: licence file
 
-### zstd-sys@2.0.16+zstd.1.5.7
+### zstd-sys@2.1.2+zstd.1.5.7
 
-- SPDX: `MIT/Apache-2.0`
-- Copyright: Copyright (c) 2016-present, Facebook, Inc. All rights reserved.
-- Copyright: Copyright (c) 2016 Alexandre Bury
+- SPDX: `BSD-3-Clause`
+- Copyright: Copyright (c) 2026, Alexandre Bury
+- Copyright: Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
 - Copyright source: licence file
 
 ---

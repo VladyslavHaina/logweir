@@ -1,5 +1,7 @@
 use crate::Error;
-use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, LineEnding};
+// p256 and ed25519-dalek sit on different pkcs8 majors: each needs its own traits.
+use ed25519_dalek::pkcs8::{DecodePrivateKey as _, EncodePrivateKey as _};
+use p256::pkcs8::{DecodePrivateKey as _, EncodePrivateKey as _};
 use std::path::Path;
 
 /// `VerifyingKey` and its entire inherent `impl` block live in
@@ -37,7 +39,8 @@ pub enum KeyOrigin {
 
 impl SigningKey {
     pub fn generate_p256() -> Self {
-        SigningKey::P256(p256::ecdsa::SigningKey::random(&mut rand_core::OsRng))
+        use p256::elliptic_curve::Generate as _;
+        SigningKey::P256(p256::ecdsa::SigningKey::generate())
     }
 
     pub fn generate_ed25519() -> Self {
@@ -124,10 +127,10 @@ impl SigningKey {
     pub fn to_pkcs8_pem(&self) -> Result<String, Error> {
         let pem = match self {
             SigningKey::P256(k) => k
-                .to_pkcs8_pem(LineEnding::LF)
+                .to_pkcs8_pem(p256::pkcs8::LineEnding::LF)
                 .map_err(|e| Error::Key(e.to_string()))?,
             SigningKey::Ed25519(k) => k
-                .to_pkcs8_pem(LineEnding::LF)
+                .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
                 .map_err(|e| Error::Key(e.to_string()))?,
         };
         Ok(pem.to_string())

@@ -10,8 +10,9 @@ name: ci-trace
 # an index; a run proves a gate only from ci.yml (directly, or called by
 # release.yml or ci-nightly.yml), where the gate's own job passed on a commit
 # whose tree gives the same hash. The accepting path is a unit row
-# (scripts/test-ci-gate.py) and is proven live once ci.yml's gates use the
-# action (FX-53 stage 4).
+# (scripts/test-ci-gate.py), and live whenever ci.yml left a marker for this
+# tree: the second lookup then refuses this run's newer marker and accepts
+# ci.yml's. The gate step is forced, so this job records its marker even then.
 #
 # THE TRACED RUN (weekly, and on dispatch). Every gate that can skip runs its
 # own command under strace (scripts/ci-trace.py run): each check gate (lint,
@@ -65,7 +66,7 @@ jobs:
           python3 scripts/test-ci-trace.py
       - id: gate
         uses: ./.github/actions/gate
-        with: { gate: docs }
+        with: { gate: docs, force: "true" }
       - name: The action ran the gate and named its inputs
         env:
           HIT: ${{ steps.gate.outputs.hit }}
@@ -73,7 +74,7 @@ jobs:
           RUSTUP_TOOLCHAIN: stable
         run: |
           echo "hit=$HIT proof-run=$PROOF hash=$CI_GATE_HASH"
-          [ "$HIT" = false ] || { echo "no ci.yml marker exists yet, so docs must run" >&2; exit 1; }
+          [ "$HIT" = false ] || { echo "the gate was forced, so docs must run" >&2; exit 1; }
           [[ "$CI_GATE_HASH" =~ ^[0-9a-f]{64}$ ]] || { echo "the action named no hash" >&2; exit 1; }
           want="$(bash scripts/ci-gate.sh hash docs)"
           [ "$want" = "$CI_GATE_HASH" ] || { echo "hash $CI_GATE_HASH, want $want" >&2; exit 1; }
@@ -89,7 +90,7 @@ jobs:
             rc=0
             bash scripts/ci-gate.sh lookup docs "$CI_GATE_HASH" > lookup.out 2> lookup.err || rc=$?
             cat lookup.out lookup.err
-            if [ "$rc" -eq 0 ]; then
+            if [ "$rc" -eq 0 ] && grep -q "^proof-run=.*/actions/runs/$GITHUB_RUN_ID$" lookup.out; then
               echo "a marker from ci-trace.yml proved a gate" >&2
               exit 1
             fi
