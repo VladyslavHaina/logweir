@@ -32,7 +32,8 @@
 //! `0.23.3+logweir.5`, OD-23's patches 0004 to 0007: committed-only capture
 //! (the TXN row, EN-1), idempotent restore produce (the lost-acknowledgement
 //! row, EN-2), repeated header keys kept (the shapes row, EN-3) and one
-//! byte-rate limit on a restore (EN-4)): the
+//! byte-rate limit on a restore (EN-4); re-run on build
+//! `0.23.3+logweir.6`, patch 0001's lockfile past RUSTSEC-2026-0381 to -0403): the
 //! known counterexamples, stated exactly. They are not desired behaviour.
 //! When the engine changes the row goes red and the contract and this file
 //! change together.
@@ -469,6 +470,8 @@ fn kill_own_restores() {
 /// engine's rustls to 0.23.46; these rows re-ran on it), and build 5,
 /// `0.23.3+logweir.5` (patches 0004 to 0007 change the TXN, shapes and
 /// lost-acknowledgement contracts and add the byte-rate row; these rows re-ran
+/// on it), and build 6, `0.23.3+logweir.6` (patch 0001 moves the engine's
+/// lockfile past RUSTSEC-2026-0381 to -0403; CI's e2e job re-runs these rows
 /// on it), which is the engine the images ship and
 /// CI's e2e job runs (OSO's 0.23.3 release now records outcomes like any other
 /// engine-matrix row). `crates/logweir/tests/engine_pin.rs`
@@ -477,7 +480,7 @@ fn kill_own_restores() {
 /// nothing. That guard runs in CI's workspace job and never in this package:
 /// `engine-matrix` runs this package with each row's own engine, so nothing
 /// here may compare the engine with the pin.
-const CONTRACT_ENGINE: &str = "0.23.3+logweir.5";
+const CONTRACT_ENGINE: &str = "0.23.3+logweir.6";
 
 fn contract_applies(row: &str) -> bool {
     let v = engine_version();
