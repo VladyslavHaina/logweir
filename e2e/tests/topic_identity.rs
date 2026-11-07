@@ -2682,6 +2682,17 @@ mod live {
         assert_modes(&m, Verdict::Unverified, Verdict::Continuous, &run1, &run2);
     }
 
+    /// c11 and c18 assert what Logweir's engine builds archive; engine-matrix
+    /// also runs this file with OSO's releases, which archive otherwise.
+    fn skipped_on_oso_engine() -> bool {
+        let v = engine_version();
+        if v.contains("+logweir.") {
+            return false;
+        }
+        eprintln!("SKIPPED on engine {v}: this row asserts what Logweir's engine builds archive");
+        true
+    }
+
     /// c11 (negative control): an open transaction during and after both
     /// captures. The engine archives committed records only, up to the last
     /// stable offset (build 5, PROD-00.3a), so the open transaction's records
@@ -2691,6 +2702,9 @@ mod live {
     /// as a regression, which is why the rule reads every mark the same way.
     #[test]
     fn c11_an_open_transaction_needs_read_uncommitted_marks() {
+        if skipped_on_oso_engine() {
+            return;
+        }
         let mut c = Case::start("c11");
         c.create(1, PLAIN);
         let ts0 = now_ms() - 60_000;
@@ -2944,6 +2958,9 @@ mod live {
     /// kept one entry per key).
     #[test]
     fn c18_a_repeated_header_key_is_kept_so_a_source_read_agrees() {
+        if skipped_on_oso_engine() {
+            return;
+        }
         let mut c = Case::start("c18");
         c.create(1, PLAIN);
         let mut records = recs(1, 10, "g1", now_ms() - 60_000);
