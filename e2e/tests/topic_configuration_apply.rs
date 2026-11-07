@@ -120,6 +120,17 @@ fn line() -> &'static str {
     }
 }
 
+/// engine-matrix runs the whole suite on the legacy 3.7.1 line, which is
+/// neither of the module doc's two sessions: a 4.x row says so and passes.
+fn skipped_on_3_7() -> bool {
+    let v = std::env::var("KAFKA_VERSION").unwrap_or_default();
+    if !v.starts_with("3.7") {
+        return false;
+    }
+    eprintln!("SKIPPED on Kafka {v}: this row asserts the 4.x line's topic configuration");
+    true
+}
+
 fn require_line(want: &str) {
     assert_eq!(
         line(),
@@ -1124,6 +1135,9 @@ fn c21_fewer_target_brokers_bound_the_factor_and_cap_min_insync() {
 /// **C22**: compaction after a complete verification.
 #[test]
 fn c22_compaction_is_applied_after_a_complete_verification() {
+    if skipped_on_3_7() {
+        return;
+    }
     require_line("4.x");
     let s = stack();
     let n = nonce();
@@ -1454,6 +1468,9 @@ fn c25_settings_never_applied_are_listed_and_a_denied_read_is_not_recorded() {
 /// **C26**: owners.
 #[test]
 fn c26_an_owned_topic_is_exported_and_its_neighbour_transitioned() {
+    if skipped_on_3_7() {
+        return;
+    }
     require_line("4.x");
     let s = stack();
     let n = nonce();
