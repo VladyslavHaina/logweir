@@ -1,5 +1,7 @@
 use crate::Error;
-use p256::pkcs8::{DecodePublicKey, EncodePublicKey, LineEnding};
+// p256 and ed25519-dalek sit on different pkcs8/spki majors: each needs its own traits.
+use ed25519_dalek::pkcs8::{DecodePublicKey as _, EncodePublicKey as _};
+use p256::pkcs8::{DecodePublicKey as _, EncodePublicKey as _};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 
@@ -81,10 +83,10 @@ impl VerifyingKey {
     pub fn to_public_key_pem(&self) -> Result<String, Error> {
         let pem = match self {
             VerifyingKey::P256(k) => k
-                .to_public_key_pem(LineEnding::LF)
+                .to_public_key_pem(p256::pkcs8::LineEnding::LF)
                 .map_err(|e| Error::Key(e.to_string()))?,
             VerifyingKey::Ed25519(k) => k
-                .to_public_key_pem(LineEnding::LF)
+                .to_public_key_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
                 .map_err(|e| Error::Key(e.to_string()))?,
         };
         Ok(pem)

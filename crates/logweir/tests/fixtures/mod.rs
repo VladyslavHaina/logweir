@@ -648,15 +648,7 @@ fn approval_fixture(self_attested: bool) -> ApprovalFixture {
 }
 
 pub fn write_pub(k: &logweir_evidence::keys::SigningKey, to: &std::path::Path) {
-    use p256::pkcs8::EncodePublicKey;
-    match k.verifying_key() {
-        logweir_evidence::keys::VerifyingKey::P256(v) => {
-            std::fs::write(to, v.to_public_key_pem(Default::default()).unwrap()).unwrap()
-        }
-        logweir_evidence::keys::VerifyingKey::Ed25519(v) => {
-            std::fs::write(to, v.to_public_key_pem(Default::default()).unwrap()).unwrap()
-        }
-    }
+    std::fs::write(to, k.verifying_key().to_public_key_pem().unwrap()).unwrap()
 }
 
 /// Approver key != signing key.

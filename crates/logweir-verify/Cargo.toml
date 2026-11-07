@@ -31,12 +31,12 @@ license.workspace = true
 base64.workspace = true
 # NO `rand_core` feature: that is the signing half's entropy source. `pkcs8`
 # is what `from_public_key_pem` / `to_public_key_der` need.
-ed25519-dalek = { version = "2", features = ["pkcs8"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
 # `key_id`'s hex of the SPKI DER digest.
 hex.workspace = true
 # `pem` is what `to_public_key_pem` needs; `pkcs8` backs the SPKI DER used by
 # `key_id`; `ecdsa` is the P-256 signature type `verify_detached` checks.
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "pem"] }
 # `Sidecar`/`Signature` are the on-disk sidecar shape.
 serde.workspace = true
 # `tests/deps.rs` reads `cargo metadata --no-deps` JSON to assert the crate

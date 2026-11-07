@@ -69,7 +69,6 @@ webpki-roots = "0.26"
 [dev-dependencies]
 insta.workspace = true
 logweir-engine-oso = { path = "../logweir-engine-oso" }
-p256 = { version = "0.13", features = ["pkcs8", "pem"] }
 serde_json.workspace = true
 tempfile = "3"
 # PROD-03.0: `tests/schema_dependency_*.rs` write zstd-compressed KBAK segments

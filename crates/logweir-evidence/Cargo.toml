@@ -15,8 +15,8 @@ logweir-verify = { path = "../logweir-verify" }
 base64.workspace = true
 # `rand_core` stays a FEATURE of the signing half: `SigningKey::generate_*`
 # needs `ed25519_dalek::SigningKey::generate(&mut OsRng)`.
-ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8", "pem"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+p256 = { version = "0.14", features = ["ecdsa", "getrandom", "pkcs8", "pem"] }
 # THE LINE THE SPLIT IS ABOUT. This is the signer's entropy source, and
 # `crates/logweir-verify/Cargo.toml` deliberately does not declare it.
 rand_core = { version = "0.6", features = ["getrandom"] }
