@@ -282,13 +282,13 @@ fn one_signer_script_detects_a_transitive_signer() {
 /// crate that reimplements ECDSA P-256 signing against the same primitive the
 /// evidence crate uses, without ever linking the evidence crate.
 ///
-/// The `"0.13"` requirement is the one `crates/logweir-evidence/Cargo.toml`
+/// The `"0.14"` requirement is the one `crates/logweir-evidence/Cargo.toml`
 /// carries; it resolves to the version already in `Cargo.lock`, so the overlay
 /// needs no network.
 #[test]
 fn one_signer_script_detects_a_direct_primitive_dependency() {
     let ov = Overlay::new("primitive");
-    ov.probe_raw("zz-one-signer-primitive-probe", "p256 = \"0.13\"", "");
+    ov.probe_raw("zz-one-signer-primitive-probe", "p256 = \"0.14\"", "");
     let out = ov.run_gate();
     let stderr = text(&out.stderr);
     let stdout = text(&out.stdout);
