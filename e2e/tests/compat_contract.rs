@@ -1068,7 +1068,7 @@ fn probe_lines(bootstrap: &str, auth: &Auth) -> (Option<i32>, BTreeMap<String, S
 
 /// FX-46: the plan the controller renders for a `SourceConnection` Preflight,
 /// the console's Test connection: the connection, and every capability row a
-/// connection test asks.
+/// connection test asks of a connection that names no Schema Registry.
 fn source_connection_plan(connection: ConnectionPlan) -> CheckPlan {
     CheckPlan {
         contract: CHECK_PLAN_CONTRACT.to_string(),
@@ -1078,9 +1078,21 @@ fn source_connection_plan(connection: ConnectionPlan) -> CheckPlan {
         policy_digest: None,
         request: CheckRequest::SourceConnection(SourceConnectionRequest {
             connection,
-            capability_checks: capability_checks_for(CheckOperation::SourceConnection).to_vec(),
+            capability_checks: without_registry_rows(capability_checks_for(
+                CheckOperation::SourceConnection,
+            )),
         }),
     }
+}
+
+/// What a controller lists for a connection that names no Schema Registry
+/// (every connection here): every capability row but the two registry rows
+/// (PROD-03.1/03.2), which it lists only beside a `schemaRegistry`.
+fn without_registry_rows(ids: &[CheckId]) -> Vec<CheckId> {
+    ids.iter()
+        .copied()
+        .filter(|id| !matches!(id, CheckId::RegistryReachable | CheckId::TargetSchemas))
+        .collect()
 }
 
 /// A simple classic consumer group with one committed position, made by a
@@ -3744,8 +3756,8 @@ fn an_unreachable_advertised_address_is_not_a_reachable_cluster() {
         (CheckState::NotReady, CheckCode::BrokerUnreachable),
         "{test_auth:?}"
     );
-    for id in capability_checks_for(CheckOperation::SourceConnection) {
-        let r = row(&tested, *id);
+    for id in without_registry_rows(capability_checks_for(CheckOperation::SourceConnection)) {
+        let r = row(&tested, id);
         assert_eq!(
             (r.state, r.code, r.gating),
             (
@@ -3763,7 +3775,7 @@ fn an_unreachable_advertised_address_is_not_a_reachable_cluster() {
             CheckOperation::Backup,
             auth.connection_plan(&bootstrap),
             &["orders"],
-            capability_checks_for(CheckOperation::Backup),
+            &without_registry_rows(capability_checks_for(CheckOperation::Backup)),
         ),
         None,
     );
@@ -3797,8 +3809,8 @@ fn an_unreachable_advertised_address_is_not_a_reachable_cluster() {
         "{}",
         authenticated.remedy
     );
-    for id in capability_checks_for(CheckOperation::Backup) {
-        let r = row(&result, *id);
+    for id in without_registry_rows(capability_checks_for(CheckOperation::Backup)) {
+        let r = row(&result, id);
         assert_eq!(
             (r.state, r.code),
             (CheckState::Unknown, CheckCode::BlockedByPrerequisite),

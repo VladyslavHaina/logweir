@@ -146,6 +146,31 @@ fn broker_exec(args: &[&str], what: &str) -> Output {
     o
 }
 
+/// A row that maps a group's positions needs a broker that types groups
+/// (ListGroups v5): 3.9 and 4.x do, 3.7.1 does not (PROD-04.0 §14.1), so a
+/// backup there captures no group and the plan names none. The weekly
+/// `engine-matrix` runs the whole suite on 3.7.1: such a row says so on
+/// stderr and returns.
+fn skipped_untyped() -> bool {
+    let out = broker_exec(
+        &["/opt/kafka/bin/kafka-topics.sh", "--version"],
+        "--version",
+    );
+    let version = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
+    if !version.starts_with("3.7") {
+        return false;
+    }
+    eprintln!(
+        "SKIPPED on Kafka {version}: this row needs a broker that types groups (3.9 or 4.x); \
+         here every group is excluded GroupTypeNotCaptured (PROD-04.0 §14.1)"
+    );
+    true
+}
+
 fn reader() -> logweir_kafka::rdkafka_reader::RdKafkaReader {
     harness::reader()
 }
@@ -903,6 +928,9 @@ fn restored_topic(r: &Restore, source: &str) -> String {
 /// **C1 (headline), C3, C8, C9, C17.**
 #[test]
 fn the_headline_a_paused_consumer_resumes_at_its_record() {
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-orders-{n}");
     let (app, caught, drained) = (
@@ -1169,6 +1197,9 @@ fn switchover_with_grants(
 /// committed, and its `Failed` record is still written by the write grant.
 #[test]
 fn d1_the_switchover_reads_with_the_read_grant_on_least_privilege() {
+    if skipped_untyped() {
+        return;
+    }
     let (writer, reader) = harness::least_privilege_evidence();
     let n = nonce();
     let topic = format!("sw-d1-{n}");
@@ -1270,6 +1301,9 @@ fn d1_the_switchover_reads_with_the_read_grant_on_least_privilege() {
 /// **C2 (4.3), C4, C5.**
 #[test]
 fn live_groups_are_refused_and_a_new_run_recovers() {
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-live-{n}");
     let gs: Vec<String> = ["g1", "g2", "classic", "kip848", "moved"]
@@ -1442,6 +1476,9 @@ fn live_groups_are_refused_and_a_new_run_recovers() {
 /// **C15.**
 #[test]
 fn a_rollback_restores_priors_and_is_refused_once_consumers_moved() {
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-rb-{n}");
     let g = format!("rb-{n}");
@@ -1553,6 +1590,9 @@ fn a_rollback_restores_priors_and_is_refused_once_consumers_moved() {
 /// **C10.**
 #[test]
 fn a_recreated_target_topic_is_refused() {
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-gen-{n}");
     let g = format!("gen-{n}");
@@ -1610,6 +1650,9 @@ fn a_recreated_target_topic_is_refused() {
 /// **C11.**
 #[test]
 fn only_a_passing_complete_restore_maps_positions() {
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-cov-{n}");
     let g = format!("cov-{n}");
@@ -1749,6 +1792,9 @@ fn only_a_passing_complete_restore_maps_positions() {
 /// **C6.**
 #[test]
 fn a_filtered_restore_maps_approximate_or_not_restored() {
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-win-{n}");
     let g = format!("win-{n}");
@@ -1871,6 +1917,9 @@ fn a_filtered_restore_maps_approximate_or_not_restored() {
 /// **C7.**
 #[test]
 fn a_compaction_hole_maps_to_the_next_record() {
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-cmp-{n}");
     let g = format!("cmp-{n}");
@@ -2282,6 +2331,9 @@ fn review_row(
 #[test]
 fn the_review_reads_every_position_before_the_switchover() {
     use logweir_core::check_contract::{CheckCode, CheckId, CheckState, Stream};
+    if skipped_untyped() {
+        return;
+    }
     let n = nonce();
     let topic = format!("sw-review-{n}");
     let app = format!("review-{n}");
